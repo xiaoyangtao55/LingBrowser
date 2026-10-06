@@ -40,6 +40,18 @@ class WebTabManager(private val context: Context) {
 
     private var settings: LingSettings = LingSettings()
 
+    /**
+     * tabId -> 已提取的正文。
+     *
+     * 为什么要缓存：进入阅读视图后，页面的 DOM 已经被替换掉了，
+     * 原文不再存在于 WebView 里。此时若用户调整字号，重新跑提取
+     * 只会得到"没有正文" —— 必须留一份原始结果用来重排版。
+     *
+     * 缓存随标签关闭 / 退出阅读模式清理，避免长期占内存
+     * （正文 HTML 通常几十 KB，几个标签累积起来也不小）。
+     */
+    private val readerContent = mutableMapOf<String, ReaderResult.Ok>()
+
     /** 需要 UI 层处理的副作用（打开外部应用、下载等）。 */
     var onExternalUri: ((Uri) -> Boolean)? = null
 
@@ -226,6 +238,8 @@ class WebTabManager(private val context: Context) {
      */
     private fun recycleTab(tab: TabState?) {
         tab?.favicon?.takeIf { !it.isRecycled }?.recycle()
+        // 一并丢掉缓存的正文，否则关掉的标签会一直把它压在内存里
+        tab?.let { readerContent.remove(it.id) }
     }
 
     /**
@@ -308,6 +322,131 @@ class WebTabManager(private val context: Context) {
         updateTab(id) { it.copy(url = url, errorText = null, isLoading = true, progress = 0) }
         wv.loadUrl(url)
     }
+
+    /**
+     * 进入阅读模式。
+     *
+     * 流程：在当前页面里跑提取脚本 → 解析结果 → 用 [ReaderPage] 重新渲染。
+     *
+     * 三个必须处理的现实情况：
+     *  1. **用户关掉了 JavaScript** —— 提取脚本根本不会执行，
+     *     `evaluateJavascript` 回调拿到 null。此时明确告诉用户原因，
+     *     而不是笼统说"不支持阅读模式"。
+     *  2. **页面不适合阅读**（首页/视频页/图片站）—— 这是正常情况，
+     *     提示要温和，不要像报错。
+     *  3. **主页与阅读视图自身** —— 不能对它们再提取，否则会递归。
+     *
+     * @param onResult 结果回调，供上层弹提示。成功时不调用（页面已经变了）。
+     */
+    fun enterReaderMode(onResult: (ReaderResult) -> Unit = {}) {
+        val id = _activeId.value
+        val wv = webViews[id] ?: return
+        val tab = _tabs.value.firstOrNull { it.id == id } ?: return
+
+        if (HomePage.isHomeUrl(wv.url) || ReaderPage.isReaderUrl(wv.url)) {
+            onResult(ReaderResult.NoContent("already_reader"))
+            return
+        }
+        if (!settings.javaScriptEnabled) {
+            // 阅读模式依赖注入脚本提取正文，没有 JS 就无法工作。
+            // 这条要和其他失败原因分开，因为用户自己能解决（去设置里打开）。
+            onResult(ReaderResult.Error("js_disabled"))
+            return
+        }
+
+        wv.evaluateJavascript(ReaderExtractorJs.SCRIPT) { raw ->
+            when (val result = ReaderResult.parse(raw)) {
+                is ReaderResult.Ok -> {
+                    readerContent[id] = result
+                    renderReader(id, result)
+                }
+                else -> onResult(result)
+            }
+        }
+    }
+
+    /**
+     * 用阅读视图替换当前页面。
+     *
+     * 与主页一样用 loadDataWithBaseURL：自包含、不联网、主题色由原生注入。
+     */
+    private fun renderReader(id: String, result: ReaderResult.Ok) {
+        val wv = webViews[id] ?: return
+        updateTab(id) {
+            it.copy(
+                url = ReaderPage.URL,
+                title = result.title.ifBlank { it.title },
+                errorText = null,
+                isLoading = false,
+                progress = 100,
+            )
+        }
+        wv.loadDataWithBaseURL(
+            ReaderPage.BASE_URL,
+            readerHtml(result),
+            "text/html",
+            "utf-8",
+            null,
+        )
+    }
+
+    /** 按当前主题与字号生成阅读视图 HTML。 */
+    private fun readerHtml(
+        result: ReaderResult.Ok,
+        fontSize: ReaderPage.FontSize = settings.readerFontSize,
+    ): String = ReaderPage.html(
+        title = result.title,
+        site = result.site,
+        url = result.url,
+        content = result.html,
+        background = homeColors.background,
+        onBackground = homeColors.onBackground,
+        primary = homeColors.primary,
+        onPrimary = homeColors.onPrimary,
+        primaryContainer = homeColors.primaryContainer,
+        onPrimaryContainer = homeColors.onPrimaryContainer,
+        dark = homeColors.dark,
+        fontPx = fontSize.px,
+    )
+
+    /**
+     * 用缓存的正文重排版阅读视图。
+     *
+     * 必须用**缓存下来的正文**，而不是重新跑一次提取 ——
+     * 那时页面已经被替换成阅读视图了，原始 DOM 早就没了，
+     * 重新提取只会得到"没有正文"。也没有必要再下一次网络。
+     *
+     * [fontSize] 显式传入而不是读 `settings.readerFontSize`：
+     * 设置是异步落盘的，调用方刚 `setReaderFontSize` 完就重绘时，
+     * `settings` 里很可能还是旧值 —— 表现为"改了字号没反应，
+     * 要再点一次才生效"。
+     */
+    fun refreshReaderFontSize(fontSize: ReaderPage.FontSize) {
+        val id = _activeId.value
+        val cached = readerContent[id] ?: return
+        val wv = webViews[id] ?: return
+        if (!ReaderPage.isReaderUrl(wv.url)) return
+        wv.loadDataWithBaseURL(
+            ReaderPage.BASE_URL,
+            readerHtml(cached, fontSize),
+            "text/html",
+            "utf-8",
+            null,
+        )
+    }
+
+    /** 退出阅读模式：回到原文。 */
+    fun exitReaderMode() {
+        val id = _activeId.value
+        val cached = readerContent[id] ?: return
+        readerContent.remove(id)
+        if (cached.url.isNotBlank()) {
+            loadUrl(id, cached.url)
+        }
+    }
+
+    /** 当前标签是否处于阅读视图。 */
+    fun isReaderActive(): Boolean = ReaderPage.isReaderUrl(activeTab?.url)
 
     /** 渲染内置主页。 */
     private fun loadHome(id: String, wv: LingWebView) {

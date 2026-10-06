@@ -11,10 +11,13 @@ import com.ling.browser.data.db.HistoryEntry
 import com.ling.browser.data.repo.deriveFolders
 import com.ling.browser.data.prefs.LingSettings
 import com.ling.browser.data.prefs.NightMode
+import com.ling.browser.data.prefs.ReaderFontSize
 import com.ling.browser.data.prefs.SearchEngine
 import com.ling.browser.data.prefs.TabsHeight
 import com.ling.browser.util.FaviconFetcher
 import com.ling.browser.util.UrlUtils
+import com.ling.browser.web.ReaderPage
+import com.ling.browser.web.ReaderResult
 import com.ling.browser.web.TabState
 import com.ling.browser.web.WebTabManager
 import kotlinx.coroutines.CoroutineScope
@@ -541,6 +544,72 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
     fun setRestoreSession(enabled: Boolean) {
         io { container.settings.setRestoreSession(enabled) }
         if (!enabled) clearSession()
+    }
+
+    // ------------------------------------------------------------ 阅读模式
+
+    /**
+     * 当前标签是否处于阅读视图（菜单文案要用）。
+     *
+     * ⚠️ 必须从 [tabs] 这个 StateFlow **派生**，不能写成
+     * `get() = tabManager.isReaderActive()` —— 那样它不是 Compose 状态，
+     * 进入阅读模式后菜单文案不会刷新，仍显示"阅读模式"而不是"退出阅读模式"。
+     * （`isReaderActive()` 本身是同步读取，只适合内部逻辑判断。）
+     */
+    val readerActive: StateFlow<Boolean> = tabs
+        .map { list -> list.firstOrNull { it.id == activeId.value }?.url }
+        .map { ReaderPage.isReaderUrl(it) }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    /**
+     * 进入阅读模式。
+     *
+     * 失败时才给提示 —— 成功的话页面已经变成阅读视图，用户看得见，
+     * 再弹一句"已进入阅读模式"纯属噪声。这是与"添加书签"不同的地方：
+     * 加书签的结果在页面上看不出来，所以那边成功也要提示。
+     */
+    fun enterReaderMode() {
+        tabManager.enterReaderMode { result ->
+            _message.value = when (result) {
+                // 用户自己能在设置里解决，所以要说清楚原因
+                is ReaderResult.Error ->
+                    if (result.reason == "js_disabled") {
+                        "阅读模式需要 JavaScript，请在设置中开启"
+                    } else {
+                        "无法进入阅读模式：${result.reason}"
+                    }
+                is ReaderResult.NoContent ->
+                    if (result.reason == "already_reader") {
+                        "已在阅读模式"
+                    } else {
+                        "这个页面没有可提取的正文"
+                    }
+                is ReaderResult.Ok -> null
+            }
+        }
+    }
+
+    fun exitReaderMode() {
+        tabManager.exitReaderMode()
+        _message.value = "已退出阅读模式"
+    }
+
+    /**
+     * 切换阅读模式。
+     *
+     * 一个入口同时负责进出，与 Via 一致：用户心智里这是"开/关阅读模式"
+     * 一个开关，而不是两个动作。
+     */
+    fun toggleReaderMode() {
+        if (tabManager.isReaderActive()) exitReaderMode() else enterReaderMode()
+    }
+
+    fun setReaderFontSize(size: ReaderFontSize) {
+        io { container.settings.setReaderFontSize(size) }
+        // 把新字号**直接传下去**，不要让它去读 settings：
+        // 上面那行是异步落盘的，此刻 settings 里还是旧值，
+        // 读它会导致"改了字号没反应，要再点一次才生效"。
+        tabManager.refreshReaderFontSize(size)
     }
 
     private fun io(block: suspend () -> Unit) {

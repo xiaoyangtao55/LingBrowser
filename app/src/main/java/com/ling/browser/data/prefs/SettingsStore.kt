@@ -40,6 +40,15 @@ enum class SearchEngine(val label: String, val queryUrl: String, val homepage: S
     DUCKDUCKGO("DuckDuckGo", "https://duckduckgo.com/?q=%s", "https://duckduckgo.com"),
 }
 
+/**
+ * 阅读模式的字号档位。
+ *
+ * 直接复用 [com.ling.browser.web.ReaderPage.FontSize]，不再另立一份定义 ——
+ * 两处各存一份迟早会不同步（这边加了档位、那边没加），
+ * 表现为"设置里选了新的，阅读视图却没变化"，很难查。
+ */
+typealias ReaderFontSize = com.ling.browser.web.ReaderPage.FontSize
+
 /** 桌面模式（电脑版）UA。 */
 const val UA_MOBILE = ""
 
@@ -82,6 +91,14 @@ data class LingSettings(
      * 见 [com.ling.browser.data.db.TabSnapshot.isPersistable]。
      */
     val restoreSession: Boolean = true,
+    /**
+     * 阅读模式的字号档位。
+     *
+     * 存的是档位而不是像素值：字号需要在**阅读视图里**改，而那边是
+     * WebView（HTML），需要重新生成页面。存档位可以让"恢复默认"
+     * 有个明确目标，也避免用户把字号调到一个荒谬的值后无法回到常规。
+     */
+    val readerFontSize: ReaderFontSize = ReaderFontSize.MEDIUM,
 ) {
     /**
      * 用户实际要打开的主页。
@@ -113,6 +130,7 @@ class SettingsStore(private val context: Context) {
         val TABS_HEIGHT = stringPreferencesKey("tabs_height")
         val TAB_COUNT = intPreferencesKey("tab_count")
         val RESTORE_SESSION = booleanPreferencesKey("restore_session")
+        val READER_FONT_SIZE = stringPreferencesKey("reader_font_size")
     }
 
     val settings: Flow<LingSettings> = context.dataStore.data.map { p ->
@@ -136,6 +154,11 @@ class SettingsStore(private val context: Context) {
                 ?.let { runCatching { TabsHeight.valueOf(it) }.getOrNull() }
                 ?: TabsHeight.HALF,
             restoreSession = p[Keys.RESTORE_SESSION] ?: true,
+            // 与 tabsHeight 同理：用 runCatching 兜底，
+            // 万一将来删掉某个档位，老用户不会因为 valueOf 抛异常而闪退。
+            readerFontSize = p[Keys.READER_FONT_SIZE]
+                ?.let { runCatching { ReaderFontSize.valueOf(it) }.getOrNull() }
+                ?: ReaderFontSize.MEDIUM,
         )
     }
 
@@ -168,6 +191,9 @@ class SettingsStore(private val context: Context) {
 
     suspend fun setRestoreSession(enabled: Boolean) =
         context.dataStore.edit { it[Keys.RESTORE_SESSION] = enabled }
+
+    suspend fun setReaderFontSize(size: ReaderFontSize) =
+        context.dataStore.edit { it[Keys.READER_FONT_SIZE] = size.name }
 
     suspend fun setTabCount(count: Int) =
         context.dataStore.edit { it[Keys.TAB_COUNT] = count }

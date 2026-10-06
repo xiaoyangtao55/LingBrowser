@@ -53,6 +53,7 @@ MAPPING = [
     ("Javascript", "javascript"), ("Image", "image"),
     ("PrivacyTip", "privacy_tip"), ("DesktopWindows", "desktop_windows"),
     ("Settings", "settings"),
+    ("Article", "article"),
 ]
 
 NUM = re.compile(r"-?\d+(?:\.\d+)?")

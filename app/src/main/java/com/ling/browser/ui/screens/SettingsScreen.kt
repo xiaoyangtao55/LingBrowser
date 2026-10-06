@@ -39,6 +39,7 @@ import androidx.compose.ui.unit.dp
 import com.ling.browser.data.prefs.LingSettings
 import com.ling.browser.data.prefs.NightMode
 import com.ling.browser.data.prefs.SearchEngine
+import com.ling.browser.data.prefs.ReaderFontSize
 import com.ling.browser.data.prefs.TabsHeight
 
 /**
@@ -57,6 +58,7 @@ fun SettingsScreen(
     onBlockImages: (Boolean) -> Unit,
     onJavaScript: (Boolean) -> Unit,
     onTabsHeight: (TabsHeight) -> Unit,
+    onReaderFontSize: (ReaderFontSize) -> Unit,
     onRestoreSession: (Boolean) -> Unit,
     onClearData: () -> Unit,
     onBack: () -> Unit,
@@ -65,6 +67,7 @@ fun SettingsScreen(
     var showEngineDialog by remember { mutableStateOf(false) }
     var showHomepageDialog by remember { mutableStateOf(false) }
     var showTabsHeightDialog by remember { mutableStateOf(false) }
+    var showReaderFontDialog by remember { mutableStateOf(false) }
     var confirmClear by remember { mutableStateOf(false) }
 
     Scaffold(
@@ -140,6 +143,14 @@ fun SettingsScreen(
                     title = "标签页面板高度",
                     subtitle = settings.tabsHeight.label,
                     onClick = { showTabsHeightDialog = true },
+                )
+            }
+            item {
+                SettingRow(
+                    icon = LingIcons.Article,
+                    title = "阅读模式字号",
+                    subtitle = settings.readerFontSize.label,
+                    onClick = { showReaderFontDialog = true },
                 )
             }
             item {
@@ -328,6 +339,50 @@ fun SettingsScreen(
             },
             confirmButton = {
                 TextButton(onClick = { showTabsHeightDialog = false }) { Text("完成") }
+            },
+        )
+    }
+
+    // ---- 阅读模式字号 ----
+    if (showReaderFontDialog) {
+        AlertDialog(
+            onDismissRequest = { showReaderFontDialog = false },
+            title = { Text("阅读模式字号") },
+            text = {
+                Column {
+                    // 直接复用 ReaderPage.FontSize 的档位定义，
+                    // 不再另立一份 —— 两处定义迟早会不同步。
+                    ReaderFontSize.entries.forEach { s ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    onReaderFontSize(s)
+                                    showReaderFontDialog = false
+                                }
+                                .padding(vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RadioButton(
+                                selected = settings.readerFontSize == s,
+                                onClick = {
+                                    onReaderFontSize(s)
+                                    showReaderFontDialog = false
+                                },
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                // 带上像素值，让用户知道"大"到底多大；
+                                // 光有"小/中/大"三个字没有参照。
+                                text = "${s.label}（${s.px}px）",
+                                style = MaterialTheme.typography.bodyLarge,
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showReaderFontDialog = false }) { Text("完成") }
             },
         )
     }

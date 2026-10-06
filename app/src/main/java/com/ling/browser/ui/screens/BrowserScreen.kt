@@ -98,6 +98,9 @@ fun BrowserScreen(
     // 放进 when 分支里会形成条件式 composable 调用，破坏重组时的槽位稳定性。
     val bookmarks by viewModel.bookmarks.collectAsStateWithLifecycle()
     val pendingDownload by viewModel.pendingDownload.collectAsStateWithLifecycle()
+    // 阅读模式是否开启。必须 collect（而不是直接读 viewModel.readerActive），
+    // 否则进入/退出后菜单文案不会刷新。
+    val readerActive by viewModel.readerActive.collectAsStateWithLifecycle()
 
     var showMoreMenu by remember { mutableStateOf(false) }
     var exitConfirm by remember { mutableStateOf(false) }
@@ -366,6 +369,18 @@ fun BrowserScreen(
                             NightMode.ALWAYS_OFF -> NightMode.FOLLOW_SYSTEM
                         }
                     )
+                    showMoreMenu = false
+                },
+            )
+            // 阅读模式。文案随状态切换，让用户一眼看出点下去是进还是出
+            // （与上面的电脑模式同一种写法）。
+            DropdownMenuItem(
+                text = {
+                    Text(if (readerActive) "退出阅读模式" else "阅读模式")
+                },
+                leadingIcon = { Icon(LingIcons.Article, contentDescription = null) },
+                onClick = {
+                    viewModel.toggleReaderMode()
                     showMoreMenu = false
                 },
             )

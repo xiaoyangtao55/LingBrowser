@@ -60,6 +60,10 @@ class LingIconsTest {
     private fun pathSignature(icon: ImageVector): String =
         pathNodes(icon).joinToString("|") { it.toString() }
 
+    // ⚠️ 这是一份**手工维护**的清单。加了新图标就必须在这里补一行，
+    // 否则"数量"断言会对不上 —— 但反过来说，这里漏登记时数量断言会失败，
+    // 算是被动地被守住了。
+    // 注意别重复登记：BookmarkBorder 曾经出现过两次，把总数虚高了一个。
     private val allIcons: Map<String, ImageVector> = mapOf(
         "ArrowBack" to LingIcons.ArrowBack,
         "ArrowForward" to LingIcons.ArrowForward,
@@ -70,30 +74,30 @@ class LingIconsTest {
         "MoreVert" to LingIcons.MoreVert,
         "Add" to LingIcons.Add,
         "BookmarkBorder" to LingIcons.BookmarkBorder,
+        "Bookmark" to LingIcons.Bookmark,
+        "BookmarkAdd" to LingIcons.BookmarkAdd,
         "History" to LingIcons.History,
         "DeleteOutline" to LingIcons.DeleteOutline,
+        "DeleteSweep" to LingIcons.DeleteSweep,
         "Search" to LingIcons.Search,
+        "Download" to LingIcons.Download,
+        "Folder" to LingIcons.Folder,
+        "FolderOpen" to LingIcons.FolderOpen,
         "Lock" to LingIcons.Lock,
         "Public" to LingIcons.Public,
         "Nightlight" to LingIcons.Nightlight,
         "AutoAwesome" to LingIcons.AutoAwesome,
         "Javascript" to LingIcons.Javascript,
         "Image" to LingIcons.Image,
-        "DeleteSweep" to LingIcons.DeleteSweep,
         "PrivacyTip" to LingIcons.PrivacyTip,
         "DesktopWindows" to LingIcons.DesktopWindows,
         "Settings" to LingIcons.Settings,
-        "Download" to LingIcons.Download,
-        "Folder" to LingIcons.Folder,
-        "FolderOpen" to LingIcons.FolderOpen,
-        "Bookmark" to LingIcons.Bookmark,
-        "BookmarkBorder" to LingIcons.BookmarkBorder,
-        "BookmarkAdd" to LingIcons.BookmarkAdd,
+        "Article" to LingIcons.Article,
     )
 
     @Test
     fun `图标集完整`() {
-        assertEquals("图标数量发生变化时请同步更新本测试", 27, allIcons.size)
+        assertEquals("图标数量发生变化时请同步更新本测试", 28, allIcons.size)
     }
 
     @Test

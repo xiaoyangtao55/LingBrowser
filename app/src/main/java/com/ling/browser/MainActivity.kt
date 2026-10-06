@@ -245,6 +245,7 @@ private fun LingApp(viewModel: BrowserViewModel) {
                 onBlockImages = viewModel::setBlockImages,
                 onJavaScript = viewModel::setJavaScript,
                 onTabsHeight = viewModel::setTabsHeight,
+                onReaderFontSize = viewModel::setReaderFontSize,
                 onRestoreSession = viewModel::setRestoreSession,
                 onClearData = viewModel::clearAllData,
                 onBack = pop,

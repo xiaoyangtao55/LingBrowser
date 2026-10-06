@@ -21,6 +21,7 @@
 | 多标签页 | 每个标签页保留独立 WebView 实例，切换不丢页面状态；超过 6 个实例按 LRU 回收；favicon 缩略图 + 长按拖拽排序 |
 | 智能地址栏 | 自动区分「网址」与「搜索词」；聚焦时全选，输入时给出书签/历史联想 |
 | 书签 | 一键收藏/取消，独立管理页；支持**网站图标**、重命名、删除确认、单层文件夹归档 |
+| 阅读模式 | **正文提取**（Readability 算法 + 中文适配），去除广告/导航/评论区，可调四档字号 |
 | 历史记录 | 自动去重 + 次数累加，按「今天/昨天/更早」分组，支持单条删除与清空 |
 | 无痕模式 | 独立标签页；不写历史、关闭 DOM storage 与 Cookie |
 | 前进/后退/刷新/停止 | 刷新常驻在地址栏右侧；底部工具栏保留前进/后退/主页/标签页/更多 |
@@ -91,6 +92,7 @@ LingBrowser/
     ├── check_session.py           # 会话恢复接线校验
     ├── check_bookmark_folders.py  # 书签文件夹校验
     ├── check_ux_fixes.py          # 焦点/书签编辑/图标校验
+    ├── check_reader.py            # 阅读模式提取与接线校验
     └── make_icons.py              # 生成 API<26 的传统位图图标
 ```
 
@@ -174,7 +176,7 @@ allowed with built-in Kotlin`）。本项目只有 3 张结构简单的表，直
 |---|---|
 | `material-icons-extended` | 上万个图标全部编进 dex，单个 `classes.dex` 达 **40+ MB**，debug 包 **18 MB** |
 | Material Symbols TTF | 单文件 **948 KB**（Filled 版 1.4 MB），几乎等于整个 APK |
-| **矢量代码（本方案）** | 27 个图标约 **46 KB** 源码 |
+| **矢量代码（本方案）** | 28 个图标约 **47 KB** 源码 |
 
 Via 这类浏览器整个安装包才几百 KB。**一个图标字体就顶得上当前 APK（1.4 MB）
 的 68%**，为二十几个图标翻倍不划算。而且字体图标无法参与 Compose 的
@@ -228,7 +230,9 @@ tint 与交互动画，取字形还要按 Unicode 码点逐个核对。
 > 少一个控制点、坐标差 40，渲染出来看着都"差不多"。已验证把某个坐标
 > 改掉 40 单位后它会精确报出「#14 源=480.0 生成=520.0」。
 
-> 全部 27 个图标均来自官方文件，**没有合成图标**。
+> 全部 28 个图标均来自官方文件，**没有合成图标**。
+> （第 28 个是阅读模式用的 `article`，由用户从 fonts.google.com
+> 下载官方 Outlined 版后导入，仍走 `check_icon_fidelity.py` 逐点核对。）
 
 > **三个书签图标容易搞混**，按用途对齐：
 >
@@ -429,8 +433,6 @@ internal fun deriveFolders(bookmarks: List<Bookmark>): List<String> =
 > 是**唯一**能创建文件夹的路径。移动菜单里必须有「新建文件夹…」这一项，
 > 否则**永远建不出第一个文件夹**。`check_bookmark_folders.py` 专门盯着它。
 
-### 3.6 地址栏提交后必须真的释放焦点
-
 ### 3.6 地址栏提交后必须把焦点**交还**给网页
 
 一个真机上发现的 bug：地址栏输入后按回车，页面加载了，但**网页里的输入框
@@ -511,6 +513,81 @@ D LingFocus: focusWebContent host=true webview=true wvHasFocus=true hostHasFocus
   `tabManager.loadUrl` 可能还没把 `activeTab().url` 更新过来（WebView 的 URL
   要等页面真正开始加载才变），于是地址栏被清空 —— 表现为"回车后闪一下空白"。
   现在 `submitAddress` 显式锁定地址栏文本。
+
+### 3.7 阅读模式：移植 Readability 的核心，并做中文适配
+
+**不引入 Readability.js**：它约 90 KB，而整个 APK 才 1.5 MB —— 引进来会让
+包体积增加 6%，与「轻量」定位直接冲突。这里的重写版不到 11 KB。
+
+算法保留 Readability 的**打分**精髓（不是随便抓一个 `<div>`）：
+
+1. 给每个 `<p>` 按长度与标点数量打分，分数**向上累加给两级祖先**
+   —— 正文段落本身长，且它们的共同祖先才是正文容器
+2. 累加时按标签给不同起点分：`div`/`section` 是通用容器（5 分），
+   `article`/`main` 语义上更可能是正文（10 分）
+3. 用**链接密度**剔除导航与相关阅读：整块都是链接的不算正文
+   （段落阈值 0.25，容器阈值 0.33）
+4. 按 class/id 语义直接淘汰明显不是正文的节点（`comment`/`sidebar`/`related`…）
+
+#### 一个必须解决的中文问题
+
+Readability 原文用 `textLength >= 100` 判断段落是否够长，**那个阈值是为英文调的**。
+中文一个字承载的信息量远大于一个字母，100 个汉字的篇幅约等于 300+ 英文单词。
+
+实测后果很严重：三段正常的中文段落（65 / 82 / 72 字）
+**全部不达标**，整篇文章会被判成「没有正文」，也就是**中文站点几乎全部失效**。
+
+修法是按 CJK 折算加权长度（CJK 字符 × 2.5 + 其余），三处阈值统一使用：
+可读性判断、段落最低长度、最终正文长度校验。标点正则也必须含中文标点
+（`，。；！？、`），否则中文段落逗号数为 0、分数被严重低估。
+
+> 这两点都不是"想到了所以加上"，而是**写完 JS 用 Node 真实跑了一遍**
+> 才暴露出来的 —— 见下面的验证方式。
+
+#### 分层与三个现实约束
+
+正文提取必须注入 JS 到原页面执行（DOM 只在那边），渲染则回到原生侧生成
+自包含 HTML（与主页同一套路）。由此带来三个必须处理的现实情况：
+
+| 情况 | 处理 |
+|---|---|
+| 用户关掉了 JavaScript | 提取脚本根本不会执行。明确提示"需要 JavaScript"，因为**用户自己能解决**，不能笼统说"不支持" |
+| 页面本就不适合阅读（首页/视频页/图片站） | 属于正常情况，提示要温和，不能像报错 |
+| 主页与阅读视图自身 | 直接拒绝，否则会递归提取 |
+
+**必须缓存已提取的正文**：进入阅读视图后原 DOM 已被替换，此时用户调字号若
+重新提取只会得到"没有正文"。所以缓存一份结果用于重排版，并在关闭标签时清掉。
+
+**调字号要把新值显式传下去**，不能让它去读 `settings.readerFontSize` ——
+设置是异步落盘的，此刻读到的还是旧值，表现为"改了字号没反应，要再点一次"。
+
+#### 一个差点漏掉的 Compose 陷阱
+
+`readerActive` 最初写成 `val readerActive: Boolean get() = tabManager.isReaderActive()`。
+它不是 Compose 状态，**进入阅读模式后菜单文案不会刷新**，会一直显示
+"阅读模式"而不是"退出阅读模式"。已改为从 `tabs` 派生的 `StateFlow` 并 `collect`。
+`check_reader.py` 专门盯着这一条。
+
+#### 验证方式：用 Node 真实运行算法
+
+JS 是**字符串常量**嵌在 Kotlin 里，Kotlin 编译器完全不检查它 ——
+写错一个括号，编译照样通过，只有真机点开阅读模式才会白屏。
+但只做 `node --check` 语法检查也不够：**算法写错了照样能通过语法检查**。
+
+所以 `tools/check_reader.py` 额外做两件事：
+
+1. 从 Kotlin 文件里抽出 JS，用 `node --check` 校验语法
+2. 用一段**迷你 DOM 桩**搭出典型中文文章页（导航 + 三段正文 + 侧边栏 +
+   评论区 + 页脚），真实运行算法，断言它**提取到正文、且剔除掉垃圾块**
+
+第 2 步才是关键。上面那个中文阈值 bug 正是它抓出来的。
+反向验证 4 个模拟回归（阈值退回英文、去掉 CJK 折算、语义淘汰失效、
+垃圾节点不移除）**全部被抓到**。
+
+> 写这个桩的过程本身也踩了三个坑，都记在脚本注释里：漏 `nodeType`
+> 导致打分全被跳过、`innerHTML` 不序列化子树导致"提取成功但 html 为空"、
+> 以及**脚本自带 IIFE 却又被套了一层**导致返回值恒为 `undefined`。
+> 这三个都表现为"算法没输出"，很容易误判成算法本身有问题。
 
 ### 4. 主页由 WebView 渲染，不用 Compose 覆盖层
 早期实现把主页做成 Compose 覆盖层（`HomeScreen`），有两个问题：主页不进入
@@ -728,6 +805,7 @@ python tools/preview_home_mark.py old  # 改版前的造型，用于对照
 | `tools/check_session.py` | 校验会话恢复接线：保存挂在 onStop、协程不被 viewModelScope 取消、无痕不落盘 |
 | `tools/check_bookmark_folders.py` | 校验文件夹不建表、删文件夹不连带删书签、导出规则与新建入口 |
 | `tools/check_ux_fixes.py` | 校验地址栏真的释放焦点、书签重命名/删除确认、图标存储与迁移不丢数据 |
+| `tools/check_reader.py` | 校验阅读模式提取脚本语法与算法（用 Node 真实运行）、以及各层接线完整 |
 | `tools/check_junit_args.py` | 抓 JUnit 参数顺序写反（应为 `(message, value)`） |
 | `tools/check_workflow.py` | 校验 GitHub Actions YAML 结构 |
 | `tools/check_signing.py` | 抓签名配置里"空字符串被当成路径"的经典崩溃 |
@@ -764,16 +842,16 @@ python tools/preview_launcher_png.py mipmap-xxxhdpi  # 预览启动图标
 | 项目 | 结果 |
 |---|---|
 | `:app:assembleDebug` | ✅ 通过（图标改版后重新验证） |
-| `:app:testDebugUnitTest` | ✅ **147 个用例全部通过**（`UrlUtilsTest` 20 / `FaviconFetcherTest` 12 / `HomePageTest` 19 / `TabOrderTest` 15 / `BookmarkFolderTest` 14 / `LingSettingsTest` 14 / `LauncherIconTest` 12 / `LingIconsTest` 11 / `DownloadTest` 10 / `SessionSnapshotTest` 9 / `TabInitialTest` 6 / `PendingDownloadTest` 5） |
+| `:app:testDebugUnitTest` | ✅ **180 个用例全部通过**（`UrlUtilsTest` 20 / `FaviconFetcherTest` 12 / `ReaderPageTest` 18 / `ReaderResultTest` 15 / `HomePageTest` 19 / `TabOrderTest` 15 / `BookmarkFolderTest` 14 / `LingSettingsTest` 14 / `LauncherIconTest` 12 / `LingIconsTest` 11 / `DownloadTest` 10 / `SessionSnapshotTest` 9 / `TabInitialTest` 6 / `PendingDownloadTest` 5） |
 | `:app:assembleRelease`（R8 压缩） | ✅ 通过，产物 1.4 MB（图标改版前） |
 | APK 签名校验 | ✅ v1 + v2 方案均通过 |
 | 真机安装（Xiaomi MI 8 / Android 14） | ✅ `adb install` 成功 |
 | 真机启动 | ✅ 无崩溃，`Displayed MainActivity: +884ms` |
 | WebView 进程 | ✅ sandboxed_process 正常拉起 |
 | View 层级 | ✅ Compose 树与 WebView 宿主 `FrameLayout` 布局正确 |
-| 静态自检（18 个脚本） | ✅ 全部通过 |
+| 静态自检（19 个脚本） | ✅ 全部通过 |
 
-> 图标已全部替换为官方 Material Symbols（27 个，见 §四.2），
+> 图标已全部替换为官方 Material Symbols（28 个，见 §四.2），
 > 并通过 `check_icon_fidelity.py` 与源文件逐点核对，
 > 真机观感已确认。
 
@@ -858,7 +936,6 @@ hello world                -> 必应搜索（默认引擎）
 1. **广告拦截** —— 通过 `shouldInterceptRequest` 做资源级拦截，内置规则 + 自定义规则
 2. **资源嗅探** —— 注入 JS 扫描页面媒体链接，抓取视频/音频/图片
 3. **插件脚本扩展** —— 用户脚本注入机制
-4. **阅读模式** —— 正文提取，去除广告与导航
 
 ### 已完成的清单（原「后续方向」）
 
@@ -869,8 +946,9 @@ hello world                -> 必应搜索（默认引擎）
 | 会话恢复 | `onStop` 保存 + 冷启动重建；无痕不入库；设置里可开关 |
 | 书签文件夹 | 单层文件夹；**不建表**，由书签归属派生（无幽灵文件夹） |
 | 书签网站图标 | 按 URL 自行抓取 `/favicon.ico`；存压缩字节而非 `Bitmap` |
+| 阅读模式 | 移植 Readability 打分算法（<11 KB）+ **中文阈值适配**；可调四档字号 |
 
-> 早先下载的 9 个未使用官方图标（`help` / `language` / `license` 等）
+> 早先下载的 8 个未使用官方图标（`help` / `language` / `license` / `menu` 等）
 > 可对应「关于页 / 翻译 / 许可」等后续功能，需要时直接映射即可，
 > 无需重新下载。
 
