@@ -88,6 +88,7 @@ LingBrowser/
     ├── emit_ling_icons.py         # 组装 LingIcons.kt
     ├── ascii_icons.py             # 图标渲染成 ASCII，肉眼校验造型
     ├── check_icon_fidelity.py     # 生成物与源文件逐点比对
+    ├── check_session.py           # 会话恢复接线校验
     └── make_icons.py              # 生成 API<26 的传统位图图标
 ```
 
@@ -288,6 +289,40 @@ key 一变手势识别器就被重启，**拖动中途会断掉**。只用 `tab.
 > 另外 Kotlin 会**先求值全部实参**再调用 `add`，所以
 > `add(to, removeAt(from))` 里 `to` 已是正确下标，**不需要**任何 ±1 补偿
 > （曾以为需要，实测 `move(0,3)` 得到 `[B,C,D,A]` 才发现补偿反而错位）。
+
+### 3.3 会话恢复：四个必须想清楚的点
+
+**① 保存挂在 `onStop`，不是 `onDestroy`。** 进程被系统回收时
+`onDestroy` **不保证被调用**（这正是低内存杀后台的常见路径），
+而 `onStop` 一定会走到。用 `onDestroy` 会在"切到别的 App 后被回收"
+这一最常见场景下丢掉全部标签。
+
+**② 保存不能用 `viewModelScope`。** `onStop` 之后 Activity 可能很快销毁，
+`viewModelScope` 随之被取消 —— 写库写到一半就被打断。所以
+`persistSession()` 用独立的 `CoroutineScope(Dispatchers.IO)` 保证跑完。
+
+**③ 恢复是异步的，开主页的兜底必须排在它之后。** 数据库读取是挂起操作，
+不能同步判断 `tabs.isEmpty()` 就开主页——那样会先开一个主页、
+再被恢复的标签叠加，用户看到一个多余的空标签。正确顺序是
+`load()` → `restore()` → 失败才 `newTab()`。
+
+**④ 无痕标签绝不落盘。** 无痕模式的意义就是"关掉不留痕"，
+把 URL 写进 SQLite 会让用户下次启动看到上次无痕浏览的网站。
+`TabSnapshot.isPersistable` 过滤一次，`SessionRepository.save` 再过滤一次
+（双保险），并有一条单元测试专门钉住这条承诺。
+
+其他细节：
+- 快照读完**立刻清掉**。否则用户"清除数据"后重启，遗留的快照会把
+  标签页复活，看起来像清除没生效。
+- 写入用**事务**：中途失败时要么全是旧数据、要么全是新数据，
+  不会出现"删了旧的、还没写新的"的空窗（那会让标签全丢）。
+- 只恢复**第一个**标签的 WebView，其余等用户切过去再懒加载
+  （复用已有的 LRU 机制）。一次建 N 个 WebView 会让冷启动明显变卡。
+
+> **一个差点埋下的坑**：`tabs` 表、`TabSnapshot`、`toTabSnapshot()`
+> 其实早就写好了 —— 但 `toTabSnapshot()` **从未被任何代码调用**，
+> 整套持久化是死代码，标签从来没有真正恢复过。`check_session.py`
+> 第一项就是防这个："只有定义没有调用"会直接报错。
 
 ### 4. 主页由 WebView 渲染，不用 Compose 覆盖层
 早期实现把主页做成 Compose 覆盖层（`HomeScreen`），有两个问题：主页不进入
@@ -501,7 +536,8 @@ python tools/preview_home_mark.py old  # 改版前的造型，用于对照
 | `tools/check_icon_composition.py` | 量化图标构图：羽毛是否压在环的笔画上、高光点是否被羽毛遮住 |
 | `tools/check_dead_code.py` | 找出「定义了但没人调用」的动作型函数（见 §四.9，此坑踩过两次） |
 | `tools/check_download_bytes.py` | 比对 `formatBytes` 在 UI 层与测试层的两份实现，防止测试测的是旧逻辑 |
-| `tools/check_tabs_layer.py` | 校验标签面板的层级与动画约束（遮罩必须画在面板之后等） |
+| `tools/check_tabs_layer.py` | 校验标签面板的层级与动画约束（遮罩必须画在面板之后、拖拽手势不吞点击等） |
+| `tools/check_session.py` | 校验会话恢复接线：保存挂在 onStop、协程不被 viewModelScope 取消、无痕不落盘 |
 | `tools/check_junit_args.py` | 抓 JUnit 参数顺序写反（应为 `(message, value)`） |
 | `tools/check_workflow.py` | 校验 GitHub Actions YAML 结构 |
 | `tools/check_signing.py` | 抓签名配置里"空字符串被当成路径"的经典崩溃 |
@@ -538,14 +574,14 @@ python tools/preview_launcher_png.py mipmap-xxxhdpi  # 预览启动图标
 | 项目 | 结果 |
 |---|---|
 | `:app:assembleDebug` | ✅ 通过（图标改版后重新验证） |
-| `:app:testDebugUnitTest` | ✅ **111 个用例全部通过**（`UrlUtilsTest` 20 / `HomePageTest` 19 / `TabOrderTest` 15 / `LingSettingsTest` 14 / `LauncherIconTest` 12 / `DownloadTest` 10 / `LingIconsTest` 10 / `TabInitialTest` 6 / `PendingDownloadTest` 5） |
+| `:app:testDebugUnitTest` | ✅ **120 个用例全部通过**（`UrlUtilsTest` 20 / `HomePageTest` 19 / `TabOrderTest` 15 / `LingSettingsTest` 14 / `LauncherIconTest` 12 / `DownloadTest` 10 / `LingIconsTest` 10 / `SessionSnapshotTest` 9 / `TabInitialTest` 6 / `PendingDownloadTest` 5） |
 | `:app:assembleRelease`（R8 压缩） | ✅ 通过，产物 1.4 MB（图标改版前） |
 | APK 签名校验 | ✅ v1 + v2 方案均通过 |
 | 真机安装（Xiaomi MI 8 / Android 14） | ✅ `adb install` 成功 |
 | 真机启动 | ✅ 无崩溃，`Displayed MainActivity: +884ms` |
 | WebView 进程 | ✅ sandboxed_process 正常拉起 |
 | View 层级 | ✅ Compose 树与 WebView 宿主 `FrameLayout` 布局正确 |
-| 静态自检（15 个脚本） | ✅ 全部通过 |
+| 静态自检（16 个脚本） | ✅ 全部通过 |
 
 > 图标已全部替换为官方 Material Symbols（26 个，见 §四.2），
 > 并通过 `check_icon_fidelity.py` 与源文件逐点核对。
@@ -604,7 +640,7 @@ hello world                -> 必应搜索（默认引擎）
 4. ~~**下载管理**~~ —— 已完成（系统 DownloadManager + 下载前确认）
 5. **阅读模式** —— 正文提取，去除广告与导航
 6. ~~**标签页缩略图与拖拽排序**~~ —— 已完成（favicon 缩略图 + 长按拖拽）
-7. **会话恢复** —— `TabSnapshot` 实体已就绪，未接持久化
+7. ~~**会话恢复**~~ —— 已完成（onStop 保存 + 冷启动重建，无痕不入库）
 8. **书签文件夹** —— 数据结构已支持 `folder` 字段，缺 UI
 
 ---

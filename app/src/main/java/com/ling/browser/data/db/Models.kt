@@ -27,7 +27,19 @@ data class TabSnapshot(
     val title: String,
     val position: Int,
     val isIncognito: Boolean = false,
-)
+) {
+    /**
+     * 这个快照是否值得写进磁盘。
+     *
+     * 无痕标签**绝不落盘**：无痕模式的意义就是"关掉不留痕"，
+     * 把 URL 存进 SQLite 会让用户下次启动看到上次无痕浏览的网站。
+     *
+     * 另外跳过空白地址：主页有固定的逻辑地址（ling://home）应当保存，
+     * 但空字符串是脏数据，恢复它只会得到一个打不开的标签。
+     */
+    val isPersistable: Boolean
+        get() = !isIncognito && url.isNotBlank()
+}
 
 /**
  * 一条下载记录。

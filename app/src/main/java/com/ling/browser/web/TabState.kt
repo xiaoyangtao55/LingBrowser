@@ -1,6 +1,7 @@
 package com.ling.browser.web
 
 import android.graphics.Bitmap
+import com.ling.browser.data.db.TabSnapshot
 import com.ling.browser.util.UrlUtils
 import java.util.UUID
 
@@ -76,3 +77,17 @@ data class TabState(
         const val NEUTRAL_INITIAL = "•"
     }
 }
+
+/**
+ * 转成可持久化的快照。[position] 由调用方按列表顺序给出。
+ *
+ * 不放在 `TabState` 内部做成成员函数，是为了让 `TabState`（纯 UI 状态）
+ * 不反向依赖 `data.db` 包 —— 依赖方向应始终是 UI -> 数据。
+ */
+internal fun TabState.toSnapshot(position: Int) = TabSnapshot(
+    id = id,
+    url = url,
+    title = title,
+    position = position,
+    isIncognito = isIncognito,
+)

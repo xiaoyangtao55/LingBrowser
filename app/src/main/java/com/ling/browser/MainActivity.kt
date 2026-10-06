@@ -5,6 +5,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.viewModels
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -38,6 +39,13 @@ import com.ling.browser.ui.theme.LingTheme
  * 引入 Navigation Compose 反而增加体积和心智负担。
  */
 class MainActivity : ComponentActivity() {
+
+    /**
+     * 与 setContent 内部用的是**同一个** ViewModel 实例
+     * （`by viewModels()` 与 `viewModel()` 共享同一个 ViewModelStore），
+     * 因此 Activity 生命周期回调里也能拿到它来保存会话。
+     */
+    private val browserViewModel: BrowserViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
@@ -82,8 +90,19 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
+    /**
+     * 在 [onStop] 保存会话，而不是 [onDestroy]。
+     *
+     * 原因：进程被系统回收时 onDestroy **不保证被调用**（这正是低内存
+     * 杀后台的常见路径），而 onStop 一定会走到。用 onDestroy 会在
+     * "切到别的 App 后被回收"这一最常见场景下丢掉全部标签。
+     *
+     * onStop 之后 Activity 可能很快销毁，因此 [BrowserViewModel.persistSession]
+     * 内部用的是独立协程而不是 viewModelScope（后者会被一起取消）。
+     */
+    override fun onStop() {
+        browserViewModel.persistSession()
+        super.onStop()
     }
 }
 

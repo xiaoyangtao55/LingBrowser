@@ -9,6 +9,7 @@ import android.webkit.WebChromeClient
 import android.webkit.WebStorage
 import android.webkit.WebView
 import android.widget.FrameLayout
+import com.ling.browser.data.db.TabSnapshot
 import com.ling.browser.data.prefs.LingSettings
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -54,11 +55,16 @@ class WebTabManager(private val context: Context) {
 
     fun attachHost(container: FrameLayout) {
         host = container
-        // 把当前激活标签的 WebView 挂上去
-        webViews[_activeId.value]?.let { wv ->
-            (wv.parent as? FrameLayout)?.removeView(wv)
-            container.addView(wv)
-        }
+        // 把当前激活标签的 WebView 挂上去。
+        //
+        // 用 obtainWebView 而不是查 webViews 缓存：冷启动恢复会话时，
+        // 活动标签的 WebView 可能还没被建出来（见 restore 的懒加载说明），
+        // 直接查缓存会拿到 null，结果是"标签数据都在、屏幕上却是空白"。
+        val active = _activeId.value
+        if (active.isEmpty()) return
+        val wv = obtainWebView(active)
+        (wv.parent as? FrameLayout)?.removeView(wv)
+        container.addView(wv)
     }
 
     fun detachHost(container: FrameLayout) {
@@ -89,6 +95,48 @@ class WebTabManager(private val context: Context) {
         switchTo(tab.id)
         loadUrl(tab.id, target)
         return tab
+    }
+
+    /** 导出当前标签用于持久化。无痕标签由 [TabSnapshot.isPersistable] 过滤掉。 */
+    fun snapshots(): List<TabSnapshot> =
+        _tabs.value.mapIndexed { i, tab -> tab.toSnapshot(i) }
+            .filter { it.isPersistable }
+
+    /**
+     * 用上次保存的快照重建标签页。返回是否真的恢复了内容。
+     *
+     * 只恢复**第一个**标签对应的 WebView，其余等用户切过去时再懒加载
+     * （[obtainWebView] 本来就是这个机制）。一次性把 N 个 WebView 全建出来
+     * 会让冷启动明显变卡，而用户通常只会马上看第一个。
+     *
+     * 调用方需保证此时 [_tabs] 为空 —— 否则新旧标签会混在一起。
+     */
+    fun restore(snapshots: List<TabSnapshot>): Boolean {
+        val valid = snapshots.filter { it.isPersistable }
+        if (valid.isEmpty()) return false
+        if (_tabs.value.isNotEmpty()) return false
+
+        val restored = valid.map { snap ->
+            TabState(
+                // 复用快照里的 id，让"同一个标签"在重启前后保持一致；
+                // 若 id 已被占用（理论上不会），退回到新生成的 id。
+                id = snap.id,
+                url = snap.url,
+                title = snap.title,
+                isIncognito = false,
+            )
+        }
+        _tabs.value = restored
+
+        val first = restored.first()
+        // 加载内容。主页要交给内置渲染器，普通地址才走 WebView.loadUrl ——
+        // 这条判断在 loadUrl 内部，这里直接复用即可。
+        loadUrl(first.id, first.url)
+        // 再切到这个标签：switchTo 会负责把 WebView 挂到宿主上，
+        // 且能正确处理"宿主尚未 attach"的情况（那时它只建 WebView 不挂载，
+        // 等 attachHost 被调用时会自动补挂）。
+        switchTo(first.id)
+        return true
     }
 
     /** 关闭标签页；关掉最后一个时自动新建一个空白页。 */

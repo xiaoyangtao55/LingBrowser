@@ -15,6 +15,7 @@ import com.ling.browser.data.prefs.TabsHeight
 import com.ling.browser.util.UrlUtils
 import com.ling.browser.web.TabState
 import com.ling.browser.web.WebTabManager
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -86,9 +87,21 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
             viewModelScope.launch { container.history.record(title, url, incognito) }
         }
 
-        // 启动时若没有标签页，开一个主页
-        if (tabManager.tabs.value.isEmpty()) {
-            tabManager.newTab(url = UrlUtils.HOME_URL)
+        // 启动时恢复上次的会话；没有可恢复的内容才开一个主页。
+        //
+        // ⚠️ 恢复是异步的（要读数据库），因此**不能**在这里同步判断
+        // `tabs.isEmpty()` 就开主页 —— 那样会先开一个主页、再被恢复的
+        // 标签覆盖或叠加，用户会看到一个多余的空标签。
+        // 正确做法是等 restore 有结果后再决定。
+        viewModelScope.launch {
+            val restored = runCatching { container.session.load() }.getOrDefault(emptyList())
+            val ok = restored.isNotEmpty() && tabManager.restore(restored)
+            if (!ok) {
+                tabManager.newTab(url = UrlUtils.HOME_URL)
+            }
+            // 快照只用于本次恢复。读完立刻清掉，避免用户"清除数据"后
+            // 又被遗留的快照复活 —— 每次真正保存时会重新写入。
+            container.session.clear()
         }
     }
 
@@ -373,6 +386,9 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
             container.history.clear()
             _message.value = "已清除缓存与 Cookie"
         }
+        // 会话快照也要清：不清的话用户"清除数据"后重启，
+        // 上次的标签页会原样复活，看起来像清除没生效。
+        clearSession()
     }
 
     // ------------------------------------------------------------ 设置
@@ -434,6 +450,37 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
 
     fun showMessage(text: String) {
         _message.value = text
+    }
+
+    // ------------------------------------------------------------ 会话恢复
+
+    /**
+     * 把当前标签页写入磁盘，用于下次启动恢复。
+     *
+     * ⚠️ 用 [NonCancellable] + 独立的 IO 调度，**不能**用 viewModelScope：
+     * 这个方法由 Activity.onStop 触发，而紧接着 Activity 可能被销毁、
+     * viewModelScope 同时被取消 —— 那时写库写到一半就会被打断。
+     * 这里用 GlobalScope 语义的独立协程，保证写操作能跑完。
+     *
+     * 无痕标签在这一步被过滤掉（见 `TabSnapshot.isPersistable`）。
+     */
+    fun persistSession() {
+        val snapshots = tabManager.snapshots()
+        CoroutineScope(Dispatchers.IO).launch {
+            runCatching { container.session.save(snapshots) }
+        }
+    }
+
+    /**
+     * 用户主动清除浏览数据时，连同会话快照一起清掉。
+     *
+     * 否则"清除数据"之后重启，上次的标签页会原样复活 ——
+     * 用户会认为清除没生效。
+     */
+    fun clearSession() {
+        CoroutineScope(Dispatchers.IO).launch {
+            runCatching { container.session.clear() }
+        }
     }
 
     override fun onCleared() {

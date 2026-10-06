@@ -6,6 +6,7 @@ import com.ling.browser.data.prefs.SettingsStore
 import com.ling.browser.data.repo.BookmarkRepository
 import com.ling.browser.data.repo.DownloadRepository
 import com.ling.browser.data.repo.HistoryRepository
+import com.ling.browser.data.repo.SessionRepository
 
 /**
  * 极简手工依赖容器。
@@ -25,4 +26,6 @@ class AppContainer(context: Context) {
     val history: HistoryRepository = HistoryRepository(database)
 
     val downloads: DownloadRepository = DownloadRepository(appContext, database)
+
+    val session: SessionRepository = SessionRepository(database)
 }
