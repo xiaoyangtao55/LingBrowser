@@ -544,6 +544,37 @@ Readability 原文用 `textLength >= 100` 判断段落是否够长，**那个阈
 > 这两点都不是"想到了所以加上"，而是**写完 JS 用 Node 真实跑了一遍**
 > 才暴露出来的 —— 见下面的验证方式。
 
+#### 原文地址：不能信 `location.href`
+
+真机报过：
+
+```
+位于 zhihu://answers/2090101772673085808?mcid=... 的网页无法加载，因为：
+net::ERR_UNKNOWN_URL_SCHEME
+```
+
+知乎用**自定义协议**做内部跳转，`location.href` 就是那个地址。它先被记进
+标签状态，退出阅读模式时又被回填给 `wv.loadUrl()` —— WebView 不认识
+`zhihu://`，于是白屏。（提取脚本原本直接 `url: location.href`，
+"查看原网页"同样指向一个打不开的地址。）
+
+修法是**三层防线**，缺一层都还漏：
+
+| 层 | 做法 |
+|---|---|
+| 取地址 | 优先 `link[rel=canonical]`，退回 `og:url`；只采纳能解析成 http(s) 的 |
+| 记状态 | 回调里自定义协议**不写回** `TabState.url`（它已被交给系统应用，页面并没真导航过去） |
+| 加载 | `loadUrl` 入口按协议白名单拒绝；`exitReaderMode` 先校验再回填，不可加载时退回历史 → 主页 |
+
+顺带一个反直觉的点：**相对 canonical 的 base 也得净化**。
+`zhihu://answers/1` + `/post/2` 会解析成 `zhihu://answers/post/2` ——
+仍是自定义协议，等于白读了 canonical。所以 base 要先用
+`document.baseURI`（文档真实来源）兜底。这个 bug 是检查脚本的
+"相对路径"场景抓出来的，不是想出来的。
+
+> 协议判定抽到了 [UrlScheme.kt](<app/src/main/java/com/ling/browser/web/UrlScheme.kt>)，
+> 因为留在 `WebTabManager` 里就得构造 WebView/Context 才能测，实际等于测不了。
+
 #### 分层与三个现实约束
 
 正文提取必须注入 JS 到原页面执行（DOM 只在那边），渲染则回到原生侧生成
@@ -875,7 +906,7 @@ python tools/preview_launcher_png.py mipmap-xxxhdpi  # 预览启动图标
 | 项目 | 结果 |
 |---|---|
 | `:app:assembleDebug` | ✅ 通过（图标改版后重新验证） |
-| `:app:testDebugUnitTest` | ✅ **182 个用例全部通过**（`UrlUtilsTest` 20 / `FaviconFetcherTest` 12 / `ReaderPageTest` 20 / `ReaderResultTest` 15 / `HomePageTest` 19 / `TabOrderTest` 15 / `BookmarkFolderTest` 14 / `LingSettingsTest` 14 / `LauncherIconTest` 12 / `LingIconsTest` 11 / `DownloadTest` 10 / `SessionSnapshotTest` 9 / `TabInitialTest` 6 / `PendingDownloadTest` 5） |
+| `:app:testDebugUnitTest` | ✅ **195 个用例全部通过**（`UrlUtilsTest` 20 / `FaviconFetcherTest` 12 / `ReaderPageTest` 20 / `ReaderResultTest` 15 / `UrlSchemeTest` 13 / `HomePageTest` 19 / `TabOrderTest` 15 / `BookmarkFolderTest` 14 / `LingSettingsTest` 14 / `LauncherIconTest` 12 / `LingIconsTest` 11 / `DownloadTest` 10 / `SessionSnapshotTest` 9 / `TabInitialTest` 6 / `PendingDownloadTest` 5） |
 | `:app:assembleRelease`（R8 压缩） | ✅ 通过，产物 1.4 MB（图标改版前） |
 | APK 签名校验 | ✅ v1 + v2 方案均通过 |
 | 真机安装（Xiaomi MI 8 / Android 14） | ✅ `adb install` 成功 |

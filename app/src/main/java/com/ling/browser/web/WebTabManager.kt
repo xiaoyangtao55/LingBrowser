@@ -319,9 +319,28 @@ class WebTabManager(private val context: Context) {
             loadHome(id, wv)
             return
         }
+        // 自定义协议（zhihu://、weixin:// 等）不能交给 WebView：
+        // 它不认识这些 scheme，会直接抛 net::ERR_UNKNOWN_URL_SCHEME 白屏。
+        // 这类地址只应由系统应用接管（shouldOverrideUrlLoading 里已经这么做），
+        // 但**地址仍可能被动地流到这里** —— 例如页面用自定义协议导航后
+        // TabState.url 记下了它，用户退出阅读模式时又被回填。
+        // 这里做最后一道防线：直接忽略，保持当前页面不动。
+        if (!isNavigable(url)) {
+            updateTab(id) { it.copy(isLoading = false, errorText = null) }
+            return
+        }
         updateTab(id) { it.copy(url = url, errorText = null, isLoading = true, progress = 0) }
         wv.loadUrl(url)
     }
+
+    /**
+     * 该地址能否交给 WebView 加载。
+     *
+     * 判定逻辑在 [UrlScheme] 里 —— 抽出去是为了能跑单元测试：
+     * `WebTabManager` 依赖 WebView/Context，构造不出来，
+     * 留在这里这段关键防线就等于没测。
+     */
+    private fun isNavigable(url: String): Boolean = UrlScheme.isNavigable(url)
 
     /**
      * 进入阅读模式。
@@ -439,8 +458,21 @@ class WebTabManager(private val context: Context) {
         val id = _activeId.value
         val cached = readerContent[id] ?: return
         readerContent.remove(id)
-        if (cached.url.isNotBlank()) {
+        // 原文地址来自提取脚本（优先 canonical），正常情况下是 http(s)。
+        // 万一它仍是个自定义协议，loadUrl 会拒绝加载，用户就**卡在阅读视图
+        // 出不去**了 —— 所以这里退回网页历史：back 能回到进入阅读模式前的
+        // 那个真实页面。再不行就只能留在原地，至少不白屏。
+        if (isNavigable(cached.url)) {
             loadUrl(id, cached.url)
+        } else {
+            val wv = webViews[id]
+            if (wv != null && wv.canGoBack()) {
+                wv.goBack()
+            } else {
+                // 没有可回退的历史：退回主页，避免把用户困在一个
+                // 已经"退出"了却还显示着的阅读页面上。
+                loadHome(id, obtainWebView(id))
+            }
         }
     }
 
@@ -650,10 +682,17 @@ class WebTabManager(private val context: Context) {
                     //   1. TabState.url 被改写成 baseUrl，主页与阅读视图的
                     //      识别（以及 ensureHomeRendered 的过滤）会全部失效；
                     //   2. canGoBack/canGoForward 被重置，返回键会闪一下。
+                    //
+                    // 自定义协议（zhihu:// 等）同样不写回：它已经被
+                    // shouldOverrideUrlLoading 交给系统应用，页面并没有真的
+                    // 导航过去。若把它记进 TabState.url，地址栏会显示一个
+                    // 打不开的地址，退出阅读模式时还会被回填给 WebView，
+                    // 直接触发 ERR_UNKNOWN_URL_SCHEME。
                     val isInternal = HomePage.isHomeUrl(url) || ReaderPage.isReaderUrl(url)
+                    val keep = isInternal || !isNavigable(url)
                     updateTab(id) {
                         it.copy(
-                            url = if (isInternal) it.url else url,
+                            url = if (keep) it.url else url,
                             isLoading = !isInternal,
                             errorText = null,
                             canGoBack = canGoBack(),
@@ -664,11 +703,13 @@ class WebTabManager(private val context: Context) {
                 onPageFinished = { url, title ->
                     // 阅读视图与主页同理：它在状态里的 url 是逻辑地址 ling://reader，
                     // 不能让回调把它改写成 ReaderPage.BASE_URL。
+                    // 自定义协议同样不写回（原因见 onPageStarted）。
                     val isInternal = HomePage.isHomeUrl(url) || ReaderPage.isReaderUrl(url)
                     val isHome = HomePage.isHomeUrl(url)
+                    val keep = isInternal || !isNavigable(url)
                     updateTab(id) {
                         it.copy(
-                            url = if (isInternal) it.url else url,
+                            url = if (keep) it.url else url,
                             // 主页标题固定为「主页」，不用 WebView 的 <title>翎</title>；
                             // 阅读视图的标题已经是文章标题，保留即可。
                             title = if (isHome) it.title else title.ifBlank { it.title },

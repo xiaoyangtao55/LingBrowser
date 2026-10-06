@@ -328,12 +328,71 @@ object ReaderExtractorJs {
       if (prop === 'og:site_name') { site = metas[mt].getAttribute('content') || ''; break; }
     }
 
+    // 原文地址：优先用 canonical / og:url，而不是 location.href。
+    //
+    // 为什么必须这样：很多 App 内嵌页（知乎、微博等）会用**自定义协议**做
+    // 内部跳转，地址栏里可能是 `zhihu://answers/123`。把它当成原文地址回填，
+    // 退出阅读模式时 wv.loadUrl() 会直接报 ERR_UNKNOWN_URL_SCHEME，
+    // 而"查看原网页"也会指向一个打不开的地址。
+    // canonical / og:url 指向的是**真实的 https 地址**，既打得开也更干净
+    // （去掉 mcid/callback_source 这类跟踪参数）。
+    var canonical = '';
+    try {
+      var links = document.getElementsByTagName('link');
+      for (var li = 0; li < links.length; li++) {
+        if ((links[li].getAttribute('rel') || '').toLowerCase() === 'canonical') {
+          canonical = links[li].getAttribute('href') || '';
+          if (canonical) break;
+        }
+      }
+      if (!canonical) {
+        var m2 = document.getElementsByTagName('meta');
+        for (var mi = 0; mi < m2.length; mi++) {
+          var p2 = (m2[mi].getAttribute('property') || m2[mi].getAttribute('name') || '').toLowerCase();
+          if (p2 === 'og:url') { canonical = m2[mi].getAttribute('content') || ''; break; }
+        }
+      }
+    } catch (e2) { canonical = ''; }
+
+    // 解析成绝对地址（canonical 可能是相对路径）。
+    //
+    // ⚠️ 相对 canonical 的 base 不能直接用 location.href：
+    // 在知乎这类页面上 location.href 是 `zhihu://answers/123`，
+    // `new URL('/post/123', 'zhihu://answers/123')` 会解析成
+    // **`zhihu://answers/post/123`** —— 仍然是个自定义协议，
+    // 通过不了下面的 http(s) 校验，于是白读了 canonical。
+    // （这个 bug 是被 check_reader.py 的相对路径场景抓出来的。）
+    //
+    // 正确做法是把 base 也净化一遍：优先用本身是 http(s) 的候选。
+    var base = location.href;
+    try {
+      if (!/^https?:/i.test(base)) {
+        // document.baseURI / location.origin 反映的是**文档实际来源**，
+        // 在自定义协议壳里通常是真实的 https 站点地址。
+        if (typeof document.baseURI === 'string' && /^https?:/i.test(document.baseURI)) {
+          base = document.baseURI;
+        } else if (typeof location.origin === 'string' && /^https?:/i.test(location.origin)) {
+          base = location.origin + '/';
+        }
+      }
+    } catch (e4) { /* 保持原值 */ }
+
+    var articleUrl = location.href;
+    if (canonical) {
+      try {
+        var abs = new URL(canonical, base).href;
+        // 只有在能解析出 http(s) 时才采纳：某些站点会把 canonical
+        // 写成自定义协议或畸形值，那时还不如用 location.href。
+        if (/^https?:/i.test(abs)) articleUrl = abs;
+      } catch (e3) { /* 保留 location.href */ }
+    }
+
     window.__lingReaderDone = true;
     return JSON.stringify({
       status: 'ok',
       title: title,
       site: site,
-      url: location.href,
+      url: articleUrl,
       textLength: textLen2,
       html: html
     });

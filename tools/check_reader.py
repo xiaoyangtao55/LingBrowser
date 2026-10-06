@@ -262,6 +262,96 @@ console.log('__RESULT__' + RESULT);
             else:
                 bad("正文段落丢失")
 
+        # ---- 原文地址（canonical）----
+        #
+        # 这一段对应真机报错 net::ERR_UNKNOWN_URL_SCHEME：
+        # 知乎用 zhihu://answers/... 做内部跳转，location.href 就是那个
+        # 打不开的地址。提取脚本必须优先给出真实的 https 原文地址。
+        # 注意：要**真的换掉 location.href 重跑**才算验证，只查源码
+        # 特征无法证明解析逻辑正确。
+        print("\n4b. 原文地址解析（真机 ERR_UNKNOWN_URL_SCHEME 的修复）")
+
+        def run_with(location_href, canonical="", og_url="", base_uri=""):
+            """换掉 location / canonical / og:url 后重跑，取回提取结果里的 url 字段。"""
+            h2 = harness
+            h2 = h2.replace(
+                "var location = { href: 'https://example.com/post/1' };",
+                "var location = { href: %s };" % json.dumps(location_href),
+            )
+            # document.baseURI 模拟"文档的真实来源"。知乎这类壳里
+            # location.href 是 zhihu://...，但文档其实由 https 站点提供，
+            # 相对 canonical 必须相对于这个 https 地址解析。
+            h2 = h2.replace(
+                "  getElementById: function (id) {",
+                "  baseURI: %s,\n  getElementById: function (id) {" % json.dumps(base_uri),
+            )
+            # 用既有的 setAttribute 往 head 里塞 link/meta。
+            # 插在 `append(html, head);` 之后，此时 head 已经挂在 html 上，
+            # getElementsByTagName 能沿树找到它们。
+            extra = ""
+            if canonical:
+                extra += ("var _lk = N('LINK', ''); _lk.setAttribute('rel','canonical');"
+                          " _lk.setAttribute('href', %s); append(head, _lk);\n"
+                          % json.dumps(canonical))
+            if og_url:
+                extra += ("var _mt = N('META', ''); _mt.setAttribute('property','og:url');"
+                          " _mt.setAttribute('content', %s); append(head, _mt);\n"
+                          % json.dumps(og_url))
+            if extra:
+                h2 = h2.replace("append(html, head);", "append(html, head);\n" + extra, 1)
+            h2 = h2.replace("__SCRIPT__", json.dumps(script))
+            p2 = os.path.join(tempfile.gettempdir(), "ling_reader_canon.js")
+            with open(p2, "w", encoding="utf-8") as f:
+                f.write(h2)
+            rr = subprocess.run([node, p2], capture_output=True, text=True)
+            o = (rr.stdout or "").strip()
+            if "__RESULT__" not in o:
+                return None
+            try:
+                return json.loads(o.split("__RESULT__", 1)[1]).get("url")
+            except Exception:
+                return None
+
+        canonical_url = "https://www.zhihu.com/question/1/answer/2090101772673085808"
+        evil = "zhihu://answers/2090101772673085808?mcid=c58f0c59&callback_source=search_main"
+
+        got = run_with(evil, canonical=canonical_url)
+        if got == canonical_url:
+            ok("有 canonical 时，自定义协议被替换成真实 https 原文地址")
+        else:
+            bad("canonical 未被采用：期望 %s，实际 %r" % (canonical_url, got))
+
+        got = run_with(evil, og_url=canonical_url)
+        if got == canonical_url:
+            ok("无 canonical 时退回 og:url")
+        else:
+            bad("og:url 未被采用：实际 %r" % (got,))
+
+        got = run_with(evil, canonical="/post/123",
+                       base_uri="https://www.zhihu.com/question/1")
+        if got == "https://www.zhihu.com/post/123":
+            ok("相对 canonical 按文档真实来源解析成绝对地址")
+        else:
+            bad("相对 canonical 解析错误：实际 %r" % (got,))
+
+        got = run_with(evil, canonical="foo://bar")
+        if got == evil:
+            ok("畸形 canonical（自定义协议）不会顶掉可用的 location.href")
+        else:
+            bad("畸形 canonical 覆盖了 location.href：实际 %r" % (got,))
+
+        got = run_with(evil)
+        if got == evil:
+            ok("无 canonical 时保留 location.href（原生侧还有兜底）")
+        else:
+            bad("无 canonical 时地址异常：实际 %r" % (got,))
+
+        got = run_with("https://example.com/plain?utm=1")
+        if got == "https://example.com/plain?utm=1":
+            ok("普通 https 地址原样保留")
+        else:
+            bad("普通地址被改动：实际 %r" % (got,))
+
     print("\n5. 关键常量与语义过滤（防止改坏而测试仍过）")
     # ⚠️ 第 4 节的页面是"理想页面"，把 CJK 加权去掉后它**照样**能通过 ——
     # 于是那项检查抓不到这个回归（实测确认）。这里改成直接检查源码特征，
@@ -317,6 +407,43 @@ console.log('__RESULT__' + RESULT);
             break
     else:
         bad("未处理图片懒加载 —— 阅读视图里图片会是占位图")
+
+    # 原文地址必须优先 canonical，不能直接用 location.href
+    #
+    # 这是 ERR_UNKNOWN_URL_SCHEME 的根因：App 内嵌页会用自定义协议做跳转
+    # （zhihu://answers/123），location.href 就是那个打不开的地址。
+    if re.search(r"rel'\)\s*\|\|\s*''\)\.toLowerCase\(\) === 'canonical'", script):
+        ok("读取 link[rel=canonical]")
+    else:
+        bad("未读取 canonical —— 原文地址可能是 custom scheme")
+
+    if "og:url" in script:
+        ok("canonical 缺失时退回 og:url")
+    else:
+        bad("未读 og:url 兜底")
+
+    if re.search(r"url: articleUrl", script):
+        ok("返回的 url 用的是净化后的 articleUrl，而不是 location.href 原始值")
+    else:
+        bad("仍然直接返回 location.href —— 自定义协议会流到原生侧")
+
+    if re.search(r"if \(/\^https\?:/i\.test\(abs\)\) articleUrl = abs", script):
+        ok("只采纳能解析成 http(s) 的 canonical（畸形值不会覆盖）")
+    else:
+        bad("未校验 canonical 的协议，畸形 canonical 会顶掉可用的 location.href")
+
+    if re.search(r"new URL\(canonical, base\)", script):
+        ok("canonical 按相对地址解析成绝对地址")
+    else:
+        bad("canonical 未解析成绝对地址，相对路径会导致原文链接失效")
+
+    # 相对 canonical 的 base 必须先净化：直接用 location.href 时，
+    # zhihu://answers/1 + /post/2 会解析成 zhihu://answers/post/2 ——
+    # 仍是自定义协议，等于白读了 canonical。
+    if re.search(r"document\.baseURI", script) and re.search(r"!?/\^https\?:/i\.test\(base\)", script):
+        ok("相对 canonical 的 base 会先净化成 http(s)（否则自定义协议下解析结果仍是自定义协议）")
+    else:
+        bad("相对 canonical 直接用 location.href 当 base —— 自定义协议壳里解析结果仍不可用")
 
     # 失败必须返回结构化原因，不能抛异常
     if re.search(r"catch \(e\)[\s\S]{0,200}?status: 'error'", script):
@@ -471,14 +598,43 @@ if re.search(r"val isInternal = HomePage\.isHomeUrl\(url\) \|\| ReaderPage\.isRe
 else:
     bad("未统一判定内部页面，容易出现只处理主页、漏掉阅读视图的情况")
 
-# (3) 回调不能把逻辑地址改写成 baseUrl
-# 必须**逐个回调**检查，不能只数总数：onPageStarted 与 onPageFinished
-# 都要各自处理，只修一个的话另一个仍会把 ling://reader 改写掉。
-# （踩过：一开始用 `count(...) >= 2` 计数，退化掉其中一个仍能凑够数。）
-if mgr.count("if (isInternal) it.url else url") >= 2:
-    ok("onPageStarted/onPageFinished 都不会把 ling://reader 改写成 baseUrl")
+# (3) 回调不能把逻辑地址改写成 baseUrl，也不能记下自定义协议
+#
+# 判据是"算出 keep 并用它决定是否写回 url"。变量名会随实现调整，
+# 所以不绑定具体写法，而是检查**行为**：url 的回写被一个判定变量挡住。
+# （踩过：一开始写死 `if (isInternal) it.url else url`，
+#  后来为了同时挡掉自定义协议改名为 keep，检查就误报了。）
+if mgr.count("url = if (keep) it.url else url") >= 2:
+    ok("onPageStarted/onPageFinished 都不会覆盖掉逻辑地址")
 else:
     bad("有回调会把阅读视图的逻辑地址改写掉，导致返回栈与识别错乱")
+
+if re.search(r"val keep = isInternal \|\| !isNavigable\(url\)", mgr):
+    ok("自定义协议（zhihu:// 等）不写回 TabState.url")
+else:
+    bad("自定义协议会写进 TabState.url —— 地址栏显示打不开的地址，退出阅读模式时会回填给 WebView")
+
+# 自定义协议绝对不能交给 WebView，否则就是 ERR_UNKNOWN_URL_SCHEME 白屏。
+# 判定逻辑本身在 UrlScheme.kt（可单测），这里检查**调用点是否真的拦了**。
+if re.search(r"fun loadUrl\(id: String, url: String\)[\s\S]{0,900}?!isNavigable\(url\)", mgr):
+    ok("loadUrl 入口拒绝自定义协议")
+else:
+    bad("loadUrl 缺少协议检查 —— 自定义协议会导致 ERR_UNKNOWN_URL_SCHEME")
+
+if "UrlScheme.isNavigable" in mgr:
+    ok("协议判定委托给 UrlScheme（可单测，见 UrlSchemeTest）")
+else:
+    bad("协议判定未抽到可测试的位置")
+
+if re.search(r"fun exitReaderMode\(\)[\s\S]{0,900}?isNavigable\(cached\.url\)", mgr):
+    ok("退出阅读模式前先校验原文地址可加载性")
+else:
+    bad("退出阅读模式直接 loadUrl —— 自定义协议会让用户卡在阅读视图")
+
+if re.search(r"fun exitReaderMode\(\)[\s\S]{0,1100}?canGoBack\(\)[\s\S]{0,300}?loadHome", mgr):
+    ok("原文地址不可加载时有回退路径（历史 → 主页），不会把用户困住")
+else:
+    bad("原文地址不可加载时没有回退，用户会卡在阅读视图")
 
 # 逐个回调独立校验：每个回调块内都必须算出 isInternal。
 #
@@ -490,10 +646,10 @@ for cb, nxt in (("onPageStarted", "onPageFinished"),
     start = mgr.find(cb + " = {")
     end = mgr.find(nxt, start + 1) if start >= 0 else -1
     blk = mgr[start:end] if start >= 0 and end > start else ""
-    if "ReaderPage.isReaderUrl(url)" in blk:
-        ok(f"{cb} 内部页面判定含阅读视图")
+    if "ReaderPage.isReaderUrl(url)" in blk and "isNavigable(url)" in blk:
+        ok(f"{cb} 同时挡住内部页面与自定义协议")
     else:
-        bad(f"{cb} 的判定漏了阅读视图 —— 会把 ling://reader 改写成 baseUrl")
+        bad(f"{cb} 的判定不完整 —— 会把 ling://reader 或 zhihu:// 写回状态")
 
 # (4) 合成地址不写入历史
 if re.search(r"onVisited\?\.invoke[\s\S]{0,500}?合成", mgr):
