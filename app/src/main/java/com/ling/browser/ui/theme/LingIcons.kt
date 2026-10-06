@@ -2,63 +2,62 @@ package com.ling.browser.ui.theme
 
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.PathBuilder
 import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.unit.dp
 
 /**
- * 「翎」自带的图标集。
+ * 「翎」的图标集。
  *
- * 为什么不直接用 material-icons-extended：那个库会把**上万个**图标类
- * 全部编进 dex，实测单个 classes.dex 就有 40+ MB，debug 包体积 18 MB。
- * Via 这类极简浏览器整个安装包才几百 KB —— 为了 20 个图标背这么大的包袱
- * 完全违背「翎」的定位。
+ * 全部来自 **Material Symbols Outlined** 官方图标（用户从 fonts.google.com
+ * 导出的 Android VectorDrawable），由 `tools/import_material_icons.py`
+ * 自动转换成 Compose 的 ImageVector 代码。
  *
- * 实现约定（很重要，踩过坑）：
- *  1. **只用 moveTo / lineTo / close**，不用 arcTo。
- *     arcTo 的大弧标志（largeArc）在「起点与终点几乎相对」时行为反直觉，
- *     曾把刷新图标画成了一个闭合的扇形（视觉上像水桶）。圆弧一律用
- *     多段短直线近似，几何完全可预测、可验证。
- *  2. 每个图标都是 24x24 视口、单一描边路径，线宽 1.8。
- *  3. 坐标都取整或半整数，方便对照渲染结果逐点核对。
+ * ## 为什么不用字体，也不用 material-icons-extended
+ *
+ * | 方案 | 代价 |
+ * |---|---|
+ * | `material-icons-extended` | 上万个图标全部编进 dex，debug 包 18 MB |
+ * | Material Symbols TTF | 单文件 948 KB，接近当前 APK 的 1.4 MB |
+ * | **本方案（矢量代码）** | 26 个图标合计约 40 KB 源码 |
+ *
+ * 「翎」对标 Via 的极简定位（整个安装包几百 KB），为 20 多个图标背
+ * 1 MB 的字体不划算。而且字体图标无法参与 Compose 的 tint 与
+ * 交互动画，转成 ImageVector 后这些都能直接用，还能被单元测试检查。
+ *
+ * ## 坐标系
+ *
+ * 官方导出的是 **960x960** 视口。这里**不缩放到 24**：
+ * 960 是 Google 的原始设计网格，保留它意味着坐标能与官方文件逐位对照，
+ * 出了问题可以直接 diff。缩放反而引入浮点误差。
+ * 渲染尺寸由 `defaultWidth/Height = 24.dp` 控制，与外层视口无关。
+ *
+ * ## 图形约定
+ *
+ * 全部为**实心填充**（`fill = SolidColor(Color.Black)`），
+ * 颜色由 Compose 侧通过 `Icon(tint = ...)` 覆盖 —— 这是 Material 图标
+ * 的标准用法。早期版本用描边（stroke）自绘，笔画粗细在小尺寸下不匀，
+ * 且造型与官方有出入，已全部替换。
+ *
+ * 路径命令只用到 moveTo / lineTo / quadraticBezierTo / close：
+ * 官方源文件里只有 M/L/Q/Z 四种命令，转换器遇到其它命令会直接报错，
+ * 不会静默丢数据。特别注意**没有 arcTo** —— 那个指令的 largeArc 标志
+ * 在「起点与终点几乎相对」时行为反直觉，曾把刷新图标画成一个扇形。
  */
 object LingIcons {
 
-    // ---------------------------------------------------------------- 基础几何
-
-    /** 描边图标。 */
-    private fun icon(
+    /** 所有图标的统一构建入口。 */
+    private fun materialIcon(
         name: String,
-        build: androidx.compose.ui.graphics.vector.PathBuilder.() -> Unit,
+        build: PathBuilder.() -> Unit,
     ): ImageVector = ImageVector.Builder(
         name = name,
         defaultWidth = 24.dp,
         defaultHeight = 24.dp,
-        viewportWidth = 24f,
-        viewportHeight = 24f,
-    ).apply {
-        path(
-            fill = SolidColor(Color.Transparent),
-            stroke = SolidColor(Color.Black),
-            strokeLineWidth = 1.8f,
-            strokeLineCap = StrokeCap.Round,
-            strokeLineJoin = StrokeJoin.Round,
-            pathBuilder = build,
-        )
-    }.build()
-
-    /** 实心图标。 */
-    private fun solidIcon(
-        name: String,
-        build: androidx.compose.ui.graphics.vector.PathBuilder.() -> Unit,
-    ): ImageVector = ImageVector.Builder(
-        name = name,
-        defaultWidth = 24.dp,
-        defaultHeight = 24.dp,
-        viewportWidth = 24f,
-        viewportHeight = 24f,
+        // 官方原始网格，不做缩放
+        viewportWidth = 960f,
+        viewportHeight = 960f,
     ).apply {
         path(
             fill = SolidColor(Color.Black),
@@ -66,409 +65,1199 @@ object LingIcons {
         )
     }.build()
 
-    /**
-     * 用折线近似一段圆弧（角度制，0° 指向 +X，顺时针为正）。
-     * 返回的点序列可直接 lineTo。
-     */
-    private fun androidx.compose.ui.graphics.vector.PathBuilder.arcPolyline(
-        cx: Float,
-        cy: Float,
-        r: Float,
-        startDeg: Float,
-        endDeg: Float,
-        steps: Int = 12,
-    ) {
-        for (i in 0..steps) {
-            val t = startDeg + (endDeg - startDeg) * i / steps
-            val rad = Math.toRadians(t.toDouble())
-            val x = cx + r * kotlin.math.cos(rad).toFloat()
-            val y = cy + r * kotlin.math.sin(rad).toFloat()
-            if (i == 0) moveTo(x, y) else lineTo(x, y)
+    // ------------------------------------------------------------ 图标
+
+    /** ArrowBack（Material Symbols Outlined: arrow_back，官方）。 */
+    val ArrowBack: ImageVector by lazy {
+        materialIcon("ArrowBack") {
+            moveTo(313f, 520f)
+            lineTo(537f, 744f)
+            lineTo(480f, 800f)
+            lineTo(160f, 480f)
+            lineTo(480f, 160f)
+            lineTo(537f, 216f)
+            lineTo(313f, 440f)
+            lineTo(800f, 440f)
+            lineTo(800f, 520f)
+            lineTo(313f, 520f)
+            close()
         }
     }
 
-    // ---------------------------------------------------------------- 导航
-
-    /** 后退箭头（圆形底 + 左箭头）。 */
-    val ArrowBack: ImageVector = icon("ArrowBack") {
-        moveTo(19f, 12f)
-        horizontalLineTo(5.5f)
-        moveTo(11f, 5.5f)
-        lineTo(4.5f, 12f)
-        lineTo(11f, 18.5f)
+    /** ArrowForward（Material Symbols Outlined: arrow_forward，官方）。 */
+    val ArrowForward: ImageVector by lazy {
+        materialIcon("ArrowForward") {
+            moveTo(647f, 520f)
+            lineTo(160f, 520f)
+            lineTo(160f, 440f)
+            lineTo(647f, 440f)
+            lineTo(423f, 216f)
+            lineTo(480f, 160f)
+            lineTo(800f, 480f)
+            lineTo(480f, 800f)
+            lineTo(423f, 744f)
+            lineTo(647f, 520f)
+            close()
+        }
     }
 
-    /** 前进箭头。 */
-    val ArrowForward: ImageVector = icon("ArrowForward") {
-        moveTo(5f, 12f)
-        horizontalLineTo(18.5f)
-        moveTo(13f, 5.5f)
-        lineTo(19.5f, 12f)
-        lineTo(13f, 18.5f)
+    /** Close（Material Symbols Outlined: close，合成·按官方规格）。 */  // 官方文件未提供，按 Material Symbols 规格合成（见 tools/synth_missing_icons.py）
+    val Close: ImageVector by lazy {
+        materialIcon("Close") {
+            moveTo(256f, 760f)
+            lineTo(200f, 704f)
+            lineTo(424f, 480f)
+            lineTo(200f, 256f)
+            lineTo(256f, 200f)
+            lineTo(480f, 424f)
+            lineTo(704f, 200f)
+            lineTo(760f, 256f)
+            lineTo(536f, 480f)
+            lineTo(760f, 704f)
+            lineTo(704f, 760f)
+            lineTo(480f, 536f)
+            lineTo(256f, 760f)
+            close()
+        }
     }
 
-    /** 关闭 / 清除。 */
-    val Close: ImageVector = icon("Close") {
-        moveTo(6f, 6f)
-        lineTo(18f, 18f)
-        moveTo(18f, 6f)
-        lineTo(6f, 18f)
+    /** Refresh（Material Symbols Outlined: refresh，官方）。 */
+    val Refresh: ImageVector by lazy {
+        materialIcon("Refresh") {
+            moveTo(480f, 800f)
+            quadTo(346f, 800f, 253f, 707f)
+            quadTo(160f, 614f, 160f, 480f)
+            quadTo(160f, 346f, 253f, 253f)
+            quadTo(346f, 160f, 480f, 160f)
+            quadTo(549f, 160f, 612f, 188.5f)
+            quadTo(675f, 217f, 720f, 270f)
+            lineTo(720f, 160f)
+            lineTo(800f, 160f)
+            lineTo(800f, 440f)
+            lineTo(520f, 440f)
+            lineTo(520f, 360f)
+            lineTo(688f, 360f)
+            quadTo(656f, 304f, 600.5f, 272f)
+            quadTo(545f, 240f, 480f, 240f)
+            quadTo(380f, 240f, 310f, 310f)
+            quadTo(240f, 380f, 240f, 480f)
+            quadTo(240f, 580f, 310f, 650f)
+            quadTo(380f, 720f, 480f, 720f)
+            quadTo(557f, 720f, 619f, 676f)
+            quadTo(681f, 632f, 706f, 560f)
+            lineTo(790f, 560f)
+            quadTo(762f, 666f, 676f, 733f)
+            quadTo(590f, 800f, 480f, 800f)
+            close()
+        }
     }
 
-    /**
-     * 刷新：一个带箭头的圆环（顺时针缺口 + 箭头）。
-     *
-     * 用 arcPolyline 画 ~300° 的圆环，缺口留在右上；
-     * 再用两条短线拼出箭头指向缺口处 —— 完全避开 arcTo。
-     */
-    val Refresh: ImageVector = icon("Refresh") {
-        // 圆环：从 -60° 顺时针绕到 -120°（即留出右上 60° 的缺口）
-        arcPolyline(cx = 12f, cy = 12f, r = 7f, startDeg = -60f, endDeg = 240f, steps = 24)
-        // 箭头（位于缺口的上端，指向右下方）
-        moveTo(14.2f, 3.2f)
-        lineTo(19.0f, 5.6f)
-        lineTo(16.6f, 10.4f)
+    /** Home（Material Symbols Outlined: home，官方）。 */
+    val Home: ImageVector by lazy {
+        materialIcon("Home") {
+            moveTo(240f, 760f)
+            lineTo(360f, 760f)
+            lineTo(360f, 520f)
+            lineTo(600f, 520f)
+            lineTo(600f, 760f)
+            lineTo(720f, 760f)
+            lineTo(720f, 400f)
+            lineTo(480f, 220f)
+            lineTo(240f, 400f)
+            lineTo(240f, 760f)
+            close()
+            moveTo(160f, 840f)
+            lineTo(160f, 360f)
+            lineTo(480f, 120f)
+            lineTo(800f, 360f)
+            lineTo(800f, 840f)
+            lineTo(520f, 840f)
+            lineTo(520f, 600f)
+            lineTo(440f, 600f)
+            lineTo(440f, 840f)
+            lineTo(160f, 840f)
+            close()
+            moveTo(480f, 490f)
+            lineTo(480f, 490f)
+            lineTo(480f, 490f)
+            lineTo(480f, 490f)
+            lineTo(480f, 490f)
+            lineTo(480f, 490f)
+            lineTo(480f, 490f)
+            lineTo(480f, 490f)
+            lineTo(480f, 490f)
+            close()
+        }
     }
 
-    /** 主页：屋顶 + 墙体 + 门。 */
-    val Home: ImageVector = icon("Home") {
-        // 屋顶
-        moveTo(3.5f, 10.8f)
-        lineTo(12f, 3.8f)
-        lineTo(20.5f, 10.8f)
-        // 两侧墙体 + 底部
-        moveTo(5.8f, 9.2f)
-        verticalLineTo(19.5f)
-        lineTo(18.2f, 19.5f)
-        verticalLineTo(9.2f)
-        // 门
-        moveTo(9.8f, 19.5f)
-        verticalLineTo(14.2f)
-        lineTo(14.2f, 14.2f)
-        verticalLineTo(19.5f)
+    /** Layers（Material Symbols Outlined: layers，合成·按官方规格）。 */  // 官方文件未提供，按 Material Symbols 规格合成（见 tools/synth_missing_icons.py）
+    val Layers: ImageVector by lazy {
+        materialIcon("Layers") {
+            moveTo(480f, 842f)
+            lineTo(120f, 562f)
+            lineTo(186f, 512f)
+            lineTo(480f, 740f)
+            lineTo(774f, 512f)
+            lineTo(840f, 562f)
+            lineTo(480f, 842f)
+            close()
+            moveTo(480f, 640f)
+            lineTo(120f, 360f)
+            lineTo(480f, 80f)
+            lineTo(840f, 360f)
+            lineTo(480f, 640f)
+            close()
+            moveTo(480f, 360f)
+            lineTo(480f, 360f)
+            lineTo(480f, 360f)
+            lineTo(480f, 360f)
+            close()
+            moveTo(480f, 538f)
+            lineTo(710f, 360f)
+            lineTo(480f, 182f)
+            lineTo(250f, 360f)
+            lineTo(480f, 538f)
+            close()
+        }
     }
 
-    /** 标签页（多层堆叠）。 */
-    val Layers: ImageVector = icon("Layers") {
-        moveTo(12f, 3.5f)
-        lineTo(21f, 8f)
-        lineTo(12f, 12.5f)
-        lineTo(3f, 8f)
-        close()
-        moveTo(3f, 12.5f)
-        lineTo(12f, 17f)
-        lineTo(21f, 12.5f)
-        moveTo(3f, 16.5f)
-        lineTo(12f, 21f)
-        lineTo(21f, 16.5f)
+    /** MoreVert（Material Symbols Outlined: more_vert，合成·按官方规格）。 */  // 官方文件未提供，按 Material Symbols 规格合成（见 tools/synth_missing_icons.py）
+    val MoreVert: ImageVector by lazy {
+        materialIcon("MoreVert") {
+            moveTo(480f, 800f)
+            quadTo(447f, 800f, 423.5f, 776.5f)
+            quadTo(400f, 753f, 400f, 720f)
+            quadTo(400f, 687f, 423.5f, 663.5f)
+            quadTo(447f, 640f, 480f, 640f)
+            quadTo(513f, 640f, 536.5f, 663.5f)
+            quadTo(560f, 687f, 560f, 720f)
+            quadTo(560f, 753f, 536.5f, 776.5f)
+            quadTo(513f, 800f, 480f, 800f)
+            close()
+            moveTo(480f, 560f)
+            quadTo(447f, 560f, 423.5f, 536.5f)
+            quadTo(400f, 513f, 400f, 480f)
+            quadTo(400f, 447f, 423.5f, 423.5f)
+            quadTo(447f, 400f, 480f, 400f)
+            quadTo(513f, 400f, 536.5f, 423.5f)
+            quadTo(560f, 447f, 560f, 480f)
+            quadTo(560f, 513f, 536.5f, 536.5f)
+            quadTo(513f, 560f, 480f, 560f)
+            close()
+            moveTo(480f, 320f)
+            quadTo(447f, 320f, 423.5f, 296.5f)
+            quadTo(400f, 273f, 400f, 240f)
+            quadTo(400f, 207f, 423.5f, 183.5f)
+            quadTo(447f, 160f, 480f, 160f)
+            quadTo(513f, 160f, 536.5f, 183.5f)
+            quadTo(560f, 207f, 560f, 240f)
+            quadTo(560f, 273f, 536.5f, 296.5f)
+            quadTo(513f, 320f, 480f, 320f)
+            close()
+        }
     }
 
-    /** 更多（竖排三点）。 */
-    val MoreVert: ImageVector = solidIcon("MoreVert") {
-        // 三个实心圆点（直接写三份，避免 repeat 作用域变量带来的歧义）
-        arcPolyline(cx = 12f, cy = 5f, r = 1.7f, startDeg = 0f, endDeg = 360f, steps = 14)
-        close()
-        arcPolyline(cx = 12f, cy = 12f, r = 1.7f, startDeg = 0f, endDeg = 360f, steps = 14)
-        close()
-        arcPolyline(cx = 12f, cy = 19f, r = 1.7f, startDeg = 0f, endDeg = 360f, steps = 14)
-        close()
+    /** Add（Material Symbols Outlined: add，官方）。 */
+    val Add: ImageVector by lazy {
+        materialIcon("Add") {
+            moveTo(440f, 520f)
+            lineTo(200f, 520f)
+            lineTo(200f, 440f)
+            lineTo(440f, 440f)
+            lineTo(440f, 200f)
+            lineTo(520f, 200f)
+            lineTo(520f, 440f)
+            lineTo(760f, 440f)
+            lineTo(760f, 520f)
+            lineTo(520f, 520f)
+            lineTo(520f, 760f)
+            lineTo(440f, 760f)
+            lineTo(440f, 520f)
+            close()
+        }
     }
 
-    /** 新建（加号）。 */
-    val Add: ImageVector = icon("Add") {
-        moveTo(12f, 5f)
-        verticalLineTo(19f)
-        moveTo(5f, 12f)
-        horizontalLineTo(19f)
+    /** BookmarkBorder（Material Symbols Outlined: bookmark_border，合成·按官方规格）。 */  // 官方文件未提供，按 Material Symbols 规格合成（见 tools/synth_missing_icons.py）
+    val BookmarkBorder: ImageVector by lazy {
+        materialIcon("BookmarkBorder") {
+            moveTo(200f, 840f)
+            lineTo(200f, 200f)
+            quadTo(200f, 167f, 223.5f, 143.5f)
+            quadTo(247f, 120f, 280f, 120f)
+            lineTo(680f, 120f)
+            quadTo(713f, 120f, 736.5f, 143.5f)
+            quadTo(760f, 167f, 760f, 200f)
+            lineTo(760f, 840f)
+            lineTo(480f, 720f)
+            lineTo(200f, 840f)
+            close()
+            moveTo(280f, 718f)
+            lineTo(480f, 632f)
+            lineTo(680f, 718f)
+            lineTo(680f, 200f)
+            quadTo(680f, 200f, 680f, 200f)
+            quadTo(680f, 200f, 680f, 200f)
+            lineTo(280f, 200f)
+            quadTo(280f, 200f, 280f, 200f)
+            quadTo(280f, 200f, 280f, 200f)
+            lineTo(280f, 718f)
+            close()
+        }
     }
 
-    // ---------------------------------------------------------------- 内容
-
-    /** 书签（描边）。 */
-    val BookmarkBorder: ImageVector = icon("BookmarkBorder") {
-        moveTo(7.5f, 4f)
-        horizontalLineTo(16.5f)
-        lineTo(17.5f, 5f)
-        verticalLineTo(20f)
-        lineTo(12f, 15.8f)
-        lineTo(6.5f, 20f)
-        verticalLineTo(5f)
-        close()
+    /** Bookmark（Material Symbols Outlined: bookmark，官方）。 */
+    val Bookmark: ImageVector by lazy {
+        materialIcon("Bookmark") {
+            moveTo(200f, 840f)
+            lineTo(200f, 200f)
+            quadTo(200f, 167f, 223.5f, 143.5f)
+            quadTo(247f, 120f, 280f, 120f)
+            lineTo(680f, 120f)
+            quadTo(713f, 120f, 736.5f, 143.5f)
+            quadTo(760f, 167f, 760f, 200f)
+            lineTo(760f, 840f)
+            lineTo(480f, 720f)
+            lineTo(200f, 840f)
+            close()
+            moveTo(280f, 718f)
+            lineTo(480f, 632f)
+            lineTo(680f, 718f)
+            lineTo(680f, 200f)
+            quadTo(680f, 200f, 680f, 200f)
+            quadTo(680f, 200f, 680f, 200f)
+            lineTo(280f, 200f)
+            quadTo(280f, 200f, 280f, 200f)
+            quadTo(280f, 200f, 280f, 200f)
+            lineTo(280f, 718f)
+            close()
+            moveTo(280f, 200f)
+            lineTo(280f, 200f)
+            quadTo(280f, 200f, 280f, 200f)
+            quadTo(280f, 200f, 280f, 200f)
+            lineTo(680f, 200f)
+            quadTo(680f, 200f, 680f, 200f)
+            quadTo(680f, 200f, 680f, 200f)
+            lineTo(680f, 200f)
+            lineTo(480f, 200f)
+            lineTo(280f, 200f)
+            close()
+        }
     }
 
-    /** 历史（时钟 + 回退指针）。 */
-    val History: ImageVector = icon("History") {
-        // 完整的圆环（不做缺口，避免与箭头互相挤压）
-        arcPolyline(cx = 12f, cy = 12.5f, r = 8f, startDeg = 0f, endDeg = 360f, steps = 30)
-        // 回退箭头（左上角，指向圆内）
-        moveTo(3.2f, 4.5f)
-        verticalLineTo(10f)
-        horizontalLineTo(8.7f)
-        // 时针 + 分针
-        moveTo(12f, 8.2f)
-        verticalLineTo(12.9f)
-        lineTo(15.4f, 15.1f)
+    /** History（Material Symbols Outlined: history，官方）。 */
+    val History: ImageVector by lazy {
+        materialIcon("History") {
+            moveTo(480f, 840f)
+            quadTo(342f, 840f, 239.5f, 748.5f)
+            quadTo(137f, 657f, 122f, 520f)
+            lineTo(204f, 520f)
+            quadTo(218f, 624f, 296.5f, 692f)
+            quadTo(375f, 760f, 480f, 760f)
+            quadTo(597f, 760f, 678.5f, 678.5f)
+            quadTo(760f, 597f, 760f, 480f)
+            quadTo(760f, 363f, 678.5f, 281.5f)
+            quadTo(597f, 200f, 480f, 200f)
+            quadTo(411f, 200f, 351f, 232f)
+            quadTo(291f, 264f, 250f, 320f)
+            lineTo(360f, 320f)
+            lineTo(360f, 400f)
+            lineTo(120f, 400f)
+            lineTo(120f, 160f)
+            lineTo(200f, 160f)
+            lineTo(200f, 254f)
+            quadTo(251f, 190f, 324.5f, 155f)
+            quadTo(398f, 120f, 480f, 120f)
+            quadTo(555f, 120f, 620.5f, 148.5f)
+            quadTo(686f, 177f, 734.5f, 225.5f)
+            quadTo(783f, 274f, 811.5f, 339.5f)
+            quadTo(840f, 405f, 840f, 480f)
+            quadTo(840f, 555f, 811.5f, 620.5f)
+            quadTo(783f, 686f, 734.5f, 734.5f)
+            quadTo(686f, 783f, 620.5f, 811.5f)
+            quadTo(555f, 840f, 480f, 840f)
+            close()
+            moveTo(592f, 648f)
+            lineTo(440f, 496f)
+            lineTo(440f, 280f)
+            lineTo(520f, 280f)
+            lineTo(520f, 464f)
+            lineTo(648f, 592f)
+            lineTo(592f, 648f)
+            close()
+        }
     }
 
-    /** 删除（垃圾桶）。 */
-    val DeleteOutline: ImageVector = icon("DeleteOutline") {
-        moveTo(4.5f, 7f)
-        horizontalLineTo(19.5f)
-        // 桶盖提手
-        moveTo(9.5f, 7f)
-        verticalLineTo(4.8f)
-        lineTo(10.3f, 4f)
-        horizontalLineTo(13.7f)
-        lineTo(14.5f, 4.8f)
-        verticalLineTo(7f)
-        // 桶身
-        moveTo(6.5f, 7f)
-        verticalLineTo(19.2f)
-        lineTo(7.3f, 20f)
-        horizontalLineTo(16.7f)
-        lineTo(17.5f, 19.2f)
-        verticalLineTo(7f)
-        // 两道竖纹
-        moveTo(10.2f, 10.8f)
-        verticalLineTo(16.2f)
-        moveTo(13.8f, 10.8f)
-        verticalLineTo(16.2f)
+    /** DeleteOutline（Material Symbols Outlined: delete，官方）。 */  // 官方 delete（实心垃圾桶）
+    val DeleteOutline: ImageVector by lazy {
+        materialIcon("DeleteOutline") {
+            moveTo(280f, 840f)
+            quadTo(247f, 840f, 223.5f, 816.5f)
+            quadTo(200f, 793f, 200f, 760f)
+            lineTo(200f, 240f)
+            lineTo(160f, 240f)
+            lineTo(160f, 160f)
+            lineTo(360f, 160f)
+            lineTo(360f, 120f)
+            lineTo(600f, 120f)
+            lineTo(600f, 160f)
+            lineTo(800f, 160f)
+            lineTo(800f, 240f)
+            lineTo(760f, 240f)
+            lineTo(760f, 760f)
+            quadTo(760f, 793f, 736.5f, 816.5f)
+            quadTo(713f, 840f, 680f, 840f)
+            lineTo(280f, 840f)
+            close()
+            moveTo(680f, 240f)
+            lineTo(280f, 240f)
+            lineTo(280f, 760f)
+            quadTo(280f, 760f, 280f, 760f)
+            quadTo(280f, 760f, 280f, 760f)
+            lineTo(680f, 760f)
+            quadTo(680f, 760f, 680f, 760f)
+            quadTo(680f, 760f, 680f, 760f)
+            lineTo(680f, 240f)
+            close()
+            moveTo(360f, 680f)
+            lineTo(440f, 680f)
+            lineTo(440f, 320f)
+            lineTo(360f, 320f)
+            lineTo(360f, 680f)
+            close()
+            moveTo(520f, 680f)
+            lineTo(600f, 680f)
+            lineTo(600f, 320f)
+            lineTo(520f, 320f)
+            lineTo(520f, 680f)
+            close()
+            moveTo(280f, 240f)
+            lineTo(280f, 240f)
+            lineTo(280f, 760f)
+            quadTo(280f, 760f, 280f, 760f)
+            quadTo(280f, 760f, 280f, 760f)
+            lineTo(280f, 760f)
+            quadTo(280f, 760f, 280f, 760f)
+            quadTo(280f, 760f, 280f, 760f)
+            lineTo(280f, 240f)
+            close()
+        }
     }
 
-    /** 搜索（放大镜）。 */
-    val Search: ImageVector = icon("Search") {
-        arcPolyline(cx = 10.8f, cy = 10.8f, r = 6.8f, startDeg = 0f, endDeg = 360f, steps = 26)
-        moveTo(15.7f, 15.7f)
-        lineTo(20f, 20f)
+    /** DeleteSweep（Material Symbols Outlined: delete_sweep，官方）。 */
+    val DeleteSweep: ImageVector by lazy {
+        materialIcon("DeleteSweep") {
+            moveTo(600f, 720f)
+            lineTo(600f, 640f)
+            lineTo(760f, 640f)
+            lineTo(760f, 720f)
+            lineTo(600f, 720f)
+            close()
+            moveTo(600f, 400f)
+            lineTo(600f, 320f)
+            lineTo(880f, 320f)
+            lineTo(880f, 400f)
+            lineTo(600f, 400f)
+            close()
+            moveTo(600f, 560f)
+            lineTo(600f, 480f)
+            lineTo(840f, 480f)
+            lineTo(840f, 560f)
+            lineTo(600f, 560f)
+            close()
+            moveTo(120f, 320f)
+            lineTo(80f, 320f)
+            lineTo(80f, 240f)
+            lineTo(240f, 240f)
+            lineTo(240f, 180f)
+            lineTo(400f, 180f)
+            lineTo(400f, 240f)
+            lineTo(560f, 240f)
+            lineTo(560f, 320f)
+            lineTo(520f, 320f)
+            lineTo(520f, 680f)
+            quadTo(520f, 713f, 496.5f, 736.5f)
+            quadTo(473f, 760f, 440f, 760f)
+            lineTo(200f, 760f)
+            quadTo(167f, 760f, 143.5f, 736.5f)
+            quadTo(120f, 713f, 120f, 680f)
+            lineTo(120f, 320f)
+            close()
+            moveTo(200f, 320f)
+            lineTo(200f, 680f)
+            quadTo(200f, 680f, 200f, 680f)
+            quadTo(200f, 680f, 200f, 680f)
+            lineTo(440f, 680f)
+            quadTo(440f, 680f, 440f, 680f)
+            quadTo(440f, 680f, 440f, 680f)
+            lineTo(440f, 320f)
+            lineTo(200f, 320f)
+            close()
+            moveTo(200f, 320f)
+            lineTo(200f, 320f)
+            lineTo(200f, 680f)
+            quadTo(200f, 680f, 200f, 680f)
+            quadTo(200f, 680f, 200f, 680f)
+            lineTo(200f, 680f)
+            quadTo(200f, 680f, 200f, 680f)
+            quadTo(200f, 680f, 200f, 680f)
+            lineTo(200f, 320f)
+            close()
+        }
     }
 
-    /** 下载（向下的箭头 + 托盘）。 */
-    val Download: ImageVector = icon("Download") {
-        // 箭头竖杆
-        moveTo(12f, 3.5f)
-        verticalLineTo(14f)
-        // 箭头两翼
-        moveTo(7.6f, 9.8f)
-        lineTo(12f, 14.2f)
-        lineTo(16.4f, 9.8f)
-        // 托盘：底部一条横线
-        moveTo(4.5f, 19f)
-        horizontalLineTo(19.5f)
+    /** Search（Material Symbols Outlined: search，官方）。 */
+    val Search: ImageVector by lazy {
+        materialIcon("Search") {
+            moveTo(784f, 840f)
+            lineTo(532f, 588f)
+            quadTo(502f, 612f, 463f, 626f)
+            quadTo(424f, 640f, 380f, 640f)
+            quadTo(271f, 640f, 195.5f, 564.5f)
+            quadTo(120f, 489f, 120f, 380f)
+            quadTo(120f, 271f, 195.5f, 195.5f)
+            quadTo(271f, 120f, 380f, 120f)
+            quadTo(489f, 120f, 564.5f, 195.5f)
+            quadTo(640f, 271f, 640f, 380f)
+            quadTo(640f, 424f, 626f, 463f)
+            quadTo(612f, 502f, 588f, 532f)
+            lineTo(840f, 784f)
+            lineTo(784f, 840f)
+            close()
+            moveTo(380f, 560f)
+            quadTo(455f, 560f, 507.5f, 507.5f)
+            quadTo(560f, 455f, 560f, 380f)
+            quadTo(560f, 305f, 507.5f, 252.5f)
+            quadTo(455f, 200f, 380f, 200f)
+            quadTo(305f, 200f, 252.5f, 252.5f)
+            quadTo(200f, 305f, 200f, 380f)
+            quadTo(200f, 455f, 252.5f, 507.5f)
+            quadTo(305f, 560f, 380f, 560f)
+            close()
+        }
     }
 
-    /** 文件夹。 */
-    val Folder: ImageVector = icon("Folder") {
-        // 左上角的标签页（folder tab）
-        moveTo(3.2f, 6.6f)
-        lineTo(9.4f, 6.6f)
-        lineTo(11f, 8.6f)
-        horizontalLineTo(20.8f)
-        // 主体右侧下行
-        verticalLineTo(18.2f)
-        lineTo(19.6f, 19.4f)
-        horizontalLineTo(4.4f)
-        lineTo(3.2f, 18.2f)
-        close()
+    /** Download（Material Symbols Outlined: download，官方）。 */
+    val Download: ImageVector by lazy {
+        materialIcon("Download") {
+            moveTo(480f, 640f)
+            lineTo(280f, 440f)
+            lineTo(336f, 382f)
+            lineTo(440f, 486f)
+            lineTo(440f, 160f)
+            lineTo(520f, 160f)
+            lineTo(520f, 486f)
+            lineTo(624f, 382f)
+            lineTo(680f, 440f)
+            lineTo(480f, 640f)
+            close()
+            moveTo(240f, 800f)
+            quadTo(207f, 800f, 183.5f, 776.5f)
+            quadTo(160f, 753f, 160f, 720f)
+            lineTo(160f, 600f)
+            lineTo(240f, 600f)
+            lineTo(240f, 720f)
+            quadTo(240f, 720f, 240f, 720f)
+            quadTo(240f, 720f, 240f, 720f)
+            lineTo(720f, 720f)
+            quadTo(720f, 720f, 720f, 720f)
+            quadTo(720f, 720f, 720f, 720f)
+            lineTo(720f, 600f)
+            lineTo(800f, 600f)
+            lineTo(800f, 720f)
+            quadTo(800f, 753f, 776.5f, 776.5f)
+            quadTo(753f, 800f, 720f, 800f)
+            lineTo(240f, 800f)
+            close()
+        }
     }
 
-    /** 文件夹（打开态），用于「移入文件夹」。 */
-    val FolderOpen: ImageVector = icon("FolderOpen") {
-        moveTo(3.2f, 6.6f)
-        lineTo(9.4f, 6.6f)
-        lineTo(11f, 8.6f)
-        horizontalLineTo(19.4f)
-        verticalLineTo(11.4f)
-        // 前倾的开口
-        moveTo(3.2f, 18.4f)
-        lineTo(5.4f, 11.4f)
-        horizontalLineTo(21.6f)
-        lineTo(19.4f, 18.4f)
-        close()
+    /** Folder（Material Symbols Outlined: folder，官方）。 */
+    val Folder: ImageVector by lazy {
+        materialIcon("Folder") {
+            moveTo(160f, 800f)
+            quadTo(127f, 800f, 103.5f, 776.5f)
+            quadTo(80f, 753f, 80f, 720f)
+            lineTo(80f, 240f)
+            quadTo(80f, 207f, 103.5f, 183.5f)
+            quadTo(127f, 160f, 160f, 160f)
+            lineTo(400f, 160f)
+            lineTo(480f, 240f)
+            lineTo(800f, 240f)
+            quadTo(833f, 240f, 856.5f, 263.5f)
+            quadTo(880f, 287f, 880f, 320f)
+            lineTo(880f, 720f)
+            quadTo(880f, 753f, 856.5f, 776.5f)
+            quadTo(833f, 800f, 800f, 800f)
+            lineTo(160f, 800f)
+            close()
+            moveTo(160f, 720f)
+            lineTo(800f, 720f)
+            quadTo(800f, 720f, 800f, 720f)
+            quadTo(800f, 720f, 800f, 720f)
+            lineTo(800f, 320f)
+            quadTo(800f, 320f, 800f, 320f)
+            quadTo(800f, 320f, 800f, 320f)
+            lineTo(447f, 320f)
+            lineTo(367f, 240f)
+            lineTo(160f, 240f)
+            quadTo(160f, 240f, 160f, 240f)
+            quadTo(160f, 240f, 160f, 240f)
+            lineTo(160f, 720f)
+            quadTo(160f, 720f, 160f, 720f)
+            quadTo(160f, 720f, 160f, 720f)
+            close()
+            moveTo(160f, 720f)
+            quadTo(160f, 720f, 160f, 720f)
+            quadTo(160f, 720f, 160f, 720f)
+            lineTo(160f, 240f)
+            quadTo(160f, 240f, 160f, 240f)
+            quadTo(160f, 240f, 160f, 240f)
+            lineTo(160f, 240f)
+            lineTo(160f, 320f)
+            lineTo(160f, 320f)
+            quadTo(160f, 320f, 160f, 320f)
+            quadTo(160f, 320f, 160f, 320f)
+            lineTo(160f, 720f)
+            quadTo(160f, 720f, 160f, 720f)
+            quadTo(160f, 720f, 160f, 720f)
+            close()
+        }
     }
 
-    /** 锁（安全标识）。 */
-    val Lock: ImageVector = icon("Lock") {
-        // 锁体：圆角矩形（用直线+小折角近似圆角，避免 arcTo 退化）
-        moveTo(7.5f, 10.5f)
-        horizontalLineTo(16.5f)
-        lineTo(17.5f, 11.5f)
-        lineTo(17.5f, 19.5f)
-        lineTo(16.5f, 20.5f)
-        horizontalLineTo(7.5f)
-        lineTo(6.5f, 19.5f)
-        lineTo(6.5f, 11.5f)
-        close()
-        // 锁梁：半圆弧 + 两条竖边
-        moveTo(9f, 10.5f)
-        verticalLineTo(8f)
-        arcPolyline(cx = 12f, cy = 8f, r = 3f, startDeg = 180f, endDeg = 360f, steps = 10)
-        verticalLineTo(10.5f)
+    /** FolderOpen（Material Symbols Outlined: folder_open，官方）。 */
+    val FolderOpen: ImageVector by lazy {
+        materialIcon("FolderOpen") {
+            moveTo(160f, 800f)
+            quadTo(127f, 800f, 103.5f, 776.5f)
+            quadTo(80f, 753f, 80f, 720f)
+            lineTo(80f, 240f)
+            quadTo(80f, 207f, 103.5f, 183.5f)
+            quadTo(127f, 160f, 160f, 160f)
+            lineTo(400f, 160f)
+            lineTo(480f, 240f)
+            lineTo(800f, 240f)
+            quadTo(833f, 240f, 856.5f, 263.5f)
+            quadTo(880f, 287f, 880f, 320f)
+            lineTo(447f, 320f)
+            lineTo(367f, 240f)
+            lineTo(160f, 240f)
+            quadTo(160f, 240f, 160f, 240f)
+            quadTo(160f, 240f, 160f, 240f)
+            lineTo(160f, 720f)
+            quadTo(160f, 720f, 160f, 720f)
+            quadTo(160f, 720f, 160f, 720f)
+            lineTo(256f, 400f)
+            lineTo(940f, 400f)
+            lineTo(837f, 743f)
+            quadTo(829f, 769f, 807.5f, 784.5f)
+            quadTo(786f, 800f, 760f, 800f)
+            lineTo(160f, 800f)
+            close()
+            moveTo(244f, 720f)
+            lineTo(760f, 720f)
+            lineTo(832f, 480f)
+            lineTo(316f, 480f)
+            lineTo(244f, 720f)
+            close()
+            moveTo(244f, 720f)
+            lineTo(316f, 480f)
+            lineTo(316f, 480f)
+            lineTo(244f, 720f)
+            close()
+            moveTo(160f, 320f)
+            lineTo(160f, 240f)
+            quadTo(160f, 240f, 160f, 240f)
+            quadTo(160f, 240f, 160f, 240f)
+            lineTo(160f, 240f)
+            lineTo(160f, 320f)
+            close()
+        }
     }
 
-    /** 地球（主页品牌 / 网络）。 */
-    val Public: ImageVector = icon("Public") {
-        // 外圈
-        arcPolyline(cx = 12f, cy = 12f, r = 8.5f, startDeg = 0f, endDeg = 360f, steps = 28)
-        // 赤道
-        moveTo(3.5f, 12f)
-        horizontalLineTo(20.5f)
-        // 经线（椭圆，用较扁的两段弧近似）
-        arcPolyline(cx = 12f, cy = 12f, r = 4.2f, startDeg = 0f, endDeg = 360f, steps = 24)
+    /** Lock（Material Symbols Outlined: lock，官方）。 */
+    val Lock: ImageVector by lazy {
+        materialIcon("Lock") {
+            moveTo(240f, 880f)
+            quadTo(207f, 880f, 183.5f, 856.5f)
+            quadTo(160f, 833f, 160f, 800f)
+            lineTo(160f, 400f)
+            quadTo(160f, 367f, 183.5f, 343.5f)
+            quadTo(207f, 320f, 240f, 320f)
+            lineTo(280f, 320f)
+            lineTo(280f, 240f)
+            quadTo(280f, 157f, 338.5f, 98.5f)
+            quadTo(397f, 40f, 480f, 40f)
+            quadTo(563f, 40f, 621.5f, 98.5f)
+            quadTo(680f, 157f, 680f, 240f)
+            lineTo(680f, 320f)
+            lineTo(720f, 320f)
+            quadTo(753f, 320f, 776.5f, 343.5f)
+            quadTo(800f, 367f, 800f, 400f)
+            lineTo(800f, 800f)
+            quadTo(800f, 833f, 776.5f, 856.5f)
+            quadTo(753f, 880f, 720f, 880f)
+            lineTo(240f, 880f)
+            close()
+            moveTo(240f, 800f)
+            lineTo(720f, 800f)
+            quadTo(720f, 800f, 720f, 800f)
+            quadTo(720f, 800f, 720f, 800f)
+            lineTo(720f, 400f)
+            quadTo(720f, 400f, 720f, 400f)
+            quadTo(720f, 400f, 720f, 400f)
+            lineTo(240f, 400f)
+            quadTo(240f, 400f, 240f, 400f)
+            quadTo(240f, 400f, 240f, 400f)
+            lineTo(240f, 800f)
+            quadTo(240f, 800f, 240f, 800f)
+            quadTo(240f, 800f, 240f, 800f)
+            close()
+            moveTo(536.5f, 656.5f)
+            quadTo(560f, 633f, 560f, 600f)
+            quadTo(560f, 567f, 536.5f, 543.5f)
+            quadTo(513f, 520f, 480f, 520f)
+            quadTo(447f, 520f, 423.5f, 543.5f)
+            quadTo(400f, 567f, 400f, 600f)
+            quadTo(400f, 633f, 423.5f, 656.5f)
+            quadTo(447f, 680f, 480f, 680f)
+            quadTo(513f, 680f, 536.5f, 656.5f)
+            close()
+            moveTo(360f, 320f)
+            lineTo(600f, 320f)
+            lineTo(600f, 240f)
+            quadTo(600f, 190f, 565f, 155f)
+            quadTo(530f, 120f, 480f, 120f)
+            quadTo(430f, 120f, 395f, 155f)
+            quadTo(360f, 190f, 360f, 240f)
+            lineTo(360f, 320f)
+            close()
+            moveTo(240f, 800f)
+            quadTo(240f, 800f, 240f, 800f)
+            quadTo(240f, 800f, 240f, 800f)
+            lineTo(240f, 400f)
+            quadTo(240f, 400f, 240f, 400f)
+            quadTo(240f, 400f, 240f, 400f)
+            lineTo(240f, 400f)
+            quadTo(240f, 400f, 240f, 400f)
+            quadTo(240f, 400f, 240f, 400f)
+            lineTo(240f, 800f)
+            quadTo(240f, 800f, 240f, 800f)
+            quadTo(240f, 800f, 240f, 800f)
+            close()
+        }
     }
 
-    // ---------------------------------------------------------------- 设置
-
-    /** 夜间模式（月亮）。 */
-    val Nightlight: ImageVector = icon("Nightlight") {
-        // 月牙 = 外圆减去内圆的差集。
-        // 外圆 (cx12, cy12, r8.6) 与内圆 (cx17.2, cy12, r9.0) 相交于相对圆心 ±77.1° 处：
-        // 先沿外圆走左侧大弧（77.1° → 282.9°，逆时针经左半圆），
-        // 再沿内圆原路方向兜回起点，闭合后右侧被"咬掉"一口，即为新月。
-        arcPolyline(cx = 12f, cy = 12f, r = 8.6f, startDeg = 77.1f, endDeg = 282.9f, steps = 26)
-        arcPolyline(cx = 17.2f, cy = 12f, r = 9.0f, startDeg = 248.6f, endDeg = 111.4f, steps = 26)
-        close()
+    /** Public（Material Symbols Outlined: public，官方）。 */
+    val Public: ImageVector by lazy {
+        materialIcon("Public") {
+            moveTo(324f, 848.5f)
+            quadTo(251f, 817f, 197f, 763f)
+            quadTo(143f, 709f, 111.5f, 636f)
+            quadTo(80f, 563f, 80f, 480f)
+            quadTo(80f, 397f, 111.5f, 324f)
+            quadTo(143f, 251f, 197f, 197f)
+            quadTo(251f, 143f, 324f, 111.5f)
+            quadTo(397f, 80f, 480f, 80f)
+            quadTo(563f, 80f, 636f, 111.5f)
+            quadTo(709f, 143f, 763f, 197f)
+            quadTo(817f, 251f, 848.5f, 324f)
+            quadTo(880f, 397f, 880f, 480f)
+            quadTo(880f, 563f, 848.5f, 636f)
+            quadTo(817f, 709f, 763f, 763f)
+            quadTo(709f, 817f, 636f, 848.5f)
+            quadTo(563f, 880f, 480f, 880f)
+            quadTo(397f, 880f, 324f, 848.5f)
+            close()
+            moveTo(440f, 798f)
+            lineTo(440f, 720f)
+            quadTo(407f, 720f, 383.5f, 696.5f)
+            quadTo(360f, 673f, 360f, 640f)
+            lineTo(360f, 600f)
+            lineTo(168f, 408f)
+            quadTo(165f, 426f, 162.5f, 444f)
+            quadTo(160f, 462f, 160f, 480f)
+            quadTo(160f, 601f, 239.5f, 692f)
+            quadTo(319f, 783f, 440f, 798f)
+            close()
+            moveTo(716f, 696f)
+            quadTo(757f, 651f, 778.5f, 595.5f)
+            quadTo(800f, 540f, 800f, 480f)
+            quadTo(800f, 382f, 745.5f, 301f)
+            quadTo(691f, 220f, 600f, 184f)
+            lineTo(600f, 200f)
+            quadTo(600f, 233f, 576.5f, 256.5f)
+            quadTo(553f, 280f, 520f, 280f)
+            lineTo(440f, 280f)
+            lineTo(440f, 360f)
+            quadTo(440f, 377f, 428.5f, 388.5f)
+            quadTo(417f, 400f, 400f, 400f)
+            lineTo(320f, 400f)
+            lineTo(320f, 480f)
+            lineTo(560f, 480f)
+            quadTo(577f, 480f, 588.5f, 491.5f)
+            quadTo(600f, 503f, 600f, 520f)
+            lineTo(600f, 640f)
+            lineTo(640f, 640f)
+            quadTo(666f, 640f, 687f, 655.5f)
+            quadTo(708f, 671f, 716f, 696f)
+            close()
+        }
     }
 
-    /** 动态取色 / 魔法。 */
-    val AutoAwesome: ImageVector = solidIcon("AutoAwesome") {
-        // 四角星
-        moveTo(12f, 2.5f)
-        lineTo(13.9f, 8.6f)
-        lineTo(20f, 10.5f)
-        lineTo(13.9f, 12.4f)
-        lineTo(12f, 18.5f)
-        lineTo(10.1f, 12.4f)
-        lineTo(4f, 10.5f)
-        lineTo(10.1f, 8.6f)
-        close()
-        // 右上角小星
-        moveTo(18.8f, 15.4f)
-        lineTo(19.5f, 17.5f)
-        lineTo(21.6f, 18.2f)
-        lineTo(19.5f, 18.9f)
-        lineTo(18.8f, 21f)
-        lineTo(18.1f, 18.9f)
-        lineTo(16f, 18.2f)
-        lineTo(18.1f, 17.5f)
-        close()
+    /** Nightlight（Material Symbols Outlined: nightlight，官方）。 */
+    val Nightlight: ImageVector by lazy {
+        materialIcon("Nightlight") {
+            moveTo(560f, 880f)
+            quadTo(478f, 880f, 405f, 848.5f)
+            quadTo(332f, 817f, 277.5f, 762.5f)
+            quadTo(223f, 708f, 191.5f, 635f)
+            quadTo(160f, 562f, 160f, 479.5f)
+            quadTo(160f, 397f, 191.5f, 324.5f)
+            quadTo(223f, 252f, 277.5f, 197.5f)
+            quadTo(332f, 143f, 405f, 111.5f)
+            quadTo(478f, 80f, 560f, 80f)
+            quadTo(614f, 80f, 665f, 94f)
+            quadTo(716f, 108f, 760f, 134f)
+            quadTo(669f, 187f, 614.5f, 277.5f)
+            quadTo(560f, 368f, 560f, 480f)
+            quadTo(560f, 592f, 614.5f, 682.5f)
+            quadTo(669f, 773f, 760f, 826f)
+            quadTo(716f, 852f, 665f, 866f)
+            quadTo(614f, 880f, 560f, 880f)
+            close()
+            moveTo(560f, 800f)
+            quadTo(571f, 800f, 581f, 800f)
+            quadTo(591f, 800f, 600f, 798f)
+            quadTo(543f, 732f, 511.5f, 650.5f)
+            quadTo(480f, 569f, 480f, 480f)
+            quadTo(480f, 391f, 511.5f, 309.5f)
+            quadTo(543f, 228f, 600f, 162f)
+            quadTo(591f, 160f, 581f, 160f)
+            quadTo(571f, 160f, 560f, 160f)
+            quadTo(427f, 160f, 333.5f, 253.5f)
+            quadTo(240f, 347f, 240f, 480f)
+            quadTo(240f, 613f, 333.5f, 706.5f)
+            quadTo(427f, 800f, 560f, 800f)
+            close()
+            moveTo(480f, 480f)
+            quadTo(480f, 480f, 480f, 480f)
+            quadTo(480f, 480f, 480f, 480f)
+            quadTo(480f, 480f, 480f, 480f)
+            quadTo(480f, 480f, 480f, 480f)
+            quadTo(480f, 480f, 480f, 480f)
+            quadTo(480f, 480f, 480f, 480f)
+            quadTo(480f, 480f, 480f, 480f)
+            quadTo(480f, 480f, 480f, 480f)
+            quadTo(480f, 480f, 480f, 480f)
+            quadTo(480f, 480f, 480f, 480f)
+            quadTo(480f, 480f, 480f, 480f)
+            quadTo(480f, 480f, 480f, 480f)
+            close()
+        }
     }
 
-    /** JavaScript。 */
-    val Javascript: ImageVector = icon("Javascript") {
-        moveTo(4f, 4f)
-        horizontalLineTo(20f)
-        verticalLineTo(20f)
-        horizontalLineTo(4f)
-        close()
-        // J：竖钩
-        moveTo(10f, 9.5f)
-        verticalLineTo(14.5f)
-        lineTo(9f, 15.5f)
-        lineTo(7.2f, 14.8f)
-        // S：三段折线
-        moveTo(17.5f, 10.5f)
-        lineTo(15.8f, 9.8f)
-        lineTo(14.6f, 10.8f)
-        lineTo(15.9f, 12f)
-        lineTo(17.2f, 13.2f)
-        lineTo(16f, 14.6f)
-        lineTo(14.3f, 14.2f)
+    /** AutoAwesome（Material Symbols Outlined: auto_awesome_motion，官方）。 */  // 官方 auto_awesome_motion（auto_awesome 未提供，语义相近）
+    val AutoAwesome: ImageVector by lazy {
+        materialIcon("AutoAwesome") {
+            moveTo(480f, 880f)
+            quadTo(447f, 880f, 423.5f, 856.5f)
+            quadTo(400f, 833f, 400f, 800f)
+            lineTo(400f, 480f)
+            quadTo(400f, 447f, 423.5f, 423.5f)
+            quadTo(447f, 400f, 480f, 400f)
+            lineTo(800f, 400f)
+            quadTo(833f, 400f, 856.5f, 423.5f)
+            quadTo(880f, 447f, 880f, 480f)
+            lineTo(880f, 800f)
+            quadTo(880f, 833f, 856.5f, 856.5f)
+            quadTo(833f, 880f, 800f, 880f)
+            lineTo(480f, 880f)
+            close()
+            moveTo(480f, 800f)
+            lineTo(800f, 800f)
+            quadTo(800f, 800f, 800f, 800f)
+            quadTo(800f, 800f, 800f, 800f)
+            lineTo(800f, 480f)
+            quadTo(800f, 480f, 800f, 480f)
+            quadTo(800f, 480f, 800f, 480f)
+            lineTo(480f, 480f)
+            quadTo(480f, 480f, 480f, 480f)
+            quadTo(480f, 480f, 480f, 480f)
+            lineTo(480f, 800f)
+            quadTo(480f, 800f, 480f, 800f)
+            quadTo(480f, 800f, 480f, 800f)
+            close()
+            moveTo(240f, 720f)
+            lineTo(240f, 320f)
+            quadTo(240f, 287f, 263.5f, 263.5f)
+            quadTo(287f, 240f, 320f, 240f)
+            lineTo(720f, 240f)
+            lineTo(720f, 320f)
+            lineTo(320f, 320f)
+            quadTo(320f, 320f, 320f, 320f)
+            quadTo(320f, 320f, 320f, 320f)
+            lineTo(320f, 720f)
+            lineTo(240f, 720f)
+            close()
+            moveTo(80f, 560f)
+            lineTo(80f, 160f)
+            quadTo(80f, 127f, 103.5f, 103.5f)
+            quadTo(127f, 80f, 160f, 80f)
+            lineTo(560f, 80f)
+            lineTo(560f, 160f)
+            lineTo(160f, 160f)
+            quadTo(160f, 160f, 160f, 160f)
+            quadTo(160f, 160f, 160f, 160f)
+            lineTo(160f, 560f)
+            lineTo(80f, 560f)
+            close()
+            moveTo(480f, 800f)
+            quadTo(480f, 800f, 480f, 800f)
+            quadTo(480f, 800f, 480f, 800f)
+            lineTo(480f, 480f)
+            quadTo(480f, 480f, 480f, 480f)
+            quadTo(480f, 480f, 480f, 480f)
+            lineTo(480f, 480f)
+            quadTo(480f, 480f, 480f, 480f)
+            quadTo(480f, 480f, 480f, 480f)
+            lineTo(480f, 800f)
+            quadTo(480f, 800f, 480f, 800f)
+            quadTo(480f, 800f, 480f, 800f)
+            close()
+        }
     }
 
-    /** 图片。 */
-    val Image: ImageVector = icon("Image") {
-        // 圆角矩形边框
-        moveTo(5.5f, 5f)
-        horizontalLineTo(18.5f)
-        lineTo(19.5f, 6f)
-        verticalLineTo(18f)
-        lineTo(18.5f, 19f)
-        horizontalLineTo(5.5f)
-        lineTo(4.5f, 18f)
-        verticalLineTo(6f)
-        close()
-        // 太阳
-        arcPolyline(cx = 8.8f, cy = 10.2f, r = 1.4f, startDeg = 0f, endDeg = 360f, steps = 12)
-        // 山峦
-        moveTo(4.6f, 17f)
-        lineTo(9.5f, 12.5f)
-        lineTo(13.5f, 15.8f)
-        lineTo(16.5f, 13.2f)
-        lineTo(19.6f, 16.2f)
+    /** Javascript（Material Symbols Outlined: javascript，官方）。 */
+    val Javascript: ImageVector by lazy {
+        materialIcon("Javascript") {
+            moveTo(300f, 600f)
+            quadTo(275f, 600f, 257.5f, 582.5f)
+            quadTo(240f, 565f, 240f, 540f)
+            lineTo(240f, 500f)
+            lineTo(300f, 500f)
+            lineTo(300f, 540f)
+            lineTo(360f, 540f)
+            lineTo(360f, 360f)
+            lineTo(420f, 360f)
+            lineTo(420f, 540f)
+            quadTo(420f, 565f, 402.5f, 582.5f)
+            quadTo(385f, 600f, 360f, 600f)
+            lineTo(300f, 600f)
+            close()
+            moveTo(520f, 600f)
+            quadTo(503f, 600f, 491.5f, 588.5f)
+            quadTo(480f, 577f, 480f, 560f)
+            lineTo(480f, 520f)
+            lineTo(540f, 520f)
+            lineTo(540f, 540f)
+            lineTo(620f, 540f)
+            lineTo(620f, 500f)
+            lineTo(520f, 500f)
+            quadTo(503f, 500f, 491.5f, 488.5f)
+            quadTo(480f, 477f, 480f, 460f)
+            lineTo(480f, 400f)
+            quadTo(480f, 383f, 491.5f, 371.5f)
+            quadTo(503f, 360f, 520f, 360f)
+            lineTo(640f, 360f)
+            quadTo(657f, 360f, 668.5f, 371.5f)
+            quadTo(680f, 383f, 680f, 400f)
+            lineTo(680f, 440f)
+            lineTo(620f, 440f)
+            lineTo(620f, 420f)
+            lineTo(540f, 420f)
+            lineTo(540f, 460f)
+            lineTo(640f, 460f)
+            quadTo(657f, 460f, 668.5f, 471.5f)
+            quadTo(680f, 483f, 680f, 500f)
+            lineTo(680f, 560f)
+            quadTo(680f, 577f, 668.5f, 588.5f)
+            quadTo(657f, 600f, 640f, 600f)
+            lineTo(520f, 600f)
+            close()
+        }
     }
 
-    /** 清除数据（扫帚 / 擦拭）。 */
-    val DeleteSweep: ImageVector = icon("DeleteSweep") {
-        moveTo(3.5f, 6.5f)
-        horizontalLineTo(13.5f)
-        moveTo(6f, 10.5f)
-        horizontalLineTo(13.5f)
-        moveTo(8.5f, 14.5f)
-        horizontalLineTo(13.5f)
-        moveTo(16.5f, 5f)
-        lineTo(20.5f, 9f)
-        moveTo(20.5f, 5f)
-        lineTo(16.5f, 9f)
+    /** Image（Material Symbols Outlined: image，官方）。 */
+    val Image: ImageVector by lazy {
+        materialIcon("Image") {
+            moveTo(200f, 840f)
+            quadTo(167f, 840f, 143.5f, 816.5f)
+            quadTo(120f, 793f, 120f, 760f)
+            lineTo(120f, 200f)
+            quadTo(120f, 167f, 143.5f, 143.5f)
+            quadTo(167f, 120f, 200f, 120f)
+            lineTo(760f, 120f)
+            quadTo(793f, 120f, 816.5f, 143.5f)
+            quadTo(840f, 167f, 840f, 200f)
+            lineTo(840f, 760f)
+            quadTo(840f, 793f, 816.5f, 816.5f)
+            quadTo(793f, 840f, 760f, 840f)
+            lineTo(200f, 840f)
+            close()
+            moveTo(200f, 760f)
+            lineTo(760f, 760f)
+            quadTo(760f, 760f, 760f, 760f)
+            quadTo(760f, 760f, 760f, 760f)
+            lineTo(760f, 200f)
+            quadTo(760f, 200f, 760f, 200f)
+            quadTo(760f, 200f, 760f, 200f)
+            lineTo(200f, 200f)
+            quadTo(200f, 200f, 200f, 200f)
+            quadTo(200f, 200f, 200f, 200f)
+            lineTo(200f, 760f)
+            quadTo(200f, 760f, 200f, 760f)
+            quadTo(200f, 760f, 200f, 760f)
+            close()
+            moveTo(240f, 680f)
+            lineTo(720f, 680f)
+            lineTo(570f, 480f)
+            lineTo(450f, 640f)
+            lineTo(360f, 520f)
+            lineTo(240f, 680f)
+            close()
+            moveTo(200f, 760f)
+            quadTo(200f, 760f, 200f, 760f)
+            quadTo(200f, 760f, 200f, 760f)
+            lineTo(200f, 200f)
+            quadTo(200f, 200f, 200f, 200f)
+            quadTo(200f, 200f, 200f, 200f)
+            lineTo(200f, 200f)
+            quadTo(200f, 200f, 200f, 200f)
+            quadTo(200f, 200f, 200f, 200f)
+            lineTo(200f, 760f)
+            quadTo(200f, 760f, 200f, 760f)
+            quadTo(200f, 760f, 200f, 760f)
+            close()
+        }
     }
 
-    /** 隐私（盾牌 + 眼睛），用于无痕模式。 */
-    val PrivacyTip: ImageVector = icon("PrivacyTip") {
-        moveTo(12f, 3.2f)
-        lineTo(19.5f, 6.2f)
-        verticalLineTo(11.5f)
-        curveTo(19.5f, 16.2f, 16.3f, 19.6f, 12f, 20.8f)
-        curveTo(7.7f, 19.6f, 4.5f, 16.2f, 4.5f, 11.5f)
-        verticalLineTo(6.2f)
-        close()
-        moveTo(12f, 10.6f)
-        verticalLineTo(15.6f)
-        moveTo(12f, 8f)
-        verticalLineTo(8.1f)
+    /** PrivacyTip（Material Symbols Outlined: privacy_tip，官方）。 */
+    val PrivacyTip: ImageVector by lazy {
+        materialIcon("PrivacyTip") {
+            moveTo(440f, 680f)
+            lineTo(520f, 680f)
+            lineTo(520f, 440f)
+            lineTo(440f, 440f)
+            lineTo(440f, 680f)
+            close()
+            moveTo(508.5f, 348.5f)
+            quadTo(520f, 337f, 520f, 320f)
+            quadTo(520f, 303f, 508.5f, 291.5f)
+            quadTo(497f, 280f, 480f, 280f)
+            quadTo(463f, 280f, 451.5f, 291.5f)
+            quadTo(440f, 303f, 440f, 320f)
+            quadTo(440f, 337f, 451.5f, 348.5f)
+            quadTo(463f, 360f, 480f, 360f)
+            quadTo(497f, 360f, 508.5f, 348.5f)
+            close()
+            moveTo(480f, 880f)
+            quadTo(341f, 845f, 250.5f, 720.5f)
+            quadTo(160f, 596f, 160f, 444f)
+            lineTo(160f, 200f)
+            lineTo(480f, 80f)
+            lineTo(800f, 200f)
+            lineTo(800f, 444f)
+            quadTo(800f, 596f, 709.5f, 720.5f)
+            quadTo(619f, 845f, 480f, 880f)
+            close()
+            moveTo(480f, 796f)
+            quadTo(584f, 763f, 652f, 664f)
+            quadTo(720f, 565f, 720f, 444f)
+            lineTo(720f, 255f)
+            lineTo(480f, 165f)
+            lineTo(240f, 255f)
+            lineTo(240f, 444f)
+            quadTo(240f, 565f, 308f, 664f)
+            quadTo(376f, 763f, 480f, 796f)
+            close()
+            moveTo(480f, 480f)
+            quadTo(480f, 480f, 480f, 480f)
+            quadTo(480f, 480f, 480f, 480f)
+            lineTo(480f, 480f)
+            lineTo(480f, 480f)
+            lineTo(480f, 480f)
+            lineTo(480f, 480f)
+            quadTo(480f, 480f, 480f, 480f)
+            quadTo(480f, 480f, 480f, 480f)
+            close()
+        }
     }
 
-    /** 电脑模式（显示器）。 */
-    val DesktopWindows: ImageVector = icon("DesktopWindows") {
-        moveTo(4.5f, 5f)
-        horizontalLineTo(19.5f)
-        lineTo(20.5f, 6f)
-        verticalLineTo(15f)
-        lineTo(19.5f, 16f)
-        horizontalLineTo(4.5f)
-        lineTo(3.5f, 15f)
-        verticalLineTo(6f)
-        close()
-        // 底座
-        moveTo(8.5f, 20f)
-        horizontalLineTo(15.5f)
-        moveTo(12f, 16f)
-        verticalLineTo(20f)
+    /** DesktopWindows（Material Symbols Outlined: desktop_windows，官方）。 */
+    val DesktopWindows: ImageVector by lazy {
+        materialIcon("DesktopWindows") {
+            moveTo(320f, 840f)
+            lineTo(320f, 760f)
+            lineTo(400f, 760f)
+            lineTo(400f, 680f)
+            lineTo(160f, 680f)
+            quadTo(127f, 680f, 103.5f, 656.5f)
+            quadTo(80f, 633f, 80f, 600f)
+            lineTo(80f, 200f)
+            quadTo(80f, 167f, 103.5f, 143.5f)
+            quadTo(127f, 120f, 160f, 120f)
+            lineTo(800f, 120f)
+            quadTo(833f, 120f, 856.5f, 143.5f)
+            quadTo(880f, 167f, 880f, 200f)
+            lineTo(880f, 600f)
+            quadTo(880f, 633f, 856.5f, 656.5f)
+            quadTo(833f, 680f, 800f, 680f)
+            lineTo(560f, 680f)
+            lineTo(560f, 760f)
+            lineTo(640f, 760f)
+            lineTo(640f, 840f)
+            lineTo(320f, 840f)
+            close()
+            moveTo(160f, 600f)
+            lineTo(800f, 600f)
+            quadTo(800f, 600f, 800f, 600f)
+            quadTo(800f, 600f, 800f, 600f)
+            lineTo(800f, 200f)
+            quadTo(800f, 200f, 800f, 200f)
+            quadTo(800f, 200f, 800f, 200f)
+            lineTo(160f, 200f)
+            quadTo(160f, 200f, 160f, 200f)
+            quadTo(160f, 200f, 160f, 200f)
+            lineTo(160f, 600f)
+            quadTo(160f, 600f, 160f, 600f)
+            quadTo(160f, 600f, 160f, 600f)
+            close()
+            moveTo(160f, 600f)
+            quadTo(160f, 600f, 160f, 600f)
+            quadTo(160f, 600f, 160f, 600f)
+            lineTo(160f, 200f)
+            quadTo(160f, 200f, 160f, 200f)
+            quadTo(160f, 200f, 160f, 200f)
+            lineTo(160f, 200f)
+            quadTo(160f, 200f, 160f, 200f)
+            quadTo(160f, 200f, 160f, 200f)
+            lineTo(160f, 600f)
+            quadTo(160f, 600f, 160f, 600f)
+            quadTo(160f, 600f, 160f, 600f)
+            close()
+        }
     }
 
-    /** 设置（齿轮）。 */
-    val Settings: ImageVector = icon("Settings") {
-        // 中心圆孔
-        arcPolyline(cx = 12f, cy = 12f, r = 3.2f, startDeg = 0f, endDeg = 360f, steps = 20)
-        // 外圈齿形
-        moveTo(12f, 3f)
-        lineTo(13.2f, 5.6f)
-        lineTo(16f, 5.2f)
-        lineTo(16.2f, 8f)
-        lineTo(18.6f, 9.4f)
-        lineTo(17.2f, 12f)
-        lineTo(18.6f, 14.6f)
-        lineTo(16.2f, 16f)
-        lineTo(16f, 18.8f)
-        lineTo(13.2f, 18.4f)
-        lineTo(12f, 21f)
-        lineTo(10.8f, 18.4f)
-        lineTo(8f, 18.8f)
-        lineTo(7.8f, 16f)
-        lineTo(5.4f, 14.6f)
-        lineTo(6.8f, 12f)
-        lineTo(5.4f, 9.4f)
-        lineTo(7.8f, 8f)
-        lineTo(8f, 5.2f)
-        lineTo(10.8f, 5.6f)
-        close()
+    /** Settings（Material Symbols Outlined: settings，官方）。 */
+    val Settings: ImageVector by lazy {
+        materialIcon("Settings") {
+            moveTo(370f, 880f)
+            lineTo(354f, 752f)
+            quadTo(341f, 747f, 329.5f, 740f)
+            quadTo(318f, 733f, 307f, 725f)
+            lineTo(188f, 775f)
+            lineTo(78f, 585f)
+            lineTo(181f, 507f)
+            quadTo(180f, 500f, 180f, 493.5f)
+            quadTo(180f, 487f, 180f, 480f)
+            quadTo(180f, 473f, 180f, 466.5f)
+            quadTo(180f, 460f, 181f, 453f)
+            lineTo(78f, 375f)
+            lineTo(188f, 185f)
+            lineTo(307f, 235f)
+            quadTo(318f, 227f, 330f, 220f)
+            quadTo(342f, 213f, 354f, 208f)
+            lineTo(370f, 80f)
+            lineTo(590f, 80f)
+            lineTo(606f, 208f)
+            quadTo(619f, 213f, 630.5f, 220f)
+            quadTo(642f, 227f, 653f, 235f)
+            lineTo(772f, 185f)
+            lineTo(882f, 375f)
+            lineTo(779f, 453f)
+            quadTo(780f, 460f, 780f, 466.5f)
+            quadTo(780f, 473f, 780f, 480f)
+            quadTo(780f, 487f, 780f, 493.5f)
+            quadTo(780f, 500f, 778f, 507f)
+            lineTo(881f, 585f)
+            lineTo(771f, 775f)
+            lineTo(653f, 725f)
+            quadTo(642f, 733f, 630f, 740f)
+            quadTo(618f, 747f, 606f, 752f)
+            lineTo(590f, 880f)
+            lineTo(370f, 880f)
+            close()
+            moveTo(440f, 800f)
+            lineTo(519f, 800f)
+            lineTo(533f, 694f)
+            quadTo(564f, 686f, 590.5f, 670.5f)
+            quadTo(617f, 655f, 639f, 633f)
+            lineTo(738f, 674f)
+            lineTo(777f, 606f)
+            lineTo(691f, 541f)
+            quadTo(696f, 527f, 698f, 511.5f)
+            quadTo(700f, 496f, 700f, 480f)
+            quadTo(700f, 464f, 698f, 448.5f)
+            quadTo(696f, 433f, 691f, 419f)
+            lineTo(777f, 354f)
+            lineTo(738f, 286f)
+            lineTo(639f, 328f)
+            quadTo(617f, 305f, 590.5f, 289.5f)
+            quadTo(564f, 274f, 533f, 266f)
+            lineTo(520f, 160f)
+            lineTo(441f, 160f)
+            lineTo(427f, 266f)
+            quadTo(396f, 274f, 369.5f, 289.5f)
+            quadTo(343f, 305f, 321f, 327f)
+            lineTo(222f, 286f)
+            lineTo(183f, 354f)
+            lineTo(269f, 418f)
+            quadTo(264f, 433f, 262f, 448f)
+            quadTo(260f, 463f, 260f, 480f)
+            quadTo(260f, 496f, 262f, 511f)
+            quadTo(264f, 526f, 269f, 541f)
+            lineTo(183f, 606f)
+            lineTo(222f, 674f)
+            lineTo(321f, 632f)
+            quadTo(343f, 655f, 369.5f, 670.5f)
+            quadTo(396f, 686f, 427f, 694f)
+            lineTo(440f, 800f)
+            close()
+            moveTo(482f, 620f)
+            quadTo(540f, 620f, 581f, 579f)
+            quadTo(622f, 538f, 622f, 480f)
+            quadTo(622f, 422f, 581f, 381f)
+            quadTo(540f, 340f, 482f, 340f)
+            quadTo(423f, 340f, 382.5f, 381f)
+            quadTo(342f, 422f, 342f, 480f)
+            quadTo(342f, 538f, 382.5f, 579f)
+            quadTo(423f, 620f, 482f, 620f)
+            close()
+            moveTo(480f, 480f)
+            lineTo(480f, 480f)
+            quadTo(480f, 480f, 480f, 480f)
+            quadTo(480f, 480f, 480f, 480f)
+            lineTo(480f, 480f)
+            lineTo(480f, 480f)
+            lineTo(480f, 480f)
+            quadTo(480f, 480f, 480f, 480f)
+            quadTo(480f, 480f, 480f, 480f)
+            quadTo(480f, 480f, 480f, 480f)
+            quadTo(480f, 480f, 480f, 480f)
+            lineTo(480f, 480f)
+            lineTo(480f, 480f)
+            lineTo(480f, 480f)
+            quadTo(480f, 480f, 480f, 480f)
+            quadTo(480f, 480f, 480f, 480f)
+            lineTo(480f, 480f)
+            lineTo(480f, 480f)
+            lineTo(480f, 480f)
+            quadTo(480f, 480f, 480f, 480f)
+            quadTo(480f, 480f, 480f, 480f)
+            lineTo(480f, 480f)
+            lineTo(480f, 480f)
+            lineTo(480f, 480f)
+            quadTo(480f, 480f, 480f, 480f)
+            quadTo(480f, 480f, 480f, 480f)
+            quadTo(480f, 480f, 480f, 480f)
+            quadTo(480f, 480f, 480f, 480f)
+            lineTo(480f, 480f)
+            lineTo(480f, 480f)
+            lineTo(480f, 480f)
+            quadTo(480f, 480f, 480f, 480f)
+            quadTo(480f, 480f, 480f, 480f)
+            lineTo(480f, 480f)
+            close()
+        }
     }
 }

@@ -76,7 +76,7 @@ fun SettingsScreen(
                         Icon(LingIcons.ArrowBack, contentDescription = "返回")
                     }
                 },
-                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
+                colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.surface,
                 ),
             )

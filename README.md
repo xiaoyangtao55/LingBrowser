@@ -65,7 +65,7 @@ LingBrowser/
 │       │   │   │   ├── BrowserViewModel.kt   # 状态与业务逻辑
 │       │   │   │   ├── components/           # 地址栏、底部工具栏
 │       │   │   │   ├── screens/              # 浏览/标签/书签/历史/设置
-│       │   │   │   └── theme/                # Material You 3 主题 + 自绘图标
+│       │   │   │   └── theme/                # Material You 3 主题 + Material Symbols 图标
 │       │   │   ├── util/UrlUtils.kt          # 地址栏解析（含单元测试）
 │       │   │   └── web/
 │       │   │       ├── WebTabManager.kt      # 标签页 + WebView 实例池
@@ -84,7 +84,11 @@ LingBrowser/
     ├── static_check.py
     ├── check_calls.py
     ├── check_home_html.py
-    ├── render_icons_kotlin.py
+    ├── import_material_icons.py   # 官方图标 -> Compose 矢量代码
+    ├── emit_ling_icons.py         # 组装 LingIcons.kt
+    ├── synth_missing_icons.py     # 合成官方未提供的 4 个图标
+    ├── ascii_icons.py             # 图标渲染成 ASCII，肉眼校验造型
+    ├── check_icon_fidelity.py     # 生成物与源文件逐点比对
     └── make_icons.py              # 生成 API<26 的传统位图图标
 ```
 
@@ -160,30 +164,63 @@ source set 注册上冲突（`Using kotlin.sourceSets DSL to add Kotlin sources 
 allowed with built-in Kotlin`）。本项目只有 3 张结构简单的表，直接用平台自带的
 `SQLiteOpenHelper` 手写 SQL，少一层构建复杂度，也更贴合轻量定位。
 
-### 2. 为什么不用 material-icons-extended？
-该库会把**上万个**图标类全部编进 dex —— 实测单个 `classes.dex` 因此达到 40+ MB，
-debug 包膨胀到 **18 MB**。Via 这类浏览器整个安装包才几百 KB，为 20 个图标背这个
-包袱完全违背定位。因此改为在 `ui/theme/LingIcons.kt` 中**按需手绘 22 个矢量图标**。
+### 2. 图标：为什么不用字体，也不用 material-icons-extended？
 
-效果：release 包体积 **1.4 MB**（dex 仅 2.4 MB）。
+三种方案的实测代价对比：
 
-#### 手绘图标的一个坑：不要用 `arcTo`
-早期版本用 `arcTo` + `largeArc` 标志画圆弧。当起点与终点恰好落在圆的**直径两端**时，
-圆弧会退化成半圆饼，描边后视觉上就是一个实心色块 —— 刷新图标被画成了"水桶"、
-锁梁被画成了实心矩形。
+| 方案 | 代价 |
+|---|---|
+| `material-icons-extended` | 上万个图标全部编进 dex，单个 `classes.dex` 达 **40+ MB**，debug 包 **18 MB** |
+| Material Symbols TTF | 单文件 **948 KB**（Filled 版 1.4 MB），几乎等于整个 APK |
+| **矢量代码（本方案）** | 26 个图标约 **46 KB** 源码 |
 
-现在统一约定：**只用 `moveTo` / `lineTo` / `curveTo`，圆弧一律用
-`arcPolyline`（多段直线近似）**，几何完全可预测。
+Via 这类浏览器整个安装包才几百 KB。**一个图标字体就顶得上当前 APK（1.4 MB）
+的 68%**，为二十几个图标翻倍不划算。而且字体图标无法参与 Compose 的
+tint 与交互动画，取字形还要按 Unicode 码点逐个核对。
 
-为此补了一个校验工具和一组回归测试：
+因此改为把官方图标**转成 Compose 的 ImageVector 代码**：
+造型是 Material Symbols 的原始坐标（一位不差），只是换了个表达形式。
+
+#### 坐标网格：保留官方的 960，不缩放到 24
+官方导出的是 **960×960** 视口。转换时**不做缩放** —— 960 是 Google 的原始
+设计网格，保留它意味着坐标能与官方文件逐位对照，出问题可直接 diff；
+缩放反而引入浮点误差。渲染尺寸由 `defaultWidth/Height = 24.dp` 控制，
+与视口无关。
+
+#### 又踩了一次 `arcTo` 的坑……这次是它的"命名兄弟"
+早期版本用手绘描边图标，用 `arcTo` + `largeArc` 画圆弧，当起点与终点恰好
+落在圆的**直径两端**时圆弧退化成半圆饼，刷新图标被画成"水桶"、锁梁被画成
+实心矩形。现在官方源文件只含 `M`/`L`/`Q`/`Z`，转换器**遇到其它命令直接报错**，
+不会静默丢数据。
+
+转换时另有一个纯粹的 API 命名坑：SVG `pathData` 里的 `Q`，在 Compose
+`PathBuilder` 上叫 **`quadTo`** —— 直觉会写成 `quadraticTo` 或
+`quadraticBezierTo`，**两个都不存在**。正确做法是 `javap` 查一遍：
+`moveTo` / `lineTo` / `quadTo` / `curveTo` / `arcTo` / `close`。
+
+#### 4 个官方文件缺失的图标
+`close` / `layers` / `more_vert` / `bookmark_border` 未在素材里提供，
+由 `tools/synth_missing_icons.py` **按 Material 官方规格合成**
+（线宽 80、圆角半径 40、内容安全边距 120..840，都是从已有官方文件反推的），
+并在代码注释里标注为「合成」而非冒充官方。
+
+#### 校验工具链
 
 | 文件 | 作用 |
 |---|---|
-| `tools/render_icons_kotlin.py` | 直接解析 `LingIcons.kt` 并栅格化成 ASCII，编译前即可肉眼核对形状 |
-| `app/src/test/.../LingIconsTest.kt` | 7 个用例：禁止 `arcTo`、坐标不越界、描边图标不得带填充、路径非空等 |
+| `tools/import_material_icons.py` | 解析官方 VectorDrawable，转成 Compose 路径代码（缺图标会明确报错） |
+| `tools/emit_ling_icons.py` | 组装成完整的 `LingIcons.kt` |
+| `tools/synth_missing_icons.py` | 按官方规格合成 4 个缺失图标 |
+| `tools/ascii_icons.py` | 扫描线填充（even-odd）渲染成 ASCII，编译前即可肉眼核对 |
+| `tools/check_icon_fidelity.py` | **重新解析源文件，与生成物逐点比对**，防止"源改了、生成物没重跑"的漂移 |
+| `app/src/test/.../LingIconsTest.kt` | 9 个用例：禁止 `arcTo`、坐标不越界、填充可见、视口与默认尺寸一致等 |
 
-> 这两个工具在修复中抓出 **8 个有缺陷的图标**（刷新、锁、搜索、主页、地球、月亮、
-> 历史、更多），其中"锁"的锁梁被画成了实心矩形、"更多"的三点塌缩成 1 个点。
+> `check_icon_fidelity.py` 是这里最有用的一环：图标漂移**极难用肉眼发现**，
+> 少一个控制点、坐标差 40，渲染出来看着都"差不多"。已验证把某个坐标
+> 改掉 40 单位后它会精确报出「#14 源=480.0 生成=520.0」。
+
+> 旧的 `render_icons_kotlin.py` / `render_icons.py` 解析的是手绘描边的
+> `arcPolyline` API，换成官方图标后已解析不出任何图形，故删除。
 
 ### 3. WebView 实例复用
 WebView 创建代价高（每个实例约数 MB 原生内存）。`WebTabManager` 为每个标签页
@@ -406,7 +443,11 @@ python tools/preview_home_mark.py old  # 改版前的造型，用于对照
 | `tools/check_junit_args.py` | 抓 JUnit 参数顺序写反（应为 `(message, value)`） |
 | `tools/check_workflow.py` | 校验 GitHub Actions YAML 结构 |
 | `tools/check_signing.py` | 抓签名配置里"空字符串被当成路径"的经典崩溃 |
-| `tools/render_icons_kotlin.py` | 直接解析 `LingIcons.kt` 把矢量图标栅格化成 ASCII，用于肉眼校验图标造型 |
+| `tools/check_icon_fidelity.py` | **重新解析官方源文件，与 `LingIcons.kt` 逐点比对**，抓"源改了、生成物没重跑"的漂移 |
+| `tools/ascii_icons.py` | 把图标按 even-odd 扫描线填充渲染成 ASCII，编译前肉眼校验造型 |
+| `tools/import_material_icons.py` | 官方 VectorDrawable → Compose 矢量代码 |
+| `tools/emit_ling_icons.py` | 组装 `LingIcons.kt` |
+| `tools/synth_missing_icons.py` | 按官方规格合成 4 个未提供的图标 |
 | `tools/preview_home_mark.py` | 把 `HomePage.kt` 里的主页 logo（描边线画）渲染成 PNG，终端里看不到图形时用它 |
 | `tools/preview_launcher_png.py` | 把 PNG 图标渲染成 ASCII 预览（终端里就能看构图） |
 
@@ -420,7 +461,13 @@ python tools/check_launcher_png.py
 python tools/check_icon_composition.py
 python tools/check_dead_code.py
 python tools/check_download_bytes.py
-python tools/render_icons_kotlin.py Refresh          # 渲染指定图标
+python tools/check_icon_fidelity.py
+
+# 图标管线（改了图标才需要，产物会写回 LingIcons.kt）
+python tools/synth_missing_icons.py
+python tools/import_material_icons.py
+python tools/emit_ling_icons.py
+python tools/ascii_icons.py Download Layers          # 渲染指定图标
 python tools/preview_launcher_png.py mipmap-xxxhdpi  # 预览启动图标
 ```
 
@@ -431,14 +478,18 @@ python tools/preview_launcher_png.py mipmap-xxxhdpi  # 预览启动图标
 | 项目 | 结果 |
 |---|---|
 | `:app:assembleDebug` | ✅ 通过（图标改版后重新验证） |
-| `:app:testDebugUnitTest` | ✅ **87 个用例全部通过**（`UrlUtilsTest` 20 / `HomePageTest` 20 / `LingSettingsTest` 15 / `LauncherIconTest` 12 / `DownloadTest` 10 / `LingIconsTest` 7 / `PendingDownloadTest` 5） |
+| `:app:testDebugUnitTest` | ✅ **89 个用例全部通过**（`UrlUtilsTest` 20 / `HomePageTest` 19 / `LingSettingsTest` 14 / `LauncherIconTest` 12 / `DownloadTest` 10 / `LingIconsTest` 9 / `PendingDownloadTest` 5） |
 | `:app:assembleRelease`（R8 压缩） | ✅ 通过，产物 1.4 MB（图标改版前） |
 | APK 签名校验 | ✅ v1 + v2 方案均通过 |
 | 真机安装（Xiaomi MI 8 / Android 14） | ✅ `adb install` 成功 |
 | 真机启动 | ✅ 无崩溃，`Displayed MainActivity: +884ms` |
 | WebView 进程 | ✅ sandboxed_process 正常拉起 |
 | View 层级 | ✅ Compose 树与 WebView 宿主 `FrameLayout` 布局正确 |
-| 静态自检（14 个脚本） | ✅ 全部通过 |
+| 静态自检（15 个脚本） | ✅ 全部通过 |
+
+> 图标已全部替换为官方 Material Symbols（26 个，见 §四.2），
+> 并通过 `check_icon_fidelity.py` 与源文件逐点核对。
+> 但**尚未在真机上重新编译运行** —— 图标的实际观感需要在设备上确认。
 
 > 下载管理与夜间模式修复已通过本地 `--offline` 编译、87 个单元测试与
 > 14 个静态检查脚本校验，但**尚未在真机上重新编译运行**。

@@ -12,14 +12,29 @@ import org.junit.Test
 /**
  * 图标几何的回归测试。
  *
- * 背景：早期版本用 `arcTo` + 大弧标志画圆弧，当起点与终点恰好是圆的
- * 直径两端时，圆弧会退化成半圆饼，描边后视觉上变成一个"实心色块"——
- * 刷新图标因此被画成了水桶、锁梁被画成了实心矩形。
+ * ## 历史
  *
- * 现在统一约定：**不使用 arcTo**，圆弧一律用 arcPolyline 折线近似。
- * 下面的用例把这个约定固化下来，防止以后改图标时又退回去。
+ * 早期版本图标是**手绘描边**的，用 `arcTo` + 大弧标志画圆弧。当起点与终点
+ * 恰好是圆的直径两端时，圆弧会退化成半圆饼，描边后视觉上是"实心色块"——
+ * 刷新图标被画成水桶、锁梁被画成实心矩形。当时的测试因此固化了
+ * 「不使用 arcTo」「描边图标不应有填充」「坐标必须在 24x24 内」等约定。
+ *
+ * ## 现在
+ *
+ * 图标已全部换成 **Material Symbols Outlined 官方图标**，由
+ * `tools/import_material_icons.py` 从 Android VectorDrawable 自动转换。
+ * 于是：
+ *   - 全部改为**填充**（原来"描边不应有填充"的用例已失去意义）；
+ *   - 视口从 24 改为官方的 **960**（"坐标在 24 内"同样失效）；
+ *   - `arcTo` 依然不用 —— 官方源文件里只有 M/L/Q/Z，转换器会拒绝其它命令。
+ *
+ * 保留下来的是真正有价值的约定：不用 arcTo、每个图标有实际路径、
+ * 视口一致、必须走统一的 materialIcon 构建入口。
  */
 class LingIconsTest {
+
+    /** 官方图标原始网格是 960x960。 */
+    private val viewport = 960f
 
     /** 取出图标里所有描边路径的 PathNode 列表。 */
     private fun pathNodes(icon: ImageVector): List<PathNode> {
@@ -67,11 +82,12 @@ class LingIconsTest {
         "Download" to LingIcons.Download,
         "Folder" to LingIcons.Folder,
         "FolderOpen" to LingIcons.FolderOpen,
+        "Bookmark" to LingIcons.Bookmark,
     )
 
     @Test
     fun `图标集完整`() {
-        assertEquals("图标数量发生变化时请同步更新本测试", 25, allIcons.size)
+        assertEquals("图标数量发生变化时请同步更新本测试", 26, allIcons.size)
     }
 
     @Test
@@ -111,10 +127,11 @@ class LingIconsTest {
     }
 
     @Test
-    fun `所有坐标都在 24x24 视口内`() {
-        // 越界坐标会被裁切，图标看起来像被切掉一块。
-        // 允许 1 个单位的容差：描边线宽 1.8，边缘图标可以略微出界。
-        val tolerance = 1.0f
+    fun `所有坐标都在 960 官方网格内`() {
+        // Material Symbols 的原始网格是 960x960，内容应落在 120..840 的
+        // 安全边距内（见 tools/synth_missing_icons.py 的规格说明）。
+        // 这里放宽到 0..960 只查"越界"，因为个别官方图标（如 menu 的
+        // 圆角）会略微贴近边界。真正被裁切的坐标才会超出整个网格。
         val problems = mutableListOf<String>()
         allIcons.forEach { (name, icon) ->
             pathNodes(icon).forEach { node ->
@@ -123,50 +140,68 @@ class LingIconsTest {
                     .forEach { f ->
                         f.isAccessible = true
                         val v = f.getFloat(node)
-                        if (v < -tolerance || v > 24f + tolerance) {
+                        if (v < 0f || v > viewport) {
                             problems += "$name.${node::class.simpleName}.${f.name}=$v"
                         }
                     }
             }
         }
-        assertTrue("坐标越界：$problems", problems.isEmpty())
+        assertTrue("坐标越界（应落在 0..960）：$problems", problems.isEmpty())
     }
 
     @Test
-    fun `刷新图标包含圆弧折线而非退化的闭合块`() {
-        // 刷新图标用约 24 段折线近似 300° 圆环，再加箭头 2 段，共 25~26 条 LineTo。
-        // 若退化成"用几段直线/一条 arcTo 凑出来"，线段数会明显偏少。
-        val lineTos = pathNodes(LingIcons.Refresh).count { it is PathNode.LineTo }
-        assertTrue(
-            "刷新图标的线段数过少（$lineTos），圆环可能已退化",
-            lineTos >= 20,
-        )
-        assertTrue(
-            "刷新图标的线段数过多（$lineTos），可能误加了多余的折线",
-            lineTos <= 60,
-        )
+    fun `刷新图标保留了圆环所需的曲线`() {
+        // 官方 refresh 是"圆环 + 箭头"，圆环靠 QuadTo 曲线表达。
+        // 若转换时把 Q 命令丢掉或误当直线处理，圆环会退化成多边形/方块，
+        // 所以这里要求它既有足够多的曲线，也有实际线段。
+        val nodes = pathNodes(LingIcons.Refresh)
+        val quads = nodes.count { it is PathNode.QuadTo }
+        val lines = nodes.count { it is PathNode.LineTo }
+        assertTrue("刷新图标的曲线过少（$quads），圆环可能已退化", quads >= 8)
+        assertTrue("刷新图标应同时有直线构成箭头（$lines）", lines >= 1)
     }
 
     @Test
-    fun `描边图标不应使用填充`() {
-        // 描边图标若误用了填充，会渲染成一坨实心色块。
-        val stroked = setOf(
-            "ArrowBack", "ArrowForward", "Close", "Refresh", "Home", "Layers", "Add",
-            "BookmarkBorder", "History", "DeleteOutline", "Search", "Lock", "Public",
-            "Nightlight", "Javascript", "Image", "DeleteSweep", "PrivacyTip",
-            "DesktopWindows", "Settings",
-        )
+    fun `图标为填充样式`() {
+        // 换成官方 Material Symbols 后，全部是填充路径（颜色由 Compose 的
+        // Icon(tint=...) 覆盖）。若某个图标还是透明填充，会完全看不见。
+        // 这条与旧版"描边图标不应有填充"恰好相反 —— 设计换了，测试也要换。
         val problems = mutableListOf<String>()
-        allIcons.filterKeys { it in stroked }.forEach { (name, icon) ->
+        allIcons.forEach { (name, icon) ->
             icon.root.forEach { child ->
                 if (child is VectorPath) {
                     val fill = child.fill
-                    if (fill !is SolidColor || fill.value.alpha != 0f) {
+                    if (fill !is SolidColor || fill.value.alpha == 0f) {
                         problems += name
                     }
                 }
             }
         }
-        assertTrue("以下描边图标带有填充：$problems", problems.isEmpty())
+        assertTrue("以下图标没有可见填充：$problems", problems.isEmpty())
+    }
+
+    @Test
+    fun `所有图标使用统一的 960 视口`() {
+        // 视口不一致会导致同尺寸图标看起来大小不一。
+        // 官方导出全部是 960，转换时若误改会立刻暴露。
+        val problems = mutableListOf<String>()
+        allIcons.forEach { (name, icon) ->
+            if (icon.viewportWidth != viewport || icon.viewportHeight != viewport) {
+                problems += "$name=${icon.viewportWidth}x${icon.viewportHeight}"
+            }
+        }
+        assertTrue("视口不是 960x960：$problems", problems.isEmpty())
+    }
+
+    @Test
+    fun `所有图标默认尺寸为 24dp`() {
+        // 渲染尺寸与视口解耦：960 视口 + 24dp 默认尺寸。
+        val problems = mutableListOf<String>()
+        allIcons.forEach { (name, icon) ->
+            if (icon.defaultWidth.value != 24f || icon.defaultHeight.value != 24f) {
+                problems += "$name=${icon.defaultWidth}x${icon.defaultHeight}"
+            }
+        }
+        assertTrue("默认尺寸不是 24dp：$problems", problems.isEmpty())
     }
 }

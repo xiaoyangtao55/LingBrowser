@@ -58,7 +58,7 @@ fun HistoryScreen(
                         TextButton(onClick = { confirmClear = true }) { Text("清空") }
                     }
                 },
-                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
+                colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.surface,
                 ),
             )
