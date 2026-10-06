@@ -242,6 +242,50 @@ object LingIcons {
         lineTo(20f, 20f)
     }
 
+    /** 下载（向下的箭头 + 托盘）。 */
+    val Download: ImageVector = icon("Download") {
+        // 箭头竖杆
+        moveTo(12f, 3.5f)
+        verticalLineTo(14f)
+        // 箭头两翼
+        moveTo(7.6f, 9.8f)
+        lineTo(12f, 14.2f)
+        lineTo(16.4f, 9.8f)
+        // 托盘：底部一条横线
+        moveTo(4.5f, 19f)
+        horizontalLineTo(19.5f)
+    }
+
+    /** 文件夹。 */
+    val Folder: ImageVector = icon("Folder") {
+        // 左上角的标签页（folder tab）
+        moveTo(3.2f, 6.6f)
+        lineTo(9.4f, 6.6f)
+        lineTo(11f, 8.6f)
+        horizontalLineTo(20.8f)
+        // 主体右侧下行
+        verticalLineTo(18.2f)
+        lineTo(19.6f, 19.4f)
+        horizontalLineTo(4.4f)
+        lineTo(3.2f, 18.2f)
+        close()
+    }
+
+    /** 文件夹（打开态），用于「移入文件夹」。 */
+    val FolderOpen: ImageVector = icon("FolderOpen") {
+        moveTo(3.2f, 6.6f)
+        lineTo(9.4f, 6.6f)
+        lineTo(11f, 8.6f)
+        horizontalLineTo(19.4f)
+        verticalLineTo(11.4f)
+        // 前倾的开口
+        moveTo(3.2f, 18.4f)
+        lineTo(5.4f, 11.4f)
+        horizontalLineTo(21.6f)
+        lineTo(19.4f, 18.4f)
+        close()
+    }
+
     /** 锁（安全标识）。 */
     val Lock: ImageVector = icon("Lock") {
         // 锁体：圆角矩形（用直线+小折角近似圆角，避免 arcTo 退化）

@@ -9,6 +9,9 @@
     <uses-permission
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28" />
+    <!-- 下载完成后在通知栏提示（Android 13+ 需运行时授权；未授权则静默下载，
+         功能不受影响，因此不主动申请，少一次打扰） -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <uses-feature
         android:name="android.hardware.touchscreen"

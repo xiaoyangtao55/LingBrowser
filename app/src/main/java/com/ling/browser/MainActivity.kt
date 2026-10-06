@@ -20,10 +20,12 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.ling.browser.data.db.DownloadEntry
 import com.ling.browser.data.prefs.NightMode
 import com.ling.browser.ui.BrowserViewModel
 import com.ling.browser.ui.screens.BookmarksScreen
 import com.ling.browser.ui.screens.BrowserScreen
+import com.ling.browser.ui.screens.DownloadsScreen
 import com.ling.browser.ui.screens.HistoryScreen
 import com.ling.browser.ui.screens.SettingsScreen
 import com.ling.browser.ui.screens.TabsScreen
@@ -95,6 +97,7 @@ class MainActivity : ComponentActivity() {
  */
 @Composable
 private fun LingApp(viewModel: BrowserViewModel) {
+    val context = LocalContext.current
     // 返回栈：栈底始终是 Browser，只有二级页面才会入栈
     val backStack = remember { mutableStateListOf<Route>(Route.Browser) }
     val route = backStack.last()
@@ -122,6 +125,7 @@ private fun LingApp(viewModel: BrowserViewModel) {
     val activeId by viewModel.activeId.collectAsStateWithLifecycle()
     val bookmarks by viewModel.bookmarks.collectAsStateWithLifecycle()
     val history by viewModel.history.collectAsStateWithLifecycle()
+    val downloads by viewModel.downloads.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
 
     // 标签页面板是**叠加层**而非独立页面：BrowserScreen 必须一直挂载着，
@@ -134,6 +138,7 @@ private fun LingApp(viewModel: BrowserViewModel) {
             onOpenTabs = { push(Route.Tabs) },
             onOpenBookmarks = { push(Route.Bookmarks) },
             onOpenHistory = { push(Route.History) },
+            onOpenDownloads = { push(Route.Downloads) },
             onOpenSettings = { push(Route.Settings) },
             canHandleBack = !hasOverlay,
         )
@@ -186,6 +191,16 @@ private fun LingApp(viewModel: BrowserViewModel) {
                 onBack = pop,
             )
 
+            Route.Downloads -> DownloadsScreen(
+                downloads = downloads,
+                onRefresh = viewModel::refreshDownloads,
+                onCancel = viewModel::cancelDownload,
+                onRemove = { entry, deleteFile -> viewModel.removeDownload(entry, deleteFile) },
+                onClearAll = viewModel::clearDownloads,
+                onOpen = { entry -> openDownloadedFile(context, entry) },
+                onBack = pop,
+            )
+
             Route.Settings -> SettingsScreen(
                 settings = settings,
                 onSearchEngine = viewModel::setSearchEngine,
@@ -209,5 +224,37 @@ private sealed interface Route {
     data object Tabs : Route
     data object Bookmarks : Route
     data object History : Route
+    data object Downloads : Route
     data object Settings : Route
+}
+
+/**
+ * 用系统「打开方式」打开已下载的文件。
+ *
+ * 必须走 FileProvider：Android 7 起直接传 file:// 给别的应用会抛
+ * FileUriExposedException。这里用既有的 `${applicationId}.fileprovider`
+ * （见 AndroidManifest），它已声明了 files-path/downloads 目录。
+ *
+ * 取不到能处理该类型的应用（没有 MIME 且系统也猜不出）时返回 false，
+ * 由调用方决定是否提示。
+ */
+private fun openDownloadedFile(context: android.content.Context, entry: DownloadEntry): Boolean {
+    val path = entry.localPath ?: return false
+    val file = java.io.File(path)
+    if (!file.exists()) return false
+
+    return runCatching {
+        val uri = androidx.core.content.FileProvider.getUriForFile(
+            context,
+            "${context.packageName}.fileprovider",
+            file,
+        )
+        val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, entry.mimeType ?: "*/*")
+            addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        context.startActivity(intent)
+        true
+    }.getOrDefault(false)
 }

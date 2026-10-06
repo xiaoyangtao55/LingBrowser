@@ -1,4 +1,4 @@
-﻿package com.ling.browser.ui
+package com.ling.browser.ui
 
 import android.app.Application
 import androidx.compose.ui.graphics.Color
@@ -6,6 +6,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.ling.browser.LingApplication
 import com.ling.browser.data.db.Bookmark
+import com.ling.browser.data.db.DownloadEntry
 import com.ling.browser.data.db.HistoryEntry
 import com.ling.browser.data.prefs.LingSettings
 import com.ling.browser.data.prefs.NightMode
@@ -44,6 +45,7 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
 
     val bookmarks: StateFlow<List<Bookmark>> = container.bookmarks.bookmarks
     val history: StateFlow<List<HistoryEntry>> = container.history.history
+    val downloads: StateFlow<List<DownloadEntry>> = container.downloads.downloads
 
     /** 地址栏当前文本（与真实 URL 解耦：用户编辑时不被页面跳转覆盖）。 */
     private val _addressText = MutableStateFlow("")
@@ -217,6 +219,48 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
     fun renameBookmark(id: Long, title: String, folder: String?) {
         viewModelScope.launch { container.bookmarks.rename(id, title, folder) }
     }
+
+    // ------------------------------------------------------------ 下载
+
+    /**
+     * 发起下载。
+     *
+     * 文件名从 URL 末段推断；[WebTabManager.onDownloadRequested] 给不出
+     * 文件名，只能靠 URL（系统的 Content-Disposition 由 DownloadManager
+     * 自己解析，比我们可靠）。
+     */
+    fun enqueueDownload(url: String, mimeType: String?, fileName: String? = null) {
+        viewModelScope.launch {
+            val ok = container.downloads.enqueue(url, fileName, mimeType)
+            _message.value = if (ok) "已开始下载" else "无法下载该文件"
+        }
+    }
+
+    fun cancelDownload(entry: DownloadEntry) {
+        viewModelScope.launch {
+            container.downloads.cancel(entry)
+            _message.value = "已取消下载"
+        }
+    }
+
+    fun removeDownload(entry: DownloadEntry, deleteFile: Boolean = false) {
+        viewModelScope.launch { container.downloads.remove(entry, deleteFile) }
+    }
+
+    fun clearDownloads(deleteFiles: Boolean = false) {
+        viewModelScope.launch {
+            container.downloads.clearAll(deleteFiles)
+            _message.value = if (deleteFiles) "已清除全部下载与文件" else "已清除下载记录"
+        }
+    }
+
+    /**
+     * 刷新下载进度。
+     *
+     * DownloadManager 没有进度回调，只能轮询。由下载列表页在可见时
+     * 每秒调用一次；页面离开即停止，不在后台空转。
+     */
+    fun refreshDownloads() = container.downloads.refresh()
 
     // ------------------------------------------------------------ 历史
 

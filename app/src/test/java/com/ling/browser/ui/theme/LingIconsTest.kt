@@ -1,4 +1,4 @@
-﻿package com.ling.browser.ui.theme
+package com.ling.browser.ui.theme
 
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -64,11 +64,14 @@ class LingIconsTest {
         "PrivacyTip" to LingIcons.PrivacyTip,
         "DesktopWindows" to LingIcons.DesktopWindows,
         "Settings" to LingIcons.Settings,
+        "Download" to LingIcons.Download,
+        "Folder" to LingIcons.Folder,
+        "FolderOpen" to LingIcons.FolderOpen,
     )
 
     @Test
     fun `图标集完整`() {
-        assertEquals("图标数量发生变化时请同步更新本测试", 22, allIcons.size)
+        assertEquals("图标数量发生变化时请同步更新本测试", 25, allIcons.size)
     }
 
     @Test

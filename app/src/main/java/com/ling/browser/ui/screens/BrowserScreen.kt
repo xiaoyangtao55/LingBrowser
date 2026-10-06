@@ -47,7 +47,6 @@ import com.ling.browser.ui.components.AddressBar
 import com.ling.browser.ui.components.BottomToolbar
 import com.ling.browser.ui.components.DesktopModeBanner
 import com.ling.browser.ui.components.IncognitoBanner
-import com.ling.browser.util.UrlUtils
 
 /**
  * 浏览器主界面：地址栏 + WebView 容器 + 底部工具栏。
@@ -68,6 +67,7 @@ fun BrowserScreen(
     onOpenTabs: () -> Unit,
     onOpenBookmarks: () -> Unit,
     onOpenHistory: () -> Unit,
+    onOpenDownloads: () -> Unit,
     onOpenSettings: () -> Unit,
     /**
      * 本页是否接管返回键。
@@ -123,8 +123,10 @@ fun BrowserScreen(
                 true
             }.getOrDefault(false)
         }
-        viewModel.tabManager.onDownloadRequested = { url, _ ->
-            viewModel.showMessage("开始下载：${UrlUtils.hostOf(url)}")
+        viewModel.tabManager.onDownloadRequested = { url, mimeType ->
+            // 文件名交给 DownloadManager 从 Content-Disposition 推断（比在这里
+            // 猜 URL 末段可靠），因此这里只传 null。
+            viewModel.enqueueDownload(url, mimeType, fileName = null)
         }
     }
 
@@ -284,6 +286,14 @@ fun BrowserScreen(
                 leadingIcon = { Icon(LingIcons.History, contentDescription = null) },
                 onClick = {
                     onOpenHistory()
+                    showMoreMenu = false
+                },
+            )
+            DropdownMenuItem(
+                text = { Text("下载") },
+                leadingIcon = { Icon(LingIcons.Download, contentDescription = null) },
+                onClick = {
+                    onOpenDownloads()
                     showMoreMenu = false
                 },
             )

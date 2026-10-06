@@ -4,6 +4,7 @@ import android.content.Context
 import com.ling.browser.data.db.LingDatabase
 import com.ling.browser.data.prefs.SettingsStore
 import com.ling.browser.data.repo.BookmarkRepository
+import com.ling.browser.data.repo.DownloadRepository
 import com.ling.browser.data.repo.HistoryRepository
 
 /**
@@ -22,4 +23,6 @@ class AppContainer(context: Context) {
     val bookmarks: BookmarkRepository = BookmarkRepository(database)
 
     val history: HistoryRepository = HistoryRepository(database)
+
+    val downloads: DownloadRepository = DownloadRepository(appContext, database)
 }
