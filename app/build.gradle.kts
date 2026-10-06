@@ -32,14 +32,28 @@ android {
             // 密钥库优先取 keystore/ling-release.jks（本地开发），
             // 其次可用环境变量 LING_KEYSTORE_PATH 指定（CI）。
             //
-            // 注意必须过滤空字符串：CI 在未配置签名 Secrets 时会把
-            // LING_KEYSTORE_PATH 设成 ""，而 "" 不是 null，
-            // `?.let { file(it) }` 会走进来并抛出
+            // ⚠️ 路径必须统一用 rootProject.file(...) 解析。
+            //
+            // 这里踩过一个很隐蔽的坑：本文件是 **app 模块**的构建脚本，
+            // 裸写 `file("keystore/ling-release.jks")` 会解析成
+            //   <仓库根>/app/keystore/ling-release.jks
+            // 而 CI 把密钥库还原到
+            //   <仓库根>/keystore/ling-release.jks
+            // 两者差一层目录，于是 exists() 恒为 false —— 构建成功，
+            // 但产物是 app-release-unsigned.apk，而且**不报任何错**。
+            //
+            // 更阴的是：它只在设置了 LING_KEYSTORE_PATH 时才发作。
+            // 本地不设这个变量，代码会走 `?:` 后面的 rootProject.file(...)
+            // 分支从而正常工作，所以"本地能签名、CI 不能"——
+            // 正是这个不对称让问题一直藏着。
+            //
+            // 还必须过滤空字符串：CI 在未配置签名 Secrets 时会把它设成 ""，
+            // 而 "" 不是 null，`?.let { file(it) }` 会走进来并抛出
             //   IllegalArgumentException: Cannot convert '' to File
             // 导致 Gradle 在**配置阶段**就失败（连测试都跑不到）。
             val keystoreFile = System.getenv("LING_KEYSTORE_PATH")
                 ?.takeIf { it.isNotBlank() }
-                ?.let { file(it) }
+                ?.let { rootProject.file(it) }
                 ?: rootProject.file("keystore/ling-release.jks")
 
             if (keystoreFile.exists()) {
@@ -66,12 +80,31 @@ android {
         }
         release {
             // 有密钥库就签名；没有则退化为 unsigned（CI 未配置 Secrets 时也能出包）。
-            // 同样要过滤空字符串，理由见上面 signingConfigs 的注释。
+            //
+            // 判断逻辑必须与 signingConfigs 里**完全一致**（同样用
+            // rootProject.file 解析）。两处若用了不同的基准目录，
+            // 就会出现"signingConfig 认为有密钥、这里认为没有"（或反之）
+            // 的分裂状态，产物行为将难以预测。
             val hasKeystore = System.getenv("LING_KEYSTORE_PATH")
                 ?.takeIf { it.isNotBlank() }
-                ?.let { file(it).exists() }
+                ?.let { rootProject.file(it).exists() }
                 ?: rootProject.file("keystore/ling-release.jks").exists()
             signingConfig = if (hasKeystore) signingConfigs.getByName("release") else null
+
+            // 关键：**明确说了要签名、却找不到密钥库**时必须让构建失败。
+            //
+            // 之前静默退化成 unsigned，CI 一路绿灯产出一个未签名包，
+            // 从日志到退出码都看不出问题 —— 这种"成功但做错了事"最难查。
+            // 只有"根本没配"（环境变量为空）才允许退化为 unsigned。
+            val requested = System.getenv("LING_KEYSTORE_PATH")
+                ?.takeIf { it.isNotBlank() }
+            if (requested != null && !hasKeystore) {
+                throw GradleException(
+                    "指定了 LING_KEYSTORE_PATH=$requested，但文件不存在：" +
+                        "${rootProject.file(requested)}。" +
+                        "若确实想产出未签名包，请不要设置该环境变量。",
+                )
+            }
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(

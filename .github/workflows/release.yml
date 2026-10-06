@@ -103,11 +103,19 @@ jobs:
           if [ -n "$KEYSTORE_BASE64" ]; then
             mkdir -p keystore
             echo "$KEYSTORE_BASE64" | base64 -d > keystore/ling-release.jks
+            # 立刻校验还原出来的确实是密钥库，而不是空文件或截断的数据。
+            # 只看"base64 解码成功"是不够的：secret 里若混入空格/换行，
+            # 某些环境下解码会得到半截文件，最终表现为"签名静默失败"。
+            echo "还原的密钥库大小：$(stat -c%s keystore/ling-release.jks) 字节"
+            if [ "$(stat -c%s keystore/ling-release.jks)" -lt 100 ]; then
+              echo "::error::还原出的密钥库过小，LING_KEYSTORE_BASE64 内容可能有误"
+              exit 1
+            fi
             echo "signed=true" >> "$GITHUB_OUTPUT"
             echo "已从 Secrets 还原签名密钥库"
           else
             echo "signed=false" >> "$GITHUB_OUTPUT"
-            echo "未配置 LING_KEYSTORE_BASE64，将产出未签名 APK（仍可验证编译）"
+            echo "::warning::未配置 LING_KEYSTORE_BASE64，将产出未签名 APK（仍可验证编译）"
           fi
 
       - name: 构建 Release APK
@@ -117,8 +125,11 @@ jobs:
           # Gradle 里 `System.getenv(...)?.let { file(it) }` 会走进来并抛
           #   IllegalArgumentException: Cannot convert '' to File
           # 让构建在配置阶段就失败。
-          # 这里固定传 keystore/ling-release.jks：文件存在就用，
-          # 不存在（未配置 Secrets）时 Gradle 会自动跳过签名。
+          #
+          # ⚠️ 这个路径是**相对仓库根**的。app/build.gradle.kts 里必须用
+          # rootProject.file(...) 解析 —— 裸写 file(...) 会相对 app/ 解析成
+          # app/keystore/...，exists() 恒为 false，构建"成功"但产物是
+          # app-release-unsigned.apk（真实故障，已修）。
           LING_KEYSTORE_PATH: keystore/ling-release.jks
           LING_STORE_PASSWORD: ${{ secrets.LING_STORE_PASSWORD }}
           LING_KEY_ALIAS: ${{ secrets.LING_KEY_ALIAS }}
@@ -130,10 +141,23 @@ jobs:
           APK=$(find app/build/outputs/apk/release -name "*.apk" | head -n1)
           echo "产物：$APK"
           ls -lh "$APK"
-          if "$ANDROID_HOME"/build-tools/*/apksigner verify --verbose "$APK" 2>/dev/null; then
-            echo "签名校验通过"
+
+          # 文件名里带 unsigned 就是明确的失败信号。
+          # 之前这里只发 warning 就放行，导致"CI 全绿但产出未签名包"能一路蒙混过关。
+          if echo "$APK" | grep -q "unsigned"; then
+            if [ "${{ steps.keystore.outputs.signed }}" = "true" ]; then
+              echo "::error::密钥库已还原，产物却是 unsigned —— 签名配置有问题"
+              exit 1
+            else
+              echo "::warning::未配置签名 Secrets，产出未签名 APK（预期行为）"
+            fi
+          fi
+
+          if "$ANDROID_HOME"/build-tools/*/apksigner verify --verbose "$APK"; then
+            echo "✅ 签名校验通过"
           else
-            echo "::warning::APK 未签名（未配置签名 Secrets）"
+            echo "::error::apksigner 校验失败"
+            exit 1
           fi
 
       - name: 收集产物
