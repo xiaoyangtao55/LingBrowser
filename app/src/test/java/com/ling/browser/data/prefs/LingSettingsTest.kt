@@ -73,9 +73,10 @@ class LingSettingsTest {
     fun `已移除的四分之一档位名会安全降级`() {
         // 老版本可能往 DataStore 里存过 "QUARTER"。升级后枚举里没有它，
         // 读取路径必须能兜住而不是抛异常导致闪退。
+        // 注意 JUnit 的参数顺序是 (message, object)，写反了会报类型不匹配。
         assertNull(
-            runCatching { TabsHeight.valueOf("QUARTER") }.getOrNull(),
             "QUARTER 应已从枚举中移除",
+            runCatching { TabsHeight.valueOf("QUARTER") }.getOrNull(),
         )
     }
 
