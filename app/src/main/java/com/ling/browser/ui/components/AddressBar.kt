@@ -37,7 +37,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.ImeAction
@@ -72,6 +74,7 @@ fun AddressBar(
 ) {
     val focusRequester = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
 
     // 编辑态内部维护 TextFieldValue，以便聚焦时把光标全选
     var field by remember { mutableStateOf(TextFieldValue(text)) }
@@ -88,6 +91,26 @@ fun AddressBar(
         if (isEditing) {
             runCatching { focusRequester.requestFocus() }
         }
+    }
+
+    /**
+     * 提交后必须**真的**把焦点移走，只把 isEditing 置 false 是不够的。
+     *
+     * 曾经的 bug：点回车后 ViewModel 把 `addressEditing` 置 false，
+     * 但 BasicTextField **物理上仍然持有焦点** —— 光标继续闪，
+     * 而且更严重的是**网页里的输入框唤不起输入法**：焦点还在
+     * 地址栏上，WebView 拿不到焦点，软键盘自然弹不出来。
+     *
+     * 这里三件事缺一不可：
+     *   1. clearFocus()  —— 真正释放焦点，光标随之消失
+     *   2. keyboard?.hide() —— 收起软键盘
+     *   3. onFocusChange(false) —— 让 ViewModel 的状态与真实焦点了保持一致
+     *      （否则 isEditing 与实际的焦点状态会永久脱节）
+     */
+    val releaseFocus: () -> Unit = {
+        focusManager.clearFocus()
+        keyboard?.hide()
+        onFocusChange(false)
     }
 
     Column(modifier = modifier.fillMaxWidth()) {
@@ -137,12 +160,16 @@ fun AddressBar(
                             keyboardActions = KeyboardActions(
                                 onGo = {
                                     onSubmit(field.text)
-                                    keyboard?.hide()
+                                    releaseFocus()
                                 }
                             ),
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .focusRequester(focusRequester),
+                                .focusRequester(focusRequester)
+                                // 让 ViewModel 的编辑态跟随**真实的**焦点，
+                                // 而不是只在手动调用时同步。没有这个观察者时，
+                                // onFocusChange 参数其实从未被调用过。
+                                .onFocusChanged { onFocusChange(it.isFocused) },
                         )
                     }
 
@@ -218,7 +245,15 @@ fun AddressBar(
                                 color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
                             )
                         }
-                        SuggestionRow(suggestion = s, onClick = { onSuggestionClick(s) })
+                        SuggestionRow(
+                            suggestion = s,
+                            onClick = {
+                                // 点联想项与回车等价，同样要真的还回焦点，
+                                // 否则键盘收起后光标还在闪、网页仍拿不到焦点
+                                onSuggestionClick(s)
+                                releaseFocus()
+                            },
+                        )
                     }
                 }
             }

@@ -13,6 +13,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.remember
@@ -191,19 +192,26 @@ private fun LingApp(viewModel: BrowserViewModel) {
                 onTabsHeightChange = viewModel::setTabsHeight,
             )
 
-            Route.Bookmarks -> BookmarksScreen(
-                bookmarks = bookmarks,
-                folders = bookmarkFolders,
-                onOpen = {
-                    viewModel.navigate(it)
-                    pop()
-                },
-                onDelete = viewModel::deleteBookmark,
-                onMoveToFolder = viewModel::moveBookmarkToFolder,
-                onRenameFolder = viewModel::renameBookmarkFolder,
-                onDeleteFolder = viewModel::deleteBookmarkFolder,
-                onBack = pop,
-            )
+            Route.Bookmarks -> {
+                // 进书签页时补一次图标。放在这里而不是 setContent 里：
+                // 图标是进入这个页面才有意义的后台工作，没必要每次
+                // 重建组合都触发一遍。
+                LaunchedEffect(Unit) { viewModel.fetchMissingFavicons() }
+                BookmarksScreen(
+                    bookmarks = bookmarks,
+                    folders = bookmarkFolders,
+                    onOpen = {
+                        viewModel.navigate(it)
+                        pop()
+                    },
+                    onRename = viewModel::renameBookmark,
+                    onDelete = viewModel::deleteBookmark,
+                    onMoveToFolder = viewModel::moveBookmarkToFolder,
+                    onRenameFolder = viewModel::renameBookmarkFolder,
+                    onDeleteFolder = viewModel::deleteBookmarkFolder,
+                    onBack = pop,
+                )
+            }
 
             Route.History -> HistoryScreen(
                 history = history,

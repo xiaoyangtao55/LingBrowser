@@ -31,7 +31,8 @@ class LingDatabase(context: Context) : SQLiteOpenHelper(
                 title TEXT NOT NULL,
                 url TEXT NOT NULL,
                 folder TEXT,
-                created_at INTEGER NOT NULL
+                created_at INTEGER NOT NULL,
+                favicon BLOB
             )
             """.trimIndent()
         )
@@ -86,23 +87,31 @@ class LingDatabase(context: Context) : SQLiteOpenHelper(
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        // 尚未正式发版，直接重建即可；发版后必须替换为增量迁移，
-        // 否则用户升级会丢掉全部书签与历史。
-        db.execSQL("DROP TABLE IF EXISTS bookmarks")
-        db.execSQL("DROP TABLE IF EXISTS history")
-        db.execSQL("DROP TABLE IF EXISTS tabs")
-        db.execSQL("DROP TABLE IF EXISTS downloads")
-        onCreate(db)
+        // ⚠️ 这里**不再**无条件 DROP 重建。
+        //
+        // 上一版写的是"尚未正式发版，直接重建即可"。但用户已经在真机上
+        // 装了带书签/历史的版本，再重建就是把他的收藏和记录全抹掉 ——
+        // 而我们恰恰是要求他装新包来验证的。所以从 2 -> 3 开始走增量迁移。
+        //
+        // 每个版本的迁移都要能从任意旧版本逐级升上来，因此按序判断而不是
+        // `when (oldVersion)` 精确匹配。
+        if (oldVersion < 3) {
+            // 书签图标。NULL 表示还没有图标，UI 退回字母占位。
+            // 存 BLOB 而不是路径/URL：图标很小（几十 KB 的 PNG），
+            // 存库能让书签列表离线也显示图标，且卸载即清理、不留残 file。
+            runCatching { db.execSQL("ALTER TABLE bookmarks ADD COLUMN favicon BLOB") }
+        }
     }
 
     companion object {
         const val DB_NAME = "ling.db"
 
         /**
+         * 3：bookmarks 增加 favicon 列（书签图标）。
          * 2：新增 downloads 表。
          * 1：初版（bookmarks / history / tabs）。
          */
-        const val VERSION = 2
+        const val VERSION = 3
     }
 }
 
@@ -114,6 +123,10 @@ internal fun Cursor.toBookmark(): Bookmark = Bookmark(
     url = getString(getColumnIndexOrThrow("url")),
     folder = getColumnIndex("folder").let { if (it >= 0 && !isNull(it)) getString(it) else null },
     createdAt = getLong(getColumnIndexOrThrow("created_at")),
+    // 列可能不存在（老库尚未迁移完成），故不抛异常
+    favicon = getColumnIndex("favicon").let {
+        if (it >= 0 && !isNull(it)) getBlob(it) else null
+    },
 )
 
 internal fun Cursor.toHistory(): HistoryEntry = HistoryEntry(

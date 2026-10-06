@@ -1,6 +1,7 @@
 package com.ling.browser.ui.screens
 
 import com.ling.browser.ui.theme.LingIcons
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -40,8 +41,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import android.graphics.BitmapFactory
 import com.ling.browser.data.db.Bookmark
 
 /**
@@ -61,6 +65,7 @@ fun BookmarksScreen(
     bookmarks: List<Bookmark>,
     folders: List<String>,
     onOpen: (String) -> Unit,
+    onRename: (Long, String) -> Unit,
     onDelete: (Long) -> Unit,
     onMoveToFolder: (Long, String?) -> Unit,
     onRenameFolder: (String, String) -> Unit,
@@ -175,6 +180,7 @@ fun BookmarksScreen(
                     folders = folders,
                     showFolderTag = currentFolder == null,
                     onOpen = { onOpen(bookmark.url) },
+                    onRename = { onRename(bookmark.id, it) },
                     onDelete = { onDelete(bookmark.id) },
                     onMoveToFolder = { onMoveToFolder(bookmark.id, it) },
                 )
@@ -200,30 +206,29 @@ fun BookmarksScreen(
     }
 }
 
-/** 单条书签：尾部是「移到文件夹」+「删除」。 */
+/** 单条书签：尾部是「更多」菜单（重命名/移动/删除）。 */
 @Composable
 private fun BookmarkRow(
     bookmark: Bookmark,
     folders: List<String>,
     showFolderTag: Boolean,
     onOpen: () -> Unit,
+    onRename: (String) -> Unit,
     onDelete: () -> Unit,
     onMoveToFolder: (String?) -> Unit,
 ) {
+    var menu by remember { mutableStateOf(false) }
     var showMove by remember { mutableStateOf(false) }
     var creating by remember { mutableStateOf(false) }
+    var renaming by remember { mutableStateOf(false) }
+    var confirmDelete by remember { mutableStateOf(false) }
 
     ListItemRow(
         title = bookmark.title,
         subtitle = bookmark.url,
         onClick = onOpen,
         leading = {
-            Icon(
-                LingIcons.BookmarkBorder,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(20.dp),
-            )
+            BookmarkIcon(bookmark)
         },
         trailing = {
             // 在根目录时显示归属文件夹的小标签，让用户一眼看出这条属于哪
@@ -231,50 +236,87 @@ private fun BookmarkRow(
                 FolderTag(bookmark.folder)
                 Spacer(Modifier.width(4.dp))
             }
-            Box {
-                IconButton(onClick = { showMove = true }) {
-                    Icon(
-                        LingIcons.FolderOpen,
-                        contentDescription = "移到文件夹",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(20.dp),
-                    )
-                }
-                DropdownMenu(expanded = showMove, onDismissRequest = { showMove = false }) {
-                    DropdownMenuItem(
-                        text = { Text("未分类") },
-                        enabled = bookmark.folder != null,
-                        onClick = { onMoveToFolder(null); showMove = false },
-                    )
-                    folders.forEach { f ->
-                        DropdownMenuItem(
-                            text = { Text(f) },
-                            // 已经在里面了就不给点，避免"移了个寂寞"
-                            enabled = f != bookmark.folder,
-                            onClick = { onMoveToFolder(f); showMove = false },
-                        )
-                    }
-                    HorizontalDivider()
-                    // 没有这一项的话就**永远建不出第一个文件夹** ——
-                    // 文件夹由"有书签归属"派生，而把书签放进新文件夹
-                    // 这条路径只能从这里进入。
-                    DropdownMenuItem(
-                        text = { Text("新建文件夹…") },
-                        leadingIcon = { Icon(LingIcons.Add, contentDescription = null) },
-                        onClick = { creating = true; showMove = false },
-                    )
-                }
-            }
-            IconButton(onClick = onDelete) {
+            IconButton(onClick = { menu = true }) {
                 Icon(
-                    LingIcons.DeleteOutline,
-                    contentDescription = "删除",
+                    LingIcons.MoreVert,
+                    contentDescription = "更多",
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(20.dp),
                 )
             }
+            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                DropdownMenuItem(
+                    text = { Text("重命名") },
+                    onClick = { renaming = true; menu = false },
+                )
+                DropdownMenuItem(
+                    text = { Text("移到文件夹…") },
+                    onClick = { showMove = true; menu = false },
+                )
+                HorizontalDivider()
+                DropdownMenuItem(
+                    text = { Text("删除") },
+                    onClick = { confirmDelete = true; menu = false },
+                )
+            }
         },
     )
+
+    // ---- 重命名 ----
+    if (renaming) {
+        TextInputDialog(
+            title = "重命名书签",
+            initial = bookmark.title,
+            label = "名称",
+            confirmText = "保存",
+            onConfirm = { onRename(it); renaming = false },
+            onDismiss = { renaming = false },
+        )
+    }
+
+    // ---- 删除二次确认 ----
+    // 与文件夹一致：删除是不可逆的，必须确认一次。
+    // 文案里带上标题，避免用户点错行后删掉了别的东西。
+    if (confirmDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            title = { Text("删除书签") },
+            text = { Text("确定删除「${bookmark.title}」吗？此操作无法撤销。") },
+            confirmButton = {
+                TextButton(onClick = { onDelete(); confirmDelete = false }) { Text("删除") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDelete = false }) { Text("取消") }
+            },
+        )
+    }
+
+    // ---- 移动 / 新建文件夹 ----
+    if (showMove) {
+        AlertDialog(
+            onDismissRequest = { showMove = false },
+            title = { Text("移到文件夹") },
+            text = {
+                Column {
+                    MoveTarget("未分类", bookmark.folder == null) {
+                        onMoveToFolder(null); showMove = false
+                    }
+                    folders.forEach { f ->
+                        MoveTarget(f, f == bookmark.folder) {
+                            onMoveToFolder(f); showMove = false
+                        }
+                    }
+                    MoveTarget("新建文件夹…", false) {
+                        creating = true; showMove = false
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { showMove = false }) { Text("取消") }
+            },
+        )
+    }
 
     if (creating) {
         TextInputDialog(
@@ -288,6 +330,72 @@ private fun BookmarkRow(
             onConfirm = { onMoveToFolder(it); creating = false },
             onDismiss = { creating = false },
         )
+    }
+}
+
+/**
+ * 书签的网站图标；没有图标时退回书签轮廓图标。
+ *
+ * 解码结果按书签 id 缓存：`remember(bookmark.id, bookmark.favicon)` 保证
+ * 同一张图只解码一次，而不是每次重组都解一遍（那会在滚动时明显掉帧）。
+ *
+ * 用 `id` 而不是 `favicon` 作 key 的一部分：`favicon` 是 ByteArray，
+ * 每次从库里读出来都是新对象，只按它做 key 会反复失效。
+ */
+@Composable
+private fun BookmarkIcon(bookmark: Bookmark) {
+    val bytes = bookmark.favicon
+    val image = remember(bookmark.id, bytes?.size) {
+        // 空数组表示"试过但失败了"，当作没有图标
+        bytes?.takeIf { it.isNotEmpty() }
+            ?.let { runCatching { BitmapFactory.decodeByteArray(it, 0, it.size) }.getOrNull() }
+    }
+
+    if (image != null && !image.isRecycled) {
+        Image(
+            bitmap = image.asImageBitmap(),
+            contentDescription = null,
+            modifier = Modifier
+                .size(20.dp)
+                .clip(RoundedCornerShape(4.dp)),
+        )
+    } else {
+        Icon(
+            LingIcons.BookmarkBorder,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(20.dp),
+        )
+    }
+}
+
+/** 「移到文件夹」对话框里的一行可选项。 */@Composable
+private fun MoveTarget(label: String, isCurrent: Boolean, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            // 已经在里面了就不给点，避免"移了个寂寞"
+            .clickable(enabled = !isCurrent, onClick = onClick)
+            .padding(vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodyLarge,
+            color = if (isCurrent) {
+                MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+            } else {
+                MaterialTheme.colorScheme.onSurface
+            },
+            modifier = Modifier.weight(1f),
+        )
+        if (isCurrent) {
+            Text(
+                text = "当前",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }
 

@@ -13,6 +13,7 @@ import com.ling.browser.data.prefs.LingSettings
 import com.ling.browser.data.prefs.NightMode
 import com.ling.browser.data.prefs.SearchEngine
 import com.ling.browser.data.prefs.TabsHeight
+import com.ling.browser.util.FaviconFetcher
 import com.ling.browser.util.UrlUtils
 import com.ling.browser.web.TabState
 import com.ling.browser.web.WebTabManager
@@ -155,12 +156,22 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** 提交地址栏输入：解析后加载。 */
+    /**
+     * 提交地址栏输入并**立即收尾**（加载 + 退出编辑态）。
+     *
+     * 关键是收尾顺序：先把地址栏文本锁定成提交的 URL，再置编辑态为 false。
+     * 因为 [onAddressFocusChanged] 在失焦时会调 [syncAddressFromActiveTab]，
+     * 而那一刻 `tabManager.loadUrl` 可能还没把 `activeTab().url` 更新过来
+     * （WebView 的 URL 要等页面真正开始加载才变），于是地址栏会被清空 ——
+     * 表现为"点了回车，地址栏闪一下空白"。这里显式赋值避免那个竞态。
+     */
     fun submitAddress(input: String = _addressText.value) {
         val query = input.trim()
         if (query.isEmpty()) return
         val url = UrlUtils.toUrl(query, settings.value.searchEngine)
         navigate(url)
+        // 固定住地址栏文本，别让失焦回调读到尚未更新的 tab.url
+        _addressText.value = url
         _addressEditing.value = false
         _suggestions.value = emptyList()
     }
@@ -240,8 +251,54 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
             val now = container.bookmarks.toggle(tab.displayTitle, tab.url)
             _isBookmarked.value = now
             _message.value = if (now) "已加入书签" else "已取消收藏"
+            if (now) {
+                // 页面刚打开过，WebView 已经把图标交给我们了（缩略图用的
+                // 就是它），直接复用省一次网络请求；没有再走后台抓取。
+                val bytes = tab.favicon
+                    ?.takeIf { !it.isRecycled }
+                    ?.let { encodeIcon(it) }
+                if (bytes != null) {
+                    container.bookmarks.setFavicon(tab.url, bytes)
+                } else {
+                    fetchMissingFavicons()
+                }
+            }
         }
     }
+
+    /**
+     * 给还没有图标的书签补图标。
+     *
+     * 分批（每次最多 8 个）且逐个串行：图标是锦上添花的东西，
+     * 同时发起几十个连接既没必要也容易被站点限流。
+     * 每次成功后仓库会 refresh，下一次调用自然取到下一批，
+     * 所以这里只跑一批就够了 —— 不必写循环。
+     */
+    fun fetchMissingFavicons() {
+        val pending = container.bookmarks.urlsMissingFavicon(limit = 8)
+        if (pending.isEmpty()) return
+        viewModelScope.launch {
+            pending.forEach { url ->
+                val bytes = FaviconFetcher.fetch(url)
+                if (bytes != null) {
+                    // setFavicon 内部会 refresh，书签流随之更新
+                    container.bookmarks.setFavicon(url, bytes)
+                } else {
+                    // 取不到就写一个空数组占位，表示"试过了"。
+                    // 不这样做的话每次进书签页都会重新去请求同一批失败站点，
+                    // 白白耗流量。
+                    container.bookmarks.setFavicon(url, ByteArray(0))
+                }
+            }
+        }
+    }
+
+    private fun encodeIcon(bitmap: android.graphics.Bitmap): ByteArray? = runCatching {
+        val out = java.io.ByteArrayOutputStream()
+        @Suppress("DEPRECATION")
+        bitmap.compress(android.graphics.Bitmap.CompressFormat.WEBP, 80, out)
+        out.toByteArray().takeIf { it.isNotEmpty() }
+    }.getOrNull()
 
     fun refreshBookmarkState() {
         val url = activeTab()?.url ?: return
@@ -252,6 +309,25 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
 
     fun deleteBookmark(id: Long) {
         viewModelScope.launch { container.bookmarks.delete(id) }
+    }
+
+    /**
+     * 重命名书签（只改标题，不动 URL 与所属文件夹）。
+     *
+     * 名字留空时**保留原样**而不是存一个空标题：列表里一条没有文字的书签
+     * 完全无法辨认，比不改更糟。
+     */
+    fun renameBookmark(id: Long, title: String) {
+        val clean = title.trim()
+        if (clean.isEmpty()) {
+            _message.value = "名称不能为空"
+            return
+        }
+        val current = container.bookmarks.bookmarks.value.firstOrNull { it.id == id } ?: return
+        viewModelScope.launch {
+            container.bookmarks.rename(id, clean, current.folder)
+            _message.value = "已重命名"
+        }
     }
 
     // ------------------------------------------------------------ 书签文件夹

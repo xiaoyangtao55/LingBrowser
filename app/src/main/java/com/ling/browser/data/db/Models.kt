@@ -8,7 +8,41 @@ data class Bookmark(
     /** 归属文件夹，null 表示根目录。极简版只支持一层。 */
     val folder: String? = null,
     val createdAt: Long = System.currentTimeMillis(),
-)
+    /**
+     * 网站图标的原始字节（PNG/JPEG/WebP）。
+     *
+     * 刻意存 `ByteArray` 而不是 `Bitmap`：`Bitmap` 的像素在非托管内存里，
+     * 需要手动 `recycle`，而书签列表随时可能重建、同一个对象可能被多处
+     * 引用 —— 一旦某处回收掉，别处就会抛
+     * `Canvas: trying to use a recycled bitmap`。存字节完全绕开生命周期
+     * 问题，代价只是显示时解码一次（列表里数量少，且有按 id 的缓存）。
+     */
+    val favicon: ByteArray? = null,
+) {
+    // data class 含数组时必须手写 equals/hashCode：自动生成的版本比较的是
+    // 数组**引用**，每次从库里读出来都是新数组，会被误判成"内容变了"
+    // 而触发无谓的重组。
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is Bookmark) return false
+        return id == other.id &&
+            title == other.title &&
+            url == other.url &&
+            folder == other.folder &&
+            createdAt == other.createdAt &&
+            (favicon?.contentEquals(other.favicon) ?: (other.favicon == null))
+    }
+
+    override fun hashCode(): Int {
+        var result = id.hashCode()
+        result = 31 * result + title.hashCode()
+        result = 31 * result + url.hashCode()
+        result = 31 * result + (folder?.hashCode() ?: 0)
+        result = 31 * result + createdAt.hashCode()
+        result = 31 * result + (favicon?.contentHashCode() ?: 0)
+        return result
+    }
+}
 
 /** 浏览历史。 */
 data class HistoryEntry(

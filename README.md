@@ -20,7 +20,7 @@
 |---|---|
 | 多标签页 | 每个标签页保留独立 WebView 实例，切换不丢页面状态；超过 6 个实例按 LRU 回收；favicon 缩略图 + 长按拖拽排序 |
 | 智能地址栏 | 自动区分「网址」与「搜索词」；聚焦时全选，输入时给出书签/历史联想 |
-| 书签 | 一键收藏/取消，独立管理页，支持删除 |
+| 书签 | 一键收藏/取消，独立管理页；支持**网站图标**、重命名、删除确认、单层文件夹归档 |
 | 历史记录 | 自动去重 + 次数累加，按「今天/昨天/更早」分组，支持单条删除与清空 |
 | 无痕模式 | 独立标签页；不写历史、关闭 DOM storage 与 Cookie |
 | 前进/后退/刷新/停止 | 刷新常驻在地址栏右侧；底部工具栏保留前进/后退/主页/标签页/更多 |
@@ -90,6 +90,7 @@ LingBrowser/
     ├── check_icon_fidelity.py     # 生成物与源文件逐点比对
     ├── check_session.py           # 会话恢复接线校验
     ├── check_bookmark_folders.py  # 书签文件夹校验
+    ├── check_ux_fixes.py          # 焦点/书签编辑/图标校验
     └── make_icons.py              # 生成 API<26 的传统位图图标
 ```
 
@@ -284,7 +285,43 @@ Compose 侧绘制前同样要查 `isRecycled`：我们会主动回收，而 Comp
 > `ling://home` 得到 "L"，看着像站点名实则毫无意义。主页与无法解析的
 > 地址统一给中性占位符 `•`。`www.` 前缀也会跳过，否则满屏都是 "W"。
 
-### 3.2 拖拽排序：长按才能拖
+### 3.2 书签的网站图标：自己抓，存字节
+
+书签的图标**不能**复用 `onReceivedIcon`：书签往往很久以后才需要显示，
+那时页面早已关闭、回调早过去了，也没有系统级图标服务可用。只能按 URL
+自己去取 `/favicon.ico`（取不到再看主页 HTML 里的 `<link rel=icon>`）。
+
+三条硬约束，都是为省流量和避免卡顿：
+
+| 约束 | 原因 |
+|---|---|
+| 只跟随标准位置，不做完整 HTML 解析 | 为一个 16px 图标引入 HTML 解析器不划算 |
+| 边读边数字节，超过 512 KB 放弃 | 有些站点返回几十 MB 的图，不拦会打爆内存 |
+| 存库前缩到 96px 并压成 WebP | 原始 PNG 几十 KB，压缩后几 KB；上百条书签差距很大 |
+
+**存字节（`ByteArray`）而不是 `Bitmap`**。`Bitmap` 的像素在非托管内存里，
+需要手动 `recycle`，而书签列表随时可能重建、同一个对象可能被多处引用 ——
+一旦某处回收掉，别处就会抛 `Canvas: trying to use a recycled bitmap`。
+存字节完全绕开生命周期问题，代价只是显示时解码一次（按 id 缓存）。
+含 `ByteArray` 的 data class 还必须**手写 `equals`/`hashCode`**：
+自动生成的版本比较的是数组**引用**，每次从库里读出来都是新数组，
+会被误判成"内容变了"而反复重组。
+
+**失败要写占位**：抓不到图标时存一个**空数组**而不是留 `null`。
+空数组表示"试过了但失败"，`urlsMissingFavicon` 只把 `null` 当作缺失。
+不区分的话，每次打开书签页都会重新请求同一批注定失败的站点，白耗流量。
+
+**升级不能丢数据**。这一版把数据库从 2 升到 3（新增 `favicon` 列）。
+原先的 `onUpgrade` 是**无条件 `DROP TABLE` 重建**，注释写着"尚未正式发版
+即可"——但真机上已经装了带书签/历史的版本，重建就是把收藏全抹掉。
+现改为 `if (oldVersion < 3) ALTER TABLE ...` 增量迁移，且按版本区间判断，
+保证能从任意旧版本逐级升上来。
+
+> **一个差点犯错的地方**：收藏时的图标优先复用页面已加载的那张
+> （`TabState.favicon`，缩略图用的就是它），省掉一次网络请求；
+> 拿不到才走后台抓取。
+
+### 3.3 拖拽排序：长按才能拖
 用 `detectDragGesturesAfterLongPress` 而非普通拖拽 —— 短按要留给
 「点击切换标签」，普通拖拽还会和列表滚动打架。
 
@@ -307,7 +344,7 @@ key 一变手势识别器就被重启，**拖动中途会断掉**。只用 `tab.
 > `add(to, removeAt(from))` 里 `to` 已是正确下标，**不需要**任何 ±1 补偿
 > （曾以为需要，实测 `move(0,3)` 得到 `[B,C,D,A]` 才发现补偿反而错位）。
 
-### 3.3 会话恢复：四个必须想清楚的点
+### 3.4 会话恢复：四个必须想清楚的点
 
 **① 保存挂在 `onStop`，不是 `onDestroy`。** 进程被系统回收时
 `onDestroy` **不保证被调用**（这正是低内存杀后台的常见路径），
@@ -348,7 +385,7 @@ key 一变手势识别器就被重启，**拖动中途会断掉**。只用 `tab.
 已存的快照清掉：否则用户关掉开关、重启一次、再打开开关，会看到
 **关闭之前**那一批早就该被遗忘的标签，既意外又像 bug。
 
-### 3.4 书签文件夹：不建 folders 表
+### 3.5 书签文件夹：不建 folders 表
 
 只有**一层**文件夹（进入文件夹后看到的就是书签，不能再往下钻）。
 这是刻意取舍：手机屏幕上的多层树需要面包屑 + 深度指示，
@@ -391,6 +428,42 @@ internal fun deriveFolders(bookmarks: List<Bookmark>): List<String> =
 > **一个容易忽略的地方**：文件夹由书签派生，所以"把书签放进一个新文件夹"
 > 是**唯一**能创建文件夹的路径。移动菜单里必须有「新建文件夹…」这一项，
 > 否则**永远建不出第一个文件夹**。`check_bookmark_folders.py` 专门盯着它。
+
+### 3.6 地址栏提交后必须真的释放焦点
+
+一个真机上发现、后果比表面严重的 bug：地址栏输入后按回车，页面加载了，
+但**输入光标继续闪**，而且**网页里的输入框唤不起输入法**。
+
+根因是只改了状态、没动真实焦点：
+
+```kotlin
+onGo = {
+    onSubmit(field.text)   // ViewModel 里把 addressEditing 置 false
+    keyboard?.hide()       // 只是收起键盘
+}                          // ← 没有任何地方调用 clearFocus()
+```
+
+`BasicTextField` **物理上仍然持有焦点**。键盘虽然收起了，但只要用户去点
+网页里的输入框，焦点之争会让 WebView 拿不到焦点，软键盘自然弹不出来。
+光看地址栏是察觉不到这个问题的 —— 光标闪动只是表象。
+
+修法是三件事缺一不可（`releaseFocus`）：
+
+```kotlin
+focusManager.clearFocus()   // 真正释放焦点，光标随之消失
+keyboard?.hide()            // 收起软键盘
+onFocusChange(false)        // 让 ViewModel 状态与真实焦点保持一致
+```
+
+**还发现 `onFocusChange` 这个参数从未被调用过** —— 它声明在
+`AddressBar` 的参数表里，但没有任何地方接上 `Modifier.onFocusChanged`，
+编辑态完全靠手动同步。现已补上观察者，状态与真实焦点不会再脱节。
+
+**顺带修掉一个连带竞态**：失焦回调会调 `syncAddressFromActiveTab()`，
+而那一刻 `tabManager.loadUrl` 可能还没把 `activeTab().url` 更新过来
+（WebView 的 URL 要等页面真正开始加载才变），于是地址栏会被清空 ——
+表现为"点了回车，地址栏闪一下空白"。现在 `submitAddress` 显式锁定
+地址栏文本，不等失焦回调去猜。
 
 ### 4. 主页由 WebView 渲染，不用 Compose 覆盖层
 早期实现把主页做成 Compose 覆盖层（`HomeScreen`），有两个问题：主页不进入
@@ -607,6 +680,7 @@ python tools/preview_home_mark.py old  # 改版前的造型，用于对照
 | `tools/check_tabs_layer.py` | 校验标签面板的层级与动画约束（遮罩必须画在面板之后、拖拽手势不吞点击等） |
 | `tools/check_session.py` | 校验会话恢复接线：保存挂在 onStop、协程不被 viewModelScope 取消、无痕不落盘 |
 | `tools/check_bookmark_folders.py` | 校验文件夹不建表、删文件夹不连带删书签、导出规则与新建入口 |
+| `tools/check_ux_fixes.py` | 校验地址栏真的释放焦点、书签重命名/删除确认、图标存储与迁移不丢数据 |
 | `tools/check_junit_args.py` | 抓 JUnit 参数顺序写反（应为 `(message, value)`） |
 | `tools/check_workflow.py` | 校验 GitHub Actions YAML 结构 |
 | `tools/check_signing.py` | 抓签名配置里"空字符串被当成路径"的经典崩溃 |
@@ -643,14 +717,14 @@ python tools/preview_launcher_png.py mipmap-xxxhdpi  # 预览启动图标
 | 项目 | 结果 |
 |---|---|
 | `:app:assembleDebug` | ✅ 通过（图标改版后重新验证） |
-| `:app:testDebugUnitTest` | ✅ **135 个用例全部通过**（`UrlUtilsTest` 20 / `HomePageTest` 19 / `TabOrderTest` 15 / `BookmarkFolderTest` 14 / `LingSettingsTest` 14 / `LauncherIconTest` 12 / `LingIconsTest` 11 / `DownloadTest` 10 / `SessionSnapshotTest` 9 / `TabInitialTest` 6 / `PendingDownloadTest` 5） |
+| `:app:testDebugUnitTest` | ✅ **147 个用例全部通过**（`UrlUtilsTest` 20 / `FaviconFetcherTest` 12 / `HomePageTest` 19 / `TabOrderTest` 15 / `BookmarkFolderTest` 14 / `LingSettingsTest` 14 / `LauncherIconTest` 12 / `LingIconsTest` 11 / `DownloadTest` 10 / `SessionSnapshotTest` 9 / `TabInitialTest` 6 / `PendingDownloadTest` 5） |
 | `:app:assembleRelease`（R8 压缩） | ✅ 通过，产物 1.4 MB（图标改版前） |
 | APK 签名校验 | ✅ v1 + v2 方案均通过 |
 | 真机安装（Xiaomi MI 8 / Android 14） | ✅ `adb install` 成功 |
 | 真机启动 | ✅ 无崩溃，`Displayed MainActivity: +884ms` |
 | WebView 进程 | ✅ sandboxed_process 正常拉起 |
 | View 层级 | ✅ Compose 树与 WebView 宿主 `FrameLayout` 布局正确 |
-| 静态自检（17 个脚本） | ✅ 全部通过 |
+| 静态自检（18 个脚本） | ✅ 全部通过 |
 
 > 图标已全部替换为官方 Material Symbols（27 个，见 §四.2），
 > 并通过 `check_icon_fidelity.py` 与源文件逐点核对。

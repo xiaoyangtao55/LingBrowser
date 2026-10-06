@@ -141,6 +141,35 @@ class BookmarkRepository(private val db: LingDatabase) {
     /** 该文件夹名是否已被占用（大小写不敏感）。 */
     fun folderExists(name: String): Boolean =
         folders().any { it.equals(name.trim(), ignoreCase = true) }
+
+    // ------------------------------------------------------------ 网站图标
+
+    /**
+     * 写入某个书签的图标字节。已存在则覆盖。
+     *
+     * 只更新 favicon 一列，不动标题/文件夹 —— 避免"补图标"这个后台动作
+     * 反过来覆盖掉用户刚改的名字。
+     */
+    suspend fun setFavicon(url: String, bytes: ByteArray?) = withContext(Dispatchers.IO) {
+        val values = ContentValues().apply {
+            if (bytes == null) putNull("favicon") else put("favicon", bytes)
+        }
+        db.writableDatabase.update("bookmarks", values, "url = ?", arrayOf(url))
+        refresh()
+    }
+
+    /**
+     * 哪些书签还没有图标，最多取 [limit] 个。
+     *
+     * "没有"指 favicon 为 **null**。空数组（`ByteArray(0)`）表示
+     * "已经尝试抓取但失败了"，不算缺失 —— 否则每次打开书签页都会
+     * 重新请求同一批注定失败的站点，白耗流量。
+     *
+     * 返回 URL 而不是 Bookmark：调用方只需要拿它去下载，
+     * 传整个对象会让 favicon 字段跟着一起流转，容易误用。
+     */
+    fun urlsMissingFavicon(limit: Int = 8): List<String> =
+        _bookmarks.value.filter { it.favicon == null }.map { it.url }.take(limit)
 }
 
 // ------------------------------------------------------------------ 纯函数
