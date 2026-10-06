@@ -86,7 +86,6 @@ LingBrowser/
     ├── check_home_html.py
     ├── import_material_icons.py   # 官方图标 -> Compose 矢量代码
     ├── emit_ling_icons.py         # 组装 LingIcons.kt
-    ├── synth_missing_icons.py     # 合成官方未提供的 4 个图标
     ├── ascii_icons.py             # 图标渲染成 ASCII，肉眼校验造型
     ├── check_icon_fidelity.py     # 生成物与源文件逐点比对
     └── make_icons.py              # 生成 API<26 的传统位图图标
@@ -198,11 +197,19 @@ tint 与交互动画，取字形还要按 Unicode 码点逐个核对。
 `quadraticBezierTo`，**两个都不存在**。正确做法是 `javap` 查一遍：
 `moveTo` / `lineTo` / `quadTo` / `curveTo` / `arcTo` / `close`。
 
-#### 4 个官方文件缺失的图标
-`close` / `layers` / `more_vert` / `bookmark_border` 未在素材里提供，
-由 `tools/synth_missing_icons.py` **按 Material 官方规格合成**
-（线宽 80、圆角半径 40、内容安全边距 120..840，都是从已有官方文件反推的），
-并在代码注释里标注为「合成」而非冒充官方。
+#### 收藏状态：靠「实心 / 空心」区分，不靠加号
+| 状态 | 图标 | 官方源文件 |
+|---|---|---|
+| 未收藏 | 空心书签 | `bookmark` |
+| 已收藏 | **实心**书签带加号 | `bookmark_added_fill` |
+
+⚠️ 极易搞错的是 **`bookmark_added`（不带 `_fill`）其实是空心版**，
+只比 `bookmark` 多一个加号，在 24dp 下两种状态几乎分不出来。
+区分靠的是**填充**，不是有没有加号。`LingIconsTest` 里有一条用例
+专门锁定这个区分（实心版坐标数必须少于空心版）。
+
+> 之前两个状态都用同一个空心图标，用户只能读菜单文字才知道当前
+> 是否已收藏 —— 顺手一并修了。
 
 #### 校验工具链
 
@@ -210,14 +217,15 @@ tint 与交互动画，取字形还要按 Unicode 码点逐个核对。
 |---|---|
 | `tools/import_material_icons.py` | 解析官方 VectorDrawable，转成 Compose 路径代码（缺图标会明确报错） |
 | `tools/emit_ling_icons.py` | 组装成完整的 `LingIcons.kt` |
-| `tools/synth_missing_icons.py` | 按官方规格合成 4 个缺失图标 |
 | `tools/ascii_icons.py` | 扫描线填充（even-odd）渲染成 ASCII，编译前即可肉眼核对 |
 | `tools/check_icon_fidelity.py` | **重新解析源文件，与生成物逐点比对**，防止"源改了、生成物没重跑"的漂移 |
-| `app/src/test/.../LingIconsTest.kt` | 9 个用例：禁止 `arcTo`、坐标不越界、填充可见、视口与默认尺寸一致等 |
+| `app/src/test/.../LingIconsTest.kt` | 10 个用例：禁止 `arcTo`、坐标不越界、填充可见、视口与默认尺寸一致、收藏两态形状不同 |
 
 > `check_icon_fidelity.py` 是这里最有用的一环：图标漂移**极难用肉眼发现**，
 > 少一个控制点、坐标差 40，渲染出来看着都"差不多"。已验证把某个坐标
 > 改掉 40 单位后它会精确报出「#14 源=480.0 生成=520.0」。
+
+> 全部 26 个图标均来自官方文件，**没有合成图标**。
 
 > 旧的 `render_icons_kotlin.py` / `render_icons.py` 解析的是手绘描边的
 > `arcPolyline` API，换成官方图标后已解析不出任何图形，故删除。
@@ -447,7 +455,6 @@ python tools/preview_home_mark.py old  # 改版前的造型，用于对照
 | `tools/ascii_icons.py` | 把图标按 even-odd 扫描线填充渲染成 ASCII，编译前肉眼校验造型 |
 | `tools/import_material_icons.py` | 官方 VectorDrawable → Compose 矢量代码 |
 | `tools/emit_ling_icons.py` | 组装 `LingIcons.kt` |
-| `tools/synth_missing_icons.py` | 按官方规格合成 4 个未提供的图标 |
 | `tools/preview_home_mark.py` | 把 `HomePage.kt` 里的主页 logo（描边线画）渲染成 PNG，终端里看不到图形时用它 |
 | `tools/preview_launcher_png.py` | 把 PNG 图标渲染成 ASCII 预览（终端里就能看构图） |
 
@@ -464,7 +471,6 @@ python tools/check_download_bytes.py
 python tools/check_icon_fidelity.py
 
 # 图标管线（改了图标才需要，产物会写回 LingIcons.kt）
-python tools/synth_missing_icons.py
 python tools/import_material_icons.py
 python tools/emit_ling_icons.py
 python tools/ascii_icons.py Download Layers          # 渲染指定图标
@@ -478,7 +484,7 @@ python tools/preview_launcher_png.py mipmap-xxxhdpi  # 预览启动图标
 | 项目 | 结果 |
 |---|---|
 | `:app:assembleDebug` | ✅ 通过（图标改版后重新验证） |
-| `:app:testDebugUnitTest` | ✅ **89 个用例全部通过**（`UrlUtilsTest` 20 / `HomePageTest` 19 / `LingSettingsTest` 14 / `LauncherIconTest` 12 / `DownloadTest` 10 / `LingIconsTest` 9 / `PendingDownloadTest` 5） |
+| `:app:testDebugUnitTest` | ✅ **90 个用例全部通过**（`UrlUtilsTest` 20 / `HomePageTest` 19 / `LingSettingsTest` 14 / `LauncherIconTest` 12 / `DownloadTest` 10 / `LingIconsTest` 10 / `PendingDownloadTest` 5） |
 | `:app:assembleRelease`（R8 压缩） | ✅ 通过，产物 1.4 MB（图标改版前） |
 | APK 签名校验 | ✅ v1 + v2 方案均通过 |
 | 真机安装（Xiaomi MI 8 / Android 14） | ✅ `adb install` 成功 |

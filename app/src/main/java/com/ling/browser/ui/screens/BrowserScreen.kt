@@ -273,7 +273,14 @@ fun BrowserScreen(
             DropdownMenuItem(
                 text = { Text(if (isBookmarked) "取消收藏" else "添加书签") },
                 leadingIcon = {
-                    Icon(LingIcons.BookmarkBorder, contentDescription = null)
+                    // 用「实心 / 空心」表达收藏状态，而不是靠文字：
+                    // 已收藏 -> bookmark_added_fill（实心带加号）
+                    // 未收藏 -> bookmark（空心）
+                    // 之前两种状态都用空心图标，用户只能读文字才知道当前状态。
+                    Icon(
+                        if (isBookmarked) LingIcons.Bookmark else LingIcons.BookmarkBorder,
+                        contentDescription = null,
+                    )
                 },
                 onClick = {
                     viewModel.toggleBookmark()

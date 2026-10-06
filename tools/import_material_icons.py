@@ -30,7 +30,7 @@ OUT = os.path.join(
     "LingIcons.kt",
 )
 
-SYNTHESIZED = {"close", "layers", "more_vert", "bookmark_border"}
+SYNTHESIZED = set()   # 官方文件已补齐，不再需要合成
 
 # 中间产物写到临时目录，不进源码树 —— 它是可再生的，
 # 提交进仓库只会变成需要人工同步的第二份真相。
@@ -59,8 +59,15 @@ MAPPING = [
     ("Layers", "layers"),
     ("MoreVert", "more_vert"),
     ("Add", "add"),
-    ("BookmarkBorder", "bookmark_border"),
-    ("Bookmark", "bookmark"),
+    # 收藏的两种状态用「空心 vs 实心」区分：
+    #   bookmark             官方空心书签（+ 内部挖空）
+    #   bookmark_added_fill  官方**实心**书签带加号
+    #
+    # ⚠️ 注意不要错用 bookmark_added —— 那个是**空心**版（只比 bookmark
+    # 多一个加号），在 24dp 下和未收藏状态几乎分不出来。区分这两种状态
+    # 靠的是填充，不是有没有加号。
+    ("BookmarkBorder", "bookmark"),
+    ("Bookmark", "bookmark_added_fill"),
     ("History", "history"),
     ("DeleteOutline", "delete"),
     ("DeleteSweep", "delete_sweep"),

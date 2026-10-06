@@ -101,7 +101,7 @@ object LingIcons {
         }
     }
 
-    /** Close（Material Symbols Outlined: close，合成·按官方规格）。 */  // 官方文件未提供，按 Material Symbols 规格合成（见 tools/synth_missing_icons.py）
+    /** Close（Material Symbols Outlined: close，官方）。 */
     val Close: ImageVector by lazy {
         materialIcon("Close") {
             moveTo(256f, 760f)
@@ -190,7 +190,7 @@ object LingIcons {
         }
     }
 
-    /** Layers（Material Symbols Outlined: layers，合成·按官方规格）。 */  // 官方文件未提供，按 Material Symbols 规格合成（见 tools/synth_missing_icons.py）
+    /** Layers（Material Symbols Outlined: layers，官方）。 */
     val Layers: ImageVector by lazy {
         materialIcon("Layers") {
             moveTo(480f, 842f)
@@ -221,7 +221,7 @@ object LingIcons {
         }
     }
 
-    /** MoreVert（Material Symbols Outlined: more_vert，合成·按官方规格）。 */  // 官方文件未提供，按 Material Symbols 规格合成（见 tools/synth_missing_icons.py）
+    /** MoreVert（Material Symbols Outlined: more_vert，官方）。 */
     val MoreVert: ImageVector by lazy {
         materialIcon("MoreVert") {
             moveTo(480f, 800f)
@@ -277,37 +277,9 @@ object LingIcons {
         }
     }
 
-    /** BookmarkBorder（Material Symbols Outlined: bookmark_border，合成·按官方规格）。 */  // 官方文件未提供，按 Material Symbols 规格合成（见 tools/synth_missing_icons.py）
+    /** BookmarkBorder（Material Symbols Outlined: bookmark，官方）。 */
     val BookmarkBorder: ImageVector by lazy {
         materialIcon("BookmarkBorder") {
-            moveTo(200f, 840f)
-            lineTo(200f, 200f)
-            quadTo(200f, 167f, 223.5f, 143.5f)
-            quadTo(247f, 120f, 280f, 120f)
-            lineTo(680f, 120f)
-            quadTo(713f, 120f, 736.5f, 143.5f)
-            quadTo(760f, 167f, 760f, 200f)
-            lineTo(760f, 840f)
-            lineTo(480f, 720f)
-            lineTo(200f, 840f)
-            close()
-            moveTo(280f, 718f)
-            lineTo(480f, 632f)
-            lineTo(680f, 718f)
-            lineTo(680f, 200f)
-            quadTo(680f, 200f, 680f, 200f)
-            quadTo(680f, 200f, 680f, 200f)
-            lineTo(280f, 200f)
-            quadTo(280f, 200f, 280f, 200f)
-            quadTo(280f, 200f, 280f, 200f)
-            lineTo(280f, 718f)
-            close()
-        }
-    }
-
-    /** Bookmark（Material Symbols Outlined: bookmark，官方）。 */
-    val Bookmark: ImageVector by lazy {
-        materialIcon("Bookmark") {
             moveTo(200f, 840f)
             lineTo(200f, 200f)
             quadTo(200f, 167f, 223.5f, 143.5f)
@@ -340,6 +312,35 @@ object LingIcons {
             lineTo(680f, 200f)
             lineTo(480f, 200f)
             lineTo(280f, 200f)
+            close()
+        }
+    }
+
+    /** Bookmark（Material Symbols Outlined: bookmark_added_fill，官方）。 */
+    val Bookmark: ImageVector by lazy {
+        materialIcon("Bookmark") {
+            moveTo(713f, 360f)
+            lineTo(600f, 247f)
+            lineTo(656f, 190f)
+            lineTo(713f, 247f)
+            lineTo(854f, 105f)
+            lineTo(911f, 162f)
+            lineTo(713f, 360f)
+            close()
+            moveTo(200f, 840f)
+            lineTo(200f, 200f)
+            quadTo(200f, 167f, 223.5f, 143.5f)
+            quadTo(247f, 120f, 280f, 120f)
+            lineTo(560f, 120f)
+            quadTo(540f, 150f, 530f, 177.5f)
+            quadTo(520f, 205f, 520f, 240f)
+            quadTo(520f, 312f, 565.5f, 367f)
+            quadTo(611f, 422f, 680f, 436f)
+            quadTo(703f, 439f, 720f, 439f)
+            quadTo(737f, 439f, 760f, 436f)
+            lineTo(760f, 840f)
+            lineTo(480f, 720f)
+            lineTo(200f, 840f)
             close()
         }
     }

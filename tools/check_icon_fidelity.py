@@ -43,7 +43,7 @@ MAPPING = [
     ("ArrowBack", "arrow_back"), ("ArrowForward", "arrow_forward"),
     ("Close", "close"), ("Refresh", "refresh"), ("Home", "home"),
     ("Layers", "layers"), ("MoreVert", "more_vert"), ("Add", "add"),
-    ("BookmarkBorder", "bookmark_border"), ("Bookmark", "bookmark"),
+    ("BookmarkBorder", "bookmark"), ("Bookmark", "bookmark_added_fill"),
     ("History", "history"), ("DeleteOutline", "delete"),
     ("DeleteSweep", "delete_sweep"), ("Search", "search"),
     ("Download", "download"), ("Folder", "folder"),

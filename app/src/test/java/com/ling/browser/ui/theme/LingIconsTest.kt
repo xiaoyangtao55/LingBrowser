@@ -204,4 +204,36 @@ class LingIconsTest {
         }
         assertTrue("默认尺寸不是 24dp：$problems", problems.isEmpty())
     }
+
+    @Test
+    fun `已收藏与未收藏的图标形状不同`() {
+        // 收藏状态靠「实心 vs 空心」表达，而不是靠有没有加号。
+        //
+        // 这两个图标来自官方的不同源文件：
+        //   BookmarkBorder <- bookmark             （空心，内部有挖空轮廓）
+        //   Bookmark       <- bookmark_added_fill  （实心，无内部挖空）
+        //
+        // 极易搞错的是：`bookmark_added`（不带 _fill）其实是**空心**版，
+        // 只比 bookmark 多一个加号，在 24dp 下两种状态几乎分不出来。
+        // 这条用例把这个区分固定下来。
+        val hollow = pathNodes(LingIcons.BookmarkBorder)
+        val filled = pathNodes(LingIcons.Bookmark)
+
+        assertTrue("未收藏图标应有路径", hollow.isNotEmpty())
+        assertTrue("已收藏图标应有路径", filled.isNotEmpty())
+
+        // 空心版带内部挖空轮廓，坐标数明显更多
+        fun ptCount(nodes: List<PathNode>) = nodes.sumOf { node ->
+            node.javaClass.declaredFields
+                .filter { it.type == Float::class.javaPrimitiveType }
+                .size
+        }
+        val hollowPts = ptCount(hollow)
+        val filledPts = ptCount(filled)
+        assertTrue(
+            "实心版($filledPts 个坐标)应比空心版($hollowPts 个坐标)简单，"
+                + "若相反说明两者可能被互换了",
+            filledPts < hollowPts,
+        )
+    }
 }
