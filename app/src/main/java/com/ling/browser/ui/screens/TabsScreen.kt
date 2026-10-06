@@ -44,6 +44,15 @@ import com.ling.browser.data.prefs.TabsHeight
 import com.ling.browser.web.TabState
 
 /**
+ * 非全屏档位下面板的底色透明度。
+ *
+ * 取值理由：太低（< 0.6）面板上的文字会与网页内容互相干扰、读不清；
+ * 太高（> 0.9）就等于不透明，"能看到后面的网页"这个设计意图就没了。
+ * 0.82 配合下方的模糊/压暗遮罩，既能看清列表又能感知背后的页面。
+ */
+private const val PANEL_ALPHA = 0.82f
+
+/**
  * 标签页管理页。
  *
  * 高度由 [tabsHeight] 控制，默认只占屏幕下 1/4 —— 这样切标签时仍能看到
@@ -65,11 +74,13 @@ fun TabsScreen(
     onTabsHeightChange: (TabsHeight) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    // 面板从底部升起：用 Box + align 而不是 fillMaxSize，短面板下方不会留白
+    // 面板从底部升起：用 Box + align 而不是 fillMaxSize，短面板下方不会留白。
+    //
+    // 遮罩只压暗**面板上方**的区域，让底下的网页隐约可见（Via 的做法）：
+    // 完全盖死会让用户失去"我还在那个网页上"的空间感。
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(Color.Black.copy(alpha = 0.32f))
             // 点击面板外的遮罩也可关闭
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
@@ -84,7 +95,15 @@ fun TabsScreen(
             } else {
                 RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
             },
-            color = MaterialTheme.colorScheme.surface,
+            // 半透明面板：能透出后方网页。用 surface 的 alpha 而不是纯色，
+            // 保证 Material You 动态取色仍然生效。
+            // 全屏档位下若仍然半透明，背后会透出浏览页造成视觉干扰，
+            // 因此全屏时用不透明表面。
+            color = if (tabsHeight == TabsHeight.FULL) {
+                MaterialTheme.colorScheme.surface
+            } else {
+                MaterialTheme.colorScheme.surface.copy(alpha = PANEL_ALPHA)
+            },
             tonalElevation = 3.dp,
             // 高度不够时内部列表自行滚动，不会把面板撑破
             modifier = Modifier
@@ -195,6 +214,20 @@ fun TabsScreen(
                     }
                 }
             }
+        }
+
+        // 压暗遮罩：只覆盖面板**上方**露出的网页区域。
+        // 放在面板之后绘制，因此不会盖住面板本身；
+        // 它让背后的网页"退到后面"，避免与面板内容抢注意力。
+        // 全屏档位下没有露出的区域，就不画。
+        if (tabsHeight != TabsHeight.FULL) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .fillMaxHeight(1f - tabsHeight.fraction)
+                    .align(Alignment.TopCenter)
+                    .background(Color.Black.copy(alpha = 0.28f)),
+            )
         }
     }
 }

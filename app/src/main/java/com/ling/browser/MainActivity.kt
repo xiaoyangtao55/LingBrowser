@@ -6,6 +6,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -123,74 +124,83 @@ private fun LingApp(viewModel: BrowserViewModel) {
     val history by viewModel.history.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
 
-    when (route) {
-        Route.Browser -> BrowserScreen(
+    // 标签页面板是**叠加层**而非独立页面：BrowserScreen 必须一直挂载着，
+    // 否则 when 一切换它就被卸载，DisposableEffect 会 detachHost 把 WebView
+    // 摘下来 —— 面板背后就成了空白，自然"透"不出网页。
+    Box(modifier = Modifier.fillMaxSize()) {
+        // 底层：浏览页常驻。叠加层打开时它不再处理返回键。
+        BrowserScreen(
             viewModel = viewModel,
             onOpenTabs = { push(Route.Tabs) },
             onOpenBookmarks = { push(Route.Bookmarks) },
             onOpenHistory = { push(Route.History) },
             onOpenSettings = { push(Route.Settings) },
-            // 只有栈里仅剩浏览页时才接管返回键
             canHandleBack = !hasOverlay,
         )
 
-        Route.Tabs -> TabsScreen(
-            tabs = tabs,
-            activeId = activeId,
-            onSelect = {
-                viewModel.switchTab(it)
-                pop()
-            },
-            onClose = viewModel::closeTab,
-            onNewTab = {
-                viewModel.newTab()
-                pop()
-            },
-            onNewIncognitoTab = {
-                viewModel.newIncognitoTab()
-                pop()
-            },
-            onCloseAll = { tabs.forEach { viewModel.closeTab(it.id) } },
-            onBack = pop,
-            tabsHeight = settings.tabsHeight,
-            onTabsHeightChange = viewModel::setTabsHeight,
-        )
+        // 上层：二级页面。不带遮罩的页面（书签/历史/设置）自己是不透明的，
+        // 会盖住底层；只有标签页面板故意留出透明区域。
+        when (route) {
+            Route.Browser -> Unit
 
-        Route.Bookmarks -> BookmarksScreen(
-            bookmarks = bookmarks,
-            onOpen = {
-                viewModel.navigate(it)
-                pop()
-            },
-            onDelete = viewModel::deleteBookmark,
-            onBack = pop,
-        )
+            Route.Tabs -> TabsScreen(
+                tabs = tabs,
+                activeId = activeId,
+                onSelect = {
+                    viewModel.switchTab(it)
+                    pop()
+                },
+                onClose = viewModel::closeTab,
+                onNewTab = {
+                    viewModel.newTab()
+                    pop()
+                },
+                onNewIncognitoTab = {
+                    viewModel.newIncognitoTab()
+                    pop()
+                },
+                onCloseAll = { tabs.forEach { viewModel.closeTab(it.id) } },
+                onBack = pop,
+                tabsHeight = settings.tabsHeight,
+                onTabsHeightChange = viewModel::setTabsHeight,
+            )
 
-        Route.History -> HistoryScreen(
-            history = history,
-            onOpen = {
-                viewModel.navigate(it)
-                pop()
-            },
-            onDelete = viewModel::deleteHistory,
-            onClearAll = viewModel::clearHistory,
-            onBack = pop,
-        )
+            Route.Bookmarks -> BookmarksScreen(
+                bookmarks = bookmarks,
+                onOpen = {
+                    viewModel.navigate(it)
+                    pop()
+                },
+                onDelete = viewModel::deleteBookmark,
+                onBack = pop,
+            )
 
-        Route.Settings -> SettingsScreen(
-            settings = settings,
-            onSearchEngine = viewModel::setSearchEngine,
-            onHomepage = viewModel::setCustomHomepage,
-            onNightMode = viewModel::setNightMode,
-            onDesktopMode = viewModel::setDesktopMode,
-            onDynamicColor = viewModel::setDynamicColor,
-            onForceDark = viewModel::setForceDark,
-            onBlockImages = viewModel::setBlockImages,
-            onJavaScript = viewModel::setJavaScript,
-            onTabsHeight = viewModel::setTabsHeight,
-            onClearData = viewModel::clearAllData,
-            onBack = pop,
-        )
+            Route.History -> HistoryScreen(
+                history = history,
+                onOpen = {
+                    viewModel.navigate(it)
+                    pop()
+                },
+                onDelete = viewModel::deleteHistory,
+                onClearAll = viewModel::clearHistory,
+                onBack = pop,
+            )
+
+            Route.Settings -> SettingsScreen(
+                settings = settings,
+                onSearchEngine = viewModel::setSearchEngine,
+                onHomepage = viewModel::setCustomHomepage,
+                onNightMode = viewModel::setNightMode,
+                onDesktopMode = viewModel::setDesktopMode,
+                onDynamicColor = viewModel::setDynamicColor,
+                onForceDark = viewModel::setForceDark,
+                onBlockImages = viewModel::setBlockImages,
+                onJavaScript = viewModel::setJavaScript,
+                onTabsHeight = viewModel::setTabsHeight,
+                onClearData = viewModel::clearAllData,
+                onBack = pop,
+            )
+        }
     }
 }
 

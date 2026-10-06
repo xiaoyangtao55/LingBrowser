@@ -8,6 +8,8 @@ import android.widget.FrameLayout
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -206,6 +208,9 @@ fun BrowserScreen(
             // WebView 宿主始终挂载：错误页以覆盖层的形式盖在上面。
             // 主页现在由 WebView 自己渲染（见 HomePage），不再是覆盖层 ——
             // 这样主页也能正常参与前进/后退历史。
+            //
+            // 标签页面板是**半透明叠加层**（见 TabsScreen），背后的 WebView
+            // 必须继续渲染，否则面板后面就是空白。
             AndroidView(
                 factory = { host },
                 modifier = Modifier.fillMaxSize(),
@@ -219,6 +224,24 @@ fun BrowserScreen(
                     modifier = Modifier
                         .fillMaxSize()
                         .background(MaterialTheme.colorScheme.background),
+                )
+            }
+
+            // 二级页面（标签页 / 书签 / 历史 / 设置）在场时，WebView 仍要
+            // 继续渲染 —— 标签页面板是半透明的，背后得有内容。但它不该再
+            // 接收触摸：Compsoe 的点击会命中上层面板，而 AndroidView 是真实
+            // 的 View，仍可能抢焦点（例如弹出软键盘或触发网页滚动）。
+            // 这里盖一层透明且可点击的 Box 把事件吃掉。
+            // canHandleBack 等价于"当前没有二级页面"，直接复用。
+            if (!canHandleBack) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            onClick = {},
+                        ),
                 )
             }
         }
