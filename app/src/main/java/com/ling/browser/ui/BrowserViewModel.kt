@@ -179,6 +179,9 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
 
     fun closeOthers(keepId: String) = tabManager.closeOthers(keepId)
 
+    /** 标签列表拖拽排序：把 [from] 位置的标签移到 [to]。 */
+    fun moveTab(from: Int, to: Int) = tabManager.moveTab(from, to)
+
     fun switchTab(id: String) {
         tabManager.switchTo(id)
         _addressEditing.value = false

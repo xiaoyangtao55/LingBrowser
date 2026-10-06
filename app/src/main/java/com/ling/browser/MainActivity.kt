@@ -165,6 +165,7 @@ private fun LingApp(viewModel: BrowserViewModel) {
                     pop()
                 },
                 onCloseAll = { tabs.forEach { viewModel.closeTab(it.id) } },
+                onMoveTab = viewModel::moveTab,
                 onBack = pop,
                 tabsHeight = settings.tabsHeight,
                 onTabsHeightChange = viewModel::setTabsHeight,

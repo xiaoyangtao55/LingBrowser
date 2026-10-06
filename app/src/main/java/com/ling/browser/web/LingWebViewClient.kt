@@ -28,6 +28,13 @@ class LingWebViewClient(
 
     override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
         super.onPageStarted(view, url, favicon)
+        // WebView 在开始加载时就会把它**已知**的站点图标交出来。
+        // 之前这个参数被直接丢掉了，导致标签缩略图一直没有数据 ——
+        // 光实现 WebChromeClient.onReceivedIcon 是不够的：
+        // 那个回调只在 WebView 真正拿到图标时才触发，很多站点要等
+        // 页面解析到 <link rel="icon"> 才给，时序上晚得多。
+        // 两个来源都接上，缩略图出现得更早也更可靠。
+        onReceivedIcon(favicon)
         url?.let(onPageStarted)
     }
 
@@ -86,7 +93,14 @@ class LingWebViewClient(
         return handleUri(view, uri)
     }
 
-    @Suppress("DEPRECATION")
+    // 这是 WebViewClient 的**旧版**重载（API 24 起被带 WebResourceRequest
+    // 的版本取代），但必须保留：minSdk 是 23，24 以下只会调这一个。
+    //
+    // 两个注解缺一不可：
+    //   @Deprecated  —— 抑制"覆盖了废弃成员却未标注废弃"的编译告警
+    //   @Suppress    —— 抑制我们自己调用它时产生的废弃告警
+    @Deprecated("minSdk 23 仍需要旧版重载，见上")
+    @Suppress("OVERRIDE_DEPRECATION", "DEPRECATION")
     override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean {
         val uri = url?.let(Uri::parse) ?: return false
         return handleUri(view, uri)

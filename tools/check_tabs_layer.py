@@ -223,6 +223,81 @@ if "DisposableEffect(host)" in browser and "attachHost" in browser:
 if "detachHost" in browser:
     ok("detachHost 只在 onDispose 中调用（常驻后不会误触发）")
 
+# ---------- 6. 拖拽排序 ----------
+print("\n6. 拖拽排序（长按触发，不能吃掉点击）")
+if "detectDragGesturesAfterLongPress" in tabs:
+    ok("用 detectDragGesturesAfterLongPress（长按才拖拽）")
+else:
+    bad("未使用长按拖拽 —— 普通拖拽会与点击切换标签、列表滚动冲突")
+
+# 关键：不能把 index 放进 pointerInput 的 key。换位后 key 变化会重启
+# 手势识别器，拖动中途就会断掉。
+if re.search(r"pointerInput\(\s*tab\.id\s*\)", tabs):
+    ok("pointerInput 的 key 只用 tab.id（换位不会打断手势）")
+elif re.search(r"pointerInput\([^)]*index", tabs):
+    bad("pointerInput 的 key 里含 index，每次换位都会重启手势导致拖动中断")
+else:
+    bad("没找到 pointerInput(tab.id)")
+
+# onDragStart 必须现查下标，不能用闭包捕获的 index
+if "tabsRef.value.indexOfFirst" in tabs:
+    ok("onDragStart 现查下标（闭包捕获的 index 在换位后已过期）")
+else:
+    bad("onDragStart 未现查下标，换位后会从错误的起点继续拖动")
+
+# 位移换算必须扣掉已消耗的部分，否则会连续换位失控
+if re.search(r"dragOffsetY\s*-=\s*\(target\s*-\s*draggingIndex\)\s*\*\s*rowH", tabs):
+    ok("换位后扣掉已消耗的位移（不会累积失控）")
+else:
+    bad("未扣减已消耗位移，拖动会连续换位")
+
+if "onMoveTab" in tabs and "onMoveTab = viewModel::moveTab" in main:
+    ok("onMoveTab 已接线到 viewModel.moveTab")
+else:
+    bad("onMoveTab 未接线到 viewModel")
+
+# ---------- 7. 缩略图 ----------
+print("\n7. 缩略图（favicon，不是网页截图）")
+if re.search(r"favicon\s*!=\s*null\s*&&\s*!favicon\.isRecycled", tabs):
+    ok("绘制前检查 isRecycled（否则会抛 recycled bitmap 崩溃）")
+else:
+    bad("绘制 favicon 前未检查 isRecycled，标签关闭后可能崩溃")
+
+# favicon 必须真的被捕获，而不是留个空实现
+manager = read("app/src/main/java/com/ling/browser/web/WebTabManager.kt")
+if re.search(r"onReceivedIcon\s*=\s*\{\s*\}", manager):
+    bad("onReceivedIcon 仍是空实现，favicon 永远不会出现")
+elif re.search(r"override fun onReceivedIcon", manager):
+    ok("onReceivedIcon 已实现，favicon 会被捕获")
+else:
+    bad("没有实现 onReceivedIcon")
+
+# 关闭标签必须回收，否则像素内存泄漏
+if re.search(r"private fun recycleTab", manager):
+    ok("有 recycleTab 统一回收入口")
+else:
+    bad("缺少 favicon 回收逻辑，反复开关标签会泄漏像素内存")
+
+if re.search(r"recycleTab\(closing\)", manager):
+    ok("closeTab 中回收 favicon")
+else:
+    bad("closeTab 未回收 favicon")
+
+if re.search(r"_tabs\.value\.forEach \{ recycleTab\(it\) \}", manager):
+    ok("destroyAll 中回收全部 favicon")
+else:
+    bad("destroyAll 未回收 favicon")
+
+if "isRecycled" in manager:
+    ok("回收前有 isRecycled 守卫（同一 Bitmap 可能被多个 TabState 共享）")
+else:
+    bad("回收前没有 isRecycled 守卫，重复 recycle 会抛异常")
+
+if "AUTO_SCROLL" in tabs:
+    bad("残留未使用的自动滚动常量（该功能未实现，属于死代码）")
+else:
+    ok("没有残留未实现的自动滚动常量")
+
 print()
 print("=" * 55)
 if problems:

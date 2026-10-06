@@ -18,7 +18,7 @@
 ### 核心浏览
 | 功能 | 说明 |
 |---|---|
-| 多标签页 | 每个标签页保留独立 WebView 实例，切换不丢页面状态；超过 6 个实例按 LRU 回收 |
+| 多标签页 | 每个标签页保留独立 WebView 实例，切换不丢页面状态；超过 6 个实例按 LRU 回收；favicon 缩略图 + 长按拖拽排序 |
 | 智能地址栏 | 自动区分「网址」与「搜索词」；聚焦时全选，输入时给出书签/历史联想 |
 | 书签 | 一键收藏/取消，独立管理页，支持删除 |
 | 历史记录 | 自动去重 + 次数累加，按「今天/昨天/更早」分组，支持单条删除与清空 |
@@ -234,6 +234,60 @@ tint 与交互动画，取字形还要按 Unicode 码点逐个核对。
 WebView 创建代价高（每个实例约数 MB 原生内存）。`WebTabManager` 为每个标签页
 保留长期存活的实例，切换标签只是把对应 View 挂到宿主 `FrameLayout`；
 实例数超过 6 个时按 LRU 回收最久未使用的非激活实例。
+
+### 3.1 标签缩略图：favicon，不是网页截图
+选择 favicon 而非整页截图，理由是**内存**：
+
+| 方案 | 单张成本 | 6 个标签 |
+|---|---|---|
+| 整页截图（`WebView.draw` 到全屏 Bitmap） | 1080×2000×4B ≈ **8.6 MB** | **~50 MB** |
+| favicon（16~64px） | 数 KB | 可忽略 |
+
+中低端机上 50 MB 常驻随时可能 OOM；而且离屏 WebView 的内容不保证完整，
+截出来常常是空白。favicon 一眼能认出站点，符合轻量定位。
+
+**两个来源都要接**：`WebChromeClient.onReceivedIcon` 只在 WebView 真正拿到
+图标时触发，很多站点要等解析到 `<link rel="icon">` 才给；而
+`WebViewClient.onPageStarted(view, url, favicon)` 的第三个参数在加载一开始
+就有值。后者此前被**直接丢弃**，是缩略图一直空着的原因。两者都汇到
+`applyFavicon()`，逻辑只有一份。
+
+**Bitmap 必须显式回收**：像素是非托管内存，GC 只收得回 Java 对象壳。
+因此 `closeTab` / `destroyAll` 都会 `recycle()`，且回收前必须查
+`isRecycled` —— 同一个 Bitmap 可能被多个 `TabState` 共享
+（`copy()` 复制的是引用不是数据），重复回收会抛异常。
+
+Compose 侧绘制前同样要查 `isRecycled`：我们会主动回收，而 Compose 可能
+还拿着同一个引用再画一帧，直接绘制会抛
+`Canvas: trying to use a recycled bitmap`。
+
+> 无 favicon 时显示站点首字母。这里有个坑：不能直接用 `UrlUtils.hostOf`，
+> 它在解析失败时会**退回原始 URL 字符串**，于是 `about:blank` 得到 "A"、
+> `ling://home` 得到 "L"，看着像站点名实则毫无意义。主页与无法解析的
+> 地址统一给中性占位符 `•`。`www.` 前缀也会跳过，否则满屏都是 "W"。
+
+### 3.2 拖拽排序：长按才能拖
+用 `detectDragGesturesAfterLongPress` 而非普通拖拽 —— 短按要留给
+「点击切换标签」，普通拖拽还会和列表滚动打架。
+
+两个容易踩的 Compose 陷阱：
+
+**① `pointerInput` 的 key 不能含 index。** 换位后列表重排、index 变化，
+key 一变手势识别器就被重启，**拖动中途会断掉**。只用 `tab.id` 作 key。
+
+**② 手势回调里不能用闭包捕获的 index。** `pointerInput` 的 lambda 在首次
+组合时就被捕获，之后 `tabs` 变了它仍指向旧实例。拖拽会实时改变顺序，
+用旧列表算下标必然错位。所以用一个 `remember` 的持有者（每次重组写入最新
+列表），`onDragStart` 时**现查**下标。
+
+位移换算：手指数跨过一整行（`rowHeightPx` 实测值，不硬编码）才换位，
+换位后必须把**已消耗的位移扣掉**，否则拖动会累积成连续换位而失控。
+
+> `moveTab` 的语义是 remove + add 而**不是 swap**：`[A,B,C,D].move(0,2)`
+> 得到 `[B,C,A,D]`——被拖的项落到目标下标，其余项依次让位。
+> 另外 Kotlin 会**先求值全部实参**再调用 `add`，所以
+> `add(to, removeAt(from))` 里 `to` 已是正确下标，**不需要**任何 ±1 补偿
+> （曾以为需要，实测 `move(0,3)` 得到 `[B,C,D,A]` 才发现补偿反而错位）。
 
 ### 4. 主页由 WebView 渲染，不用 Compose 覆盖层
 早期实现把主页做成 Compose 覆盖层（`HomeScreen`），有两个问题：主页不进入
@@ -484,7 +538,7 @@ python tools/preview_launcher_png.py mipmap-xxxhdpi  # 预览启动图标
 | 项目 | 结果 |
 |---|---|
 | `:app:assembleDebug` | ✅ 通过（图标改版后重新验证） |
-| `:app:testDebugUnitTest` | ✅ **90 个用例全部通过**（`UrlUtilsTest` 20 / `HomePageTest` 19 / `LingSettingsTest` 14 / `LauncherIconTest` 12 / `DownloadTest` 10 / `LingIconsTest` 10 / `PendingDownloadTest` 5） |
+| `:app:testDebugUnitTest` | ✅ **111 个用例全部通过**（`UrlUtilsTest` 20 / `HomePageTest` 19 / `TabOrderTest` 15 / `LingSettingsTest` 14 / `LauncherIconTest` 12 / `DownloadTest` 10 / `LingIconsTest` 10 / `TabInitialTest` 6 / `PendingDownloadTest` 5） |
 | `:app:assembleRelease`（R8 压缩） | ✅ 通过，产物 1.4 MB（图标改版前） |
 | APK 签名校验 | ✅ v1 + v2 方案均通过 |
 | 真机安装（Xiaomi MI 8 / Android 14） | ✅ `adb install` 成功 |
@@ -547,9 +601,9 @@ hello world                -> 必应搜索（默认引擎）
 1. **广告拦截** —— 通过 `shouldInterceptRequest` 做资源级拦截，内置规则 + 自定义规则
 2. **资源嗅探** —— 注入 JS 扫描页面媒体链接，抓取视频/音频/图片
 3. **插件脚本扩展** —— 用户脚本注入机制
-4. **下载管理** —— 目前 `DownloadListener` 只做提示，未接系统下载器
+4. ~~**下载管理**~~ —— 已完成（系统 DownloadManager + 下载前确认）
 5. **阅读模式** —— 正文提取，去除广告与导航
-6. **标签页缩略图与拖拽排序** —— `moveTab` 已实现，缺 UI
+6. ~~**标签页缩略图与拖拽排序**~~ —— 已完成（favicon 缩略图 + 长按拖拽）
 7. **会话恢复** —— `TabSnapshot` 实体已就绪，未接持久化
 8. **书签文件夹** —— 数据结构已支持 `folder` 字段，缺 UI
 

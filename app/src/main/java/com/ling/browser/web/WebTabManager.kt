@@ -2,6 +2,7 @@ package com.ling.browser.web
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.graphics.Bitmap
 import android.net.Uri
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
@@ -92,6 +93,7 @@ class WebTabManager(private val context: Context) {
 
     /** 关闭标签页；关掉最后一个时自动新建一个空白页。 */
     fun closeTab(id: String) {
+        val closing = _tabs.value.firstOrNull { it.id == id }
         val remaining = _tabs.value.filterNot { it.id == id }
         webViews.remove(id)?.let { wv ->
             (wv.parent as? FrameLayout)?.removeView(wv)
@@ -99,6 +101,11 @@ class WebTabManager(private val context: Context) {
             wv.loadUrl("about:blank")
             wv.destroy()
         }
+
+        // 回收 favicon 的像素内存。必须在移出列表后立刻做：
+        // Bitmap 的像素是非托管内存，GC 只收得回 Java 对象壳，
+        // 不等 recycle 就可能攒到 OOM。
+        recycleTab(closing)
 
         if (remaining.isEmpty()) {
             _tabs.value = emptyList()
@@ -112,9 +119,47 @@ class WebTabManager(private val context: Context) {
         }
     }
 
+    /**
+     * 释放标签持有的图像资源。
+     *
+     * 用 isRecycled 守卫：同一个 Bitmap 可能因为
+     * `_tabs.update { it.copy(...) }` 被多个 TabState **共享**
+     * （copy 不会复制 Bitmap，只复制引用），重复 recycle 会抛
+     * IllegalStateException 或让其它仍在显示的标签变成空白。
+     */
+    private fun recycleTab(tab: TabState?) {
+        tab?.favicon?.takeIf { !it.isRecycled }?.recycle()
+    }
+
+    /**
+     * 把站点图标写入标签状态。两个来源共用：
+     *   - `WebChromeClient.onReceivedIcon`
+     *   - [LingWebViewClient] 的 `onPageStarted(view, url, favicon)`
+     *
+     * 后者的 favicon 参数此前被直接丢弃，是缩略图一直空着的真正原因 ——
+     * 只接 WebChromeClient 不够，很多站点要到解析 `<link rel="icon">`
+     * 之后才触发那个回调，时序上晚得多。
+     *
+     * icon 为 null 时**保留原图标**而不是清空：同页锚点跳转、iframe 加载
+     * 都可能再触发一次不带 icon 的回调，清空会让图标闪一下退回字母占位。
+     */
+    private fun applyFavicon(id: String, icon: Bitmap?) {
+        if (icon == null || icon.isRecycled) return
+        updateTab(id) { tab ->
+            // 已经就是同一个对象就什么都不做：
+            // 两个回调经常对同一张图各触发一次，不拦会导致
+            // 「先 recycle 掉自己、再把自己存回去」的自毁行为。
+            if (tab.favicon === icon) return@updateTab tab
+            // 换新图前回收旧的，否则反复导航会持续堆积像素内存
+            tab.favicon?.takeIf { !it.isRecycled }?.recycle()
+            tab.copy(favicon = icon)
+        }
+    }
+
     /** 关闭除 [keepId] 外的全部标签页。 */
     fun closeOthers(keepId: String) {
-        _tabs.value.filter { it.id != keepId }.forEach { closeTab(it.id) }
+        // 先取快照再遍历：closeTab 会改 _tabs，直接遍历 live 列表会漏关。
+        _tabs.value.filter { it.id != keepId }.map { it.id }.forEach { closeTab(it) }
     }
 
     /** 切换激活标签。 */
@@ -130,10 +175,25 @@ class WebTabManager(private val context: Context) {
         syncNavState(id)
     }
 
-    /** 交换两个标签页的位置（标签列表拖拽用）。 */
+    /**
+     * 把 [from] 位置的标签移动到 [to] 位置（标签列表拖拽排序用）。
+     *
+     * 语义是 **remove + add**，不是 swap：`[A,B,C,D].move(0,2)` 得到 `[B,C,A,D]`
+     * —— 被拖的那一项落到目标下标，其余项依次让位。这与拖拽的直觉一致。
+     *
+     * 越界入参直接忽略（不抛异常）：拖拽时手指可能划出列表边界，
+     * 这里必须容错，否则一次越界手势就会崩。
+     *
+     * 关于下标补偿：Kotlin 会**先求值全部实参**再调用 add，所以
+     * `add(to, removeAt(from))` 里的 removeAt 已经生效、列表已经变短，
+     * 此时 to 就是正确的最终下标，**不需要**任何 +1/-1 补偿。
+     * （曾以为 from < to 时要补偿，实际验证 [A,B,C,D].move(0,3) 得到
+     *   [B,C,D,A]，A 正确落在末尾 —— 补偿反而会错位。）
+     */
     fun moveTab(from: Int, to: Int) {
         _tabs.update { list ->
             if (from !in list.indices || to !in list.indices) return@update list
+            if (from == to) return@update list
             list.toMutableList().apply { add(to, removeAt(from)) }
         }
     }
@@ -301,6 +361,13 @@ class WebTabManager(private val context: Context) {
                         updateTab(id) { it.copy(title = t) }
                     }
                 }
+
+                override fun onReceivedIcon(view: WebView?, icon: Bitmap?) {
+                    // 来源之一：WebChromeClient。另一个来源是
+                    // LingWebViewClient.onPageStarted 的 favicon 参数 ——
+                    // 两者都汇到 applyFavicon，保证更新逻辑只有一份。
+                    applyFavicon(id, icon)
+                }
             }
             webViewClient = LingWebViewClient(
                 isIncognito = incognito,
@@ -354,7 +421,7 @@ class WebTabManager(private val context: Context) {
                         updateTab(id) { it.copy(title = t) }
                     }
                 },
-                onReceivedIcon = { },
+                onReceivedIcon = { icon -> applyFavicon(id, icon) },
                 onError = { _, desc ->
                     updateTab(id) { it.copy(isLoading = false, errorText = desc) }
                 },
@@ -407,6 +474,9 @@ class WebTabManager(private val context: Context) {
             it.destroy()
         }
         webViews.clear()
+        // 连同 favicon 一起回收：Activity 销毁后这些像素再没人用，
+        // 留着只会拖到下次 GC 周期，期间占用着可能几十 MB。
+        _tabs.value.forEach { recycleTab(it) }
         _tabs.value = emptyList()
         _activeId.value = ""
     }

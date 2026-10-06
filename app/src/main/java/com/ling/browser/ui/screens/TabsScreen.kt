@@ -1,12 +1,14 @@
-package com.ling.browser.ui.screens
+﻿package com.ling.browser.ui.screens
 
 import com.ling.browser.ui.theme.LingIcons
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -22,7 +24,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -36,19 +38,29 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
 import com.ling.browser.data.prefs.TabsHeight
 import com.ling.browser.web.TabState
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
 /**
  * 非全屏档位下面板的底色透明度。
@@ -74,9 +86,15 @@ private const val SCRIM_MAX_ALPHA = 0.28f
 /**
  * 标签页管理页。
  *
- * 高度由 [tabsHeight] 控制，默认只占屏幕下 1/4 —— 这样切标签时仍能看到
+ * 高度由 [tabsHeight] 控制，默认占屏幕下半 —— 这样切标签时仍能看到
  * 底下的网页，符合"标签页是临时面板而非独立页面"的直觉。
- * 用列表而非网格：手机上列表更容易扫读标题，也省去缩略图带来的内存开销。
+ *
+ * 列表项显示站点 favicon 作为缩略图（不是网页截图，理由见 [TabThumbnail]）。
+ * 长按列表项可上下拖动排序，见 [TabRow] 的 dragOffsetY 参数。
+ *
+ * 已知限制：拖拽时**没有**做边缘自动滚动。标签数量少时列表本来就不满一屏，
+ * 而面板最高只占屏幕一半，需要滚动的场景很少见；实现它要额外引入一个
+ * 随拖动位置变化的协程循环，复杂度与收益不成比例。等真机反馈需要再加。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -88,11 +106,32 @@ fun TabsScreen(
     onNewTab: () -> Unit,
     onNewIncognitoTab: () -> Unit,
     onCloseAll: () -> Unit,
+    onMoveTab: (Int, Int) -> Unit,
     onBack: () -> Unit,
     tabsHeight: TabsHeight,
     onTabsHeightChange: (TabsHeight) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val listState = rememberLazyListState()
+
+    // 拖拽状态。都用 remember 保存，跨重组存活。
+    //
+    // draggingIndex：被拖的那一项当前**渲染在列表中的下标**。
+    // 每次跨越邻居就立即调用 onMoveTab 并同步更新它 —— 这样列表数据
+    // 与视觉位置始终一致，不需要额外维护一份"影子顺序"。
+    var draggingIndex by remember { mutableIntStateOf(-1) }
+    var dragOffsetY by remember { mutableStateOf(0f) }
+    // 列表项实测高度（含间距）。用来把手指数换算成跨过了几个项。
+    var rowHeightPx by remember { mutableIntStateOf(0) }
+
+    // 手势回调里必须读到**最新**的标签列表。
+    //
+    // 为什么不能直接用闭包里的 tabs：pointerInput 的 lambda 在首次组合时
+    // 就被捕获，之后即使 tabs 变了它仍指向旧实例（这是 Compose 的常见陷阱）。
+    // 拖拽会实时改变顺序，用旧列表算下标必然错位。
+    // 用一个 remember 的持有者，每次重组写入最新值，回调再从中读。
+    val tabsRef = remember { mutableStateOf(tabs) }
+    tabsRef.value = tabs
     // 面板从底部升起：用 Box + align 而不是 fillMaxSize，短面板下方不会留白。
     //
     // 遮罩只压暗**面板上方**的区域，让底下的网页隐约可见（Via 的做法）：
@@ -232,6 +271,7 @@ fun TabsScreen(
                 }
 
                 LazyColumn(
+                    state = listState,
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(inner),
@@ -241,12 +281,82 @@ fun TabsScreen(
                     ),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    items(tabs, key = { it.id }) { tab ->
+                    items(
+                        count = tabs.size,
+                        key = { tabs[it].id },
+                    ) { index ->
+                        val tab = tabs[index]
+                        val isDragging = index == draggingIndex
                         TabRow(
                             tab = tab,
                             isActive = tab.id == activeId,
+                            isDragging = isDragging,
+                            dragOffsetY = if (isDragging) dragOffsetY else 0f,
                             onSelect = { onSelect(tab.id) },
                             onClose = { onClose(tab.id) },
+                            modifier = Modifier
+                                // 记录实测行高，供手势换算使用
+                                .onSizeChanged { size ->
+                                    if (!isDragging && size.height > 0) {
+                                        rowHeightPx = size.height
+                                    }
+                                }
+                                // 拖拽中的项要浮在其它项之上
+                                .zIndex(if (isDragging) 1f else 0f)
+                                // key 里带上 tabs.size 之外**不要**带 index：
+                                // 一旦带上，每次换位都会重启手势识别器，
+                                // 拖动中途就会断掉。
+                                .pointerInput(tab.id) {
+                                    // 用 AfterLongPress 而不是普通拖拽：
+                                    // 短按要保留给"点击切换标签"，长按才是排序。
+                                    // 否则一滑动就会误触排序，而且列表也没法滚。
+                                    detectDragGesturesAfterLongPress(
+                                        onDragStart = {
+                                            // 这里**必须现查**下标，不能用外面闭包
+                                            // 捕获的 index：换位后列表已重排，
+                                            // 闭包里的 index 是旧值，会用错起始位置。
+                                            val current = tabsRef.value.indexOfFirst { it.id == tab.id }
+                                            if (current >= 0) {
+                                                draggingIndex = current
+                                                dragOffsetY = 0f
+                                            }
+                                        },
+                                        onDragEnd = {
+                                            draggingIndex = -1
+                                            dragOffsetY = 0f
+                                        },
+                                        onDragCancel = {
+                                            draggingIndex = -1
+                                            dragOffsetY = 0f
+                                        },
+                                        onDrag = { change, amount ->
+                                            change.consume()
+                                            dragOffsetY += amount.y
+
+                                            // 手指数跨过一整项高度就换位。
+                                            // 用 rowHeightPx（实测值）而不是硬编码，
+                                            // 因为标题行有无副标题会改变行高。
+                                            val rowH = rowHeightPx
+                                            if (rowH <= 0 || draggingIndex < 0) {
+                                                return@detectDragGesturesAfterLongPress
+                                            }
+                                            val last = tabsRef.value.lastIndex
+                                            val moved = (dragOffsetY / rowH).roundToInt()
+                                            if (moved == 0) {
+                                                return@detectDragGesturesAfterLongPress
+                                            }
+                                            val target = (draggingIndex + moved)
+                                                .coerceIn(0, last)
+                                            if (target != draggingIndex) {
+                                                onMoveTab(draggingIndex, target)
+                                                // 关键：把「已消耗的位移」扣掉，
+                                                // 否则拖动会累积成连续换位而失控
+                                                dragOffsetY -= (target - draggingIndex) * rowH
+                                                draggingIndex = target
+                                            }
+                                        },
+                                    )
+                                },
                         )
                     }
                 }
@@ -350,8 +460,11 @@ private fun PillButton(
 private fun TabRow(
     tab: TabState,
     isActive: Boolean,
+    isDragging: Boolean,
+    dragOffsetY: Float,
     onSelect: () -> Unit,
     onClose: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     Surface(
         shape = RoundedCornerShape(16.dp),
@@ -360,36 +473,45 @@ private fun TabRow(
             tab.isIncognito -> MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.4f)
             else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
         },
-        modifier = Modifier
+        // 拖拽中的项加阴影，视觉上"提起来"，与静止项区分开
+        shadowElevation = if (isDragging) 8.dp else 0.dp,
+        modifier = modifier
             .fillMaxWidth()
+            .graphicsLayer { translationY = dragOffsetY }
             .clip(RoundedCornerShape(16.dp))
             .clickable(onClick = onSelect),
     ) {
         Row(
-            modifier = Modifier.padding(start = 16.dp, end = 4.dp, top = 14.dp, bottom = 14.dp),
+            modifier = Modifier.padding(start = 12.dp, end = 4.dp, top = 12.dp, bottom = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            if (tab.isIncognito) {
-                Icon(
-                     LingIcons.PrivacyTip,
-                    contentDescription = "无痕",
-                    tint = MaterialTheme.colorScheme.onTertiaryContainer,
-                    modifier = Modifier.size(18.dp),
-                )
-                Spacer(Modifier.width(10.dp))
-            }
+            TabThumbnail(tab = tab, isActive = isActive)
+
+            Spacer(Modifier.width(12.dp))
+
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = tab.displayTitle,
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = if (isActive) {
-                        MaterialTheme.colorScheme.onPrimaryContainer
-                    } else {
-                        MaterialTheme.colorScheme.onSurface
-                    },
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (tab.isIncognito) {
+                        Icon(
+                            LingIcons.PrivacyTip,
+                            contentDescription = "无痕",
+                            tint = MaterialTheme.colorScheme.onTertiaryContainer,
+                            modifier = Modifier.size(14.dp),
+                        )
+                        Spacer(Modifier.width(4.dp))
+                    }
+                    Text(
+                        text = tab.displayTitle,
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = if (isActive) {
+                            MaterialTheme.colorScheme.onPrimaryContainer
+                        } else {
+                            MaterialTheme.colorScheme.onSurface
+                        },
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
                 if (tab.displayUrl.isNotEmpty()) {
                     Text(
                         text = tab.displayUrl,
@@ -406,7 +528,7 @@ private fun TabRow(
             }
             IconButton(onClick = onClose) {
                 Icon(
-                     LingIcons.Close,
+                    LingIcons.Close,
                     contentDescription = "关闭标签页",
                     tint = if (isActive) {
                         MaterialTheme.colorScheme.onPrimaryContainer
@@ -414,6 +536,71 @@ private fun TabRow(
                         MaterialTheme.colorScheme.onSurfaceVariant
                     },
                     modifier = Modifier.size(18.dp),
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 标签缩略图：站点 favicon；没有图标时退回首字母方块。
+ *
+ * 为什么不用网页截图：整页截图要把 WebView 画到一张全屏 Bitmap，
+ * 1080x2000x4B ≈ 8.6 MB/张，6 个标签就是 ~50 MB，中低端机上随时 OOM；
+ * 而且离屏的 WebView 内容不保证完整，截出来常常是空白。
+ * favicon 只有几十像素，一眼能认出站点，符合轻量定位。
+ *
+ * ⚠️ 渲染前必须检查 isRecycled：标签关闭时我们会主动 recycle favicon
+ * 释放像素内存，而 Compose 可能还拿着同一个 Bitmap 引用再画一帧，
+ * 此时直接绘制会抛 "Canvas: trying to use a recycled bitmap"。
+ */
+@Composable
+private fun TabThumbnail(tab: TabState, isActive: Boolean) {
+    val size = 36.dp
+    val shape = RoundedCornerShape(10.dp)
+    val favicon = tab.favicon
+
+    Box(
+        modifier = Modifier
+            .size(size)
+            .clip(shape)
+            .background(
+                if (isActive) {
+                    MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.10f)
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.10f)
+                },
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        when {
+            favicon != null && !favicon.isRecycled -> {
+                Image(
+                    bitmap = favicon.asImageBitmap(),
+                    contentDescription = null,
+                    modifier = Modifier.size(22.dp),
+                )
+            }
+            tab.isIncognito -> {
+                Icon(
+                    LingIcons.PrivacyTip,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onTertiaryContainer,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+            else -> {
+                // 首字母占位。用固定字重与字号，避免不同机型字体度量差异
+                // 让方块里的字母大小不一。
+                Text(
+                    text = tab.initial,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (isActive) {
+                        MaterialTheme.colorScheme.onPrimaryContainer
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
                 )
             }
         }
