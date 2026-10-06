@@ -112,7 +112,14 @@ jobs:
 
       - name: 构建 Release APK
         env:
-          LING_KEYSTORE_PATH: ${{ steps.keystore.outputs.signed == 'true' && 'keystore/ling-release.jks' || '' }}
+          # 不再用 `cond && 'x' || ''` 这种表达式来传路径：
+          # 未签名时它会求值成空字符串，而空字符串**不是**未设置，
+          # Gradle 里 `System.getenv(...)?.let { file(it) }` 会走进来并抛
+          #   IllegalArgumentException: Cannot convert '' to File
+          # 让构建在配置阶段就失败。
+          # 这里固定传 keystore/ling-release.jks：文件存在就用，
+          # 不存在（未配置 Secrets）时 Gradle 会自动跳过签名。
+          LING_KEYSTORE_PATH: keystore/ling-release.jks
           LING_STORE_PASSWORD: ${{ secrets.LING_STORE_PASSWORD }}
           LING_KEY_ALIAS: ${{ secrets.LING_KEY_ALIAS }}
           LING_KEY_PASSWORD: ${{ secrets.LING_KEY_PASSWORD }}

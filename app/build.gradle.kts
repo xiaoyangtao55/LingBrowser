@@ -31,7 +31,14 @@ android {
         create("release") {
             // 密钥库优先取 keystore/ling-release.jks（本地开发），
             // 其次可用环境变量 LING_KEYSTORE_PATH 指定（CI）。
+            //
+            // 注意必须过滤空字符串：CI 在未配置签名 Secrets 时会把
+            // LING_KEYSTORE_PATH 设成 ""，而 "" 不是 null，
+            // `?.let { file(it) }` 会走进来并抛出
+            //   IllegalArgumentException: Cannot convert '' to File
+            // 导致 Gradle 在**配置阶段**就失败（连测试都跑不到）。
             val keystoreFile = System.getenv("LING_KEYSTORE_PATH")
+                ?.takeIf { it.isNotBlank() }
                 ?.let { file(it) }
                 ?: rootProject.file("keystore/ling-release.jks")
 
@@ -59,7 +66,10 @@ android {
         }
         release {
             // 有密钥库就签名；没有则退化为 unsigned（CI 未配置 Secrets 时也能出包）。
-            val hasKeystore = System.getenv("LING_KEYSTORE_PATH")?.let { file(it).exists() }
+            // 同样要过滤空字符串，理由见上面 signingConfigs 的注释。
+            val hasKeystore = System.getenv("LING_KEYSTORE_PATH")
+                ?.takeIf { it.isNotBlank() }
+                ?.let { file(it).exists() }
                 ?: rootProject.file("keystore/ling-release.jks").exists()
             signingConfig = if (hasKeystore) signingConfigs.getByName("release") else null
             isMinifyEnabled = true
