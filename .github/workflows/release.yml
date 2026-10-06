@@ -153,13 +153,29 @@ jobs:
             fi
           fi
 
-          if "$ANDROID_HOME"/build-tools/*/apksigner verify --verbose "$APK"; then
+          # 选 apksigner 必须**明确挑一个版本**，不能写
+          #   "$ANDROID_HOME"/build-tools/*/apksigner
+          # runner 上装了多个 build-tools（35.0.0 / 36.0.0 ...），通配符会
+          # 展开成多个路径，于是实际执行的命令变成
+          #   apksigner <路径2> <路径3> verify ...
+          # apksigner 会把第一个多余路径当成子命令，报
+          #   Unsupported command: .../build-tools/35.0.0/apksigner
+          # （真实故障）。这里按版本号倒序取最新的一个。
+          APKSIGNER=$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -n1)
+          if [ -z "$APKSIGNER" ] || [ ! -x "$APKSIGNER" ]; then
+            echo "::error::找不到可执行的 apksigner"
+            ls "$ANDROID_HOME/build-tools" || true
+            exit 1
+          fi
+          echo "apksigner: $APKSIGNER"
+          "$APKSIGNER" --version || true
+
+          if "$APKSIGNER" verify --verbose --print-certs "$APK"; then
             echo "✅ 签名校验通过"
           else
             echo "::error::apksigner 校验失败"
             exit 1
           fi
-
       - name: 收集产物
         run: |
           mkdir -p out

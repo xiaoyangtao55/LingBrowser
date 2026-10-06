@@ -157,6 +157,63 @@ for step in ("assembleRelease", "testDebugUnitTest", "upload-artifact"):
     else:
         bad(f"丢失步骤 {step}")
 
+# ---------- 6. 工具路径不能用通配符直接当命令执行 ----------
+#
+# 真实故障：写
+#     "$ANDROID_HOME"/build-tools/*/apksigner verify --verbose "$APK"
+# runner 上装了多个 build-tools（35.0.0 / 36.0.0 ...），通配符展开成多个
+# 参数，实际执行变成
+#     apksigner <路径2> <路径3> verify ...
+# apksigner 把第一个多余路径当成子命令，报
+#     Unsupported command: .../build-tools/35.0.0/apksigner
+#
+# 而且这种错**只在装了多个版本的机器上出现** —— 本地只有一个版本时
+# 通配符恰好展开成一个，命令是对的。所以必须靠静态检查拦住。
+print("\n6. 工具路径是否避免了多值通配符")
+# 要抓的是"通配符路径**被当作命令直接执行**"，例如
+#     "$ANDROID_HOME"/build-tools/*/apksigner verify ...
+# 而不是"通配符出现在收集路径的命令里"，例如正确写法
+#     APKSIGNER=$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -n1)
+#
+# 区分方法：把 `$(...)` 子shell 内容先挖掉再判断 —— 那些位置的通配符
+# 是喂给 ls 的，合法。之前不做这个区分，会把正确写法也报错。
+stripped = re.sub(r"\$\([^)]*\)", "SUB", active)
+wild_cmd = re.findall(
+    r'(?m)^\s*.*(?:\$\w+|\$\{\w+\})[^ \t]*/\*/[^ \t;|&]+', stripped)
+if wild_cmd:
+    for w in wild_cmd:
+        bad(f"命令位置直接用了通配符路径（多版本时会展开成多个参数）：{w.strip()}")
+    bad("请先用 ls|sort -V|tail -n1 选出唯一路径再执行")
+else:
+    ok("未把多值通配符直接放在命令位置")
+    # 已知局限：通配符若写在 $(...) 子 shell **内部**且不经 ls 收集，
+    # 本检查不会报（已挖掉子 shell 内容）。那种写法同样会展开成多参数，
+    # 但静态区分"合法的 glob 收集"与"非法的多参数展开"需要真跑 shell，
+    # 代价不值得。这里只保证最常见的那种错误能被拦住。
+    print("       （注：$(...) 内部的通配符不检查）")
+
+# apksigner 的调用方式：必须经由变量，且要有"找不到就报错"的守卫
+if "apksigner" in active:
+    if re.search(r'"\$APKSIGNER"\s+verify', active):
+        ok("apksigner 经变量调用（可确保只有一个路径）")
+    else:
+        bad("apksigner 未经变量调用，多版本环境下可能失败")
+    if "找不到可执行的 apksigner" in active:
+        ok("有 apksigner 缺失时的显式报错")
+    else:
+        bad("缺少 apksigner 缺失时的守卫")
+
+# 签名校验失败必须是 error 而不是 warning，否则会静默产出未签名包
+if re.search(r"apksigner.*校验失败", active) and "::error::apksigner 校验失败" in active:
+    ok("apksigner 校验失败按 error 处理（不再静默通过）")
+else:
+    bad("apksigner 校验失败未按 error 处理")
+
+if "grep -q \"unsigned\"" in active:
+    ok("会检查产物名是否含 unsigned")
+else:
+    bad("未检查产物名是否含 unsigned —— 未签名包可能蒙混过关")
+
 print()
 print("=" * 55)
 if problems:
