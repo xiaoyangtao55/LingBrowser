@@ -59,15 +59,19 @@ MAPPING = [
     ("Layers", "layers"),
     ("MoreVert", "more_vert"),
     ("Add", "add"),
-    # 收藏的两种状态用「空心 vs 实心」区分：
-    #   bookmark             官方空心书签（+ 内部挖空）
-    #   bookmark_added_fill  官方**实心**书签带加号
+    # 收藏相关的三个图标，容易搞混，按用途对齐：
+    #   bookmark              空心书签           -> BookmarkBorder（未收藏状态）
+    #   bookmark_added_fill   **实心**书签带加号  -> Bookmark（已收藏状态）
+    #   bookmark_add          空心书签带加号     -> BookmarkAdd（"添加书签"动作）
     #
-    # ⚠️ 注意不要错用 bookmark_added —— 那个是**空心**版（只比 bookmark
-    # 多一个加号），在 24dp 下和未收藏状态几乎分不出来。区分这两种状态
-    # 靠的是填充，不是有没有加号。
+    # ⚠️ 陷阱：`bookmark_added`（不带 _fill）也是**空心**的，只比 bookmark
+    # 多一个加号。区分"已收藏/未收藏"靠**填充**，不是有没有加号。
+    #
+    # 而"添加书签"这个**动作**必须用带加号的图标，否则它和下面那个
+    # 纯"书签"入口（都指向书签列表）图标一模一样，用户分不出哪个是动作。
     ("BookmarkBorder", "bookmark"),
     ("Bookmark", "bookmark_added_fill"),
+    ("BookmarkAdd", "bookmark_add"),
     ("History", "history"),
     ("DeleteOutline", "delete"),
     ("DeleteSweep", "delete_sweep"),

@@ -143,6 +143,7 @@ private fun LingApp(viewModel: BrowserViewModel) {
     val tabs by viewModel.tabs.collectAsStateWithLifecycle()
     val activeId by viewModel.activeId.collectAsStateWithLifecycle()
     val bookmarks by viewModel.bookmarks.collectAsStateWithLifecycle()
+    val bookmarkFolders by viewModel.bookmarkFolders.collectAsStateWithLifecycle()
     val history by viewModel.history.collectAsStateWithLifecycle()
     val downloads by viewModel.downloads.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
@@ -192,11 +193,15 @@ private fun LingApp(viewModel: BrowserViewModel) {
 
             Route.Bookmarks -> BookmarksScreen(
                 bookmarks = bookmarks,
+                folders = bookmarkFolders,
                 onOpen = {
                     viewModel.navigate(it)
                     pop()
                 },
                 onDelete = viewModel::deleteBookmark,
+                onMoveToFolder = viewModel::moveBookmarkToFolder,
+                onRenameFolder = viewModel::renameBookmarkFolder,
+                onDeleteFolder = viewModel::deleteBookmarkFolder,
                 onBack = pop,
             )
 
@@ -232,6 +237,7 @@ private fun LingApp(viewModel: BrowserViewModel) {
                 onBlockImages = viewModel::setBlockImages,
                 onJavaScript = viewModel::setJavaScript,
                 onTabsHeight = viewModel::setTabsHeight,
+                onRestoreSession = viewModel::setRestoreSession,
                 onClearData = viewModel::clearAllData,
                 onBack = pop,
             )

@@ -86,4 +86,83 @@ class BookmarkRepository(private val db: LingDatabase) {
         db.writableDatabase.update("bookmarks", values, "id = ?", arrayOf(id.toString()))
         refresh()
     }
+
+    // ------------------------------------------------------------ 文件夹
+
+    /**
+     * 所有已存在的文件夹名，按字典序。
+     *
+     * 直接从书签表 `SELECT DISTINCT folder` 派生，**不另建 folders 表**。
+     * 理由：文件夹的唯一定义就是"有书签归属于它"。单独建表会引入
+     * 两个真相来源 —— 删掉最后一个书签后文件夹表里还留着一个空壳，
+     * 用户看到点进去什么都没有的幽灵文件夹。派生法天然不会出现这种状态。
+     *
+     * 代价是重命名文件夹要批量 UPDATE 所有归属书签（见 [renameFolder]），
+     * 但书签量级很小，完全可以接受。
+     */
+    fun folders(): List<String> = deriveFolders(_bookmarks.value)
+
+    /** 指定文件夹内的书签；[folder] 为 null 表示"未分类"。 */
+    fun inFolder(folder: String?): List<Bookmark> = _bookmarks.value.filter { it.folder == folder }
+
+    /** 把书签移动到某文件夹（null = 移出到未分类）。 */
+    suspend fun move(id: Long, folder: String?) = withContext(Dispatchers.IO) {
+        val values = ContentValues().apply {
+            if (folder == null) putNull("folder") else put("folder", folder)
+        }
+        db.writableDatabase.update("bookmarks", values, "id = ?", arrayOf(id.toString()))
+        refresh()
+    }
+
+    /**
+     * 重命名文件夹：把归属于 [from] 的书签全部改挂到 [to]。
+     *
+     * 用一条 UPDATE 批量完成，而不是逐条 move —— 逐条会在中途失败时
+     * 留下一半旧名一半新名的状态。
+     *
+     * [to] 为 null 表示"解散文件夹"，里面的书签退回未分类（不删除书签）。
+     */
+    suspend fun renameFolder(from: String, to: String?) = withContext(Dispatchers.IO) {
+        val values = ContentValues().apply {
+            if (to == null) putNull("folder") else put("folder", to)
+        }
+        db.writableDatabase.update("bookmarks", values, "folder = ?", arrayOf(from))
+        refresh()
+    }
+
+    /**
+     * 删除文件夹，**但保留其中的书签**（退回未分类）。
+     *
+     * 刻意不连带删除书签：用户说"删掉这个文件夹"时，几乎不会是要
+     * 把里面的收藏一起丢掉。真要删书签可以进文件夹逐条删。
+     */
+    suspend fun deleteFolder(folder: String) = renameFolder(folder, null)
+
+    /** 该文件夹名是否已被占用（大小写不敏感）。 */
+    fun folderExists(name: String): Boolean =
+        folders().any { it.equals(name.trim(), ignoreCase = true) }
 }
+
+// ------------------------------------------------------------------ 纯函数
+
+/**
+ * 从书签列表推导出文件夹名集合。
+ *
+ * 抽成顶层纯函数是为了能脱离 Android 单独测（`BookmarkRepository`
+ * 需要 SQLiteOpenHelper，JVM 单测里跑不起来）。
+ *
+ * 几个规则：
+ *  - `null`（未分类）与空串**不算**文件夹。空串是脏数据，
+ *    早期版本的 insert 可能写过，直接当成"未分类"处理。
+ *  - 名字做 `trim` 后再去重：`" 新闻 "` 和 `"新闻"` 是同一个文件夹，
+ *    否则用户会看到两个看起来完全一样的条目。
+ *  - 去重**大小写敏感**（`News` 与 `news` 算两个）：中文场景无影响，
+ *    而英文用户确实可能想要两个不同的文件夹。
+ *  - 结果按字典序，保证 UI 顺序稳定（`ignoreCase` 排序，
+ *    避免小写名全部排在大写名之后）。
+ */
+internal fun deriveFolders(bookmarks: List<Bookmark>): List<String> =
+    bookmarks.mapNotNull { it.folder?.trim() }
+        .filter { it.isNotEmpty() }
+        .distinct()
+        .sortedWith(String.CASE_INSENSITIVE_ORDER)

@@ -89,6 +89,7 @@ LingBrowser/
     ├── ascii_icons.py             # 图标渲染成 ASCII，肉眼校验造型
     ├── check_icon_fidelity.py     # 生成物与源文件逐点比对
     ├── check_session.py           # 会话恢复接线校验
+    ├── check_bookmark_folders.py  # 书签文件夹校验
     └── make_icons.py              # 生成 API<26 的传统位图图标
 ```
 
@@ -172,7 +173,7 @@ allowed with built-in Kotlin`）。本项目只有 3 张结构简单的表，直
 |---|---|
 | `material-icons-extended` | 上万个图标全部编进 dex，单个 `classes.dex` 达 **40+ MB**，debug 包 **18 MB** |
 | Material Symbols TTF | 单文件 **948 KB**（Filled 版 1.4 MB），几乎等于整个 APK |
-| **矢量代码（本方案）** | 26 个图标约 **46 KB** 源码 |
+| **矢量代码（本方案）** | 27 个图标约 **46 KB** 源码 |
 
 Via 这类浏览器整个安装包才几百 KB。**一个图标字体就顶得上当前 APK（1.4 MB）
 的 68%**，为二十几个图标翻倍不划算。而且字体图标无法参与 Compose 的
@@ -226,7 +227,23 @@ tint 与交互动画，取字形还要按 Unicode 码点逐个核对。
 > 少一个控制点、坐标差 40，渲染出来看着都"差不多"。已验证把某个坐标
 > 改掉 40 单位后它会精确报出「#14 源=480.0 生成=520.0」。
 
-> 全部 26 个图标均来自官方文件，**没有合成图标**。
+> 全部 27 个图标均来自官方文件，**没有合成图标**。
+
+> **三个书签图标容易搞混**，按用途对齐：
+>
+> | 用途 | 图标 | Material 名 | 形状 |
+> |---|---|---|---|
+> | 未收藏（状态/入口） | `BookmarkBorder` | `bookmark` | 空心书签 |
+> | 已收藏（状态） | `Bookmark` | `bookmark_added_fill` | **实心**书签 |
+> | 添加书签（**动作**） | `BookmarkAdd` | `bookmark_add` | 空心书签 **+ 加号** |
+>
+> ①区分"已收藏/未收藏"靠的是**填充**，不是有没有加号 ——
+> `bookmark_added`（不带 `_fill`）也是**空心**的，只比 `bookmark` 多一个
+> 加号，在 24dp 下几乎分不出来。
+>
+> ②"添加书签"是个**动作**，必须用带加号的 `bookmark_add`。
+> 原先它用的是纯 `bookmark`，于是和菜单下面那个「书签」入口（跳转书签列表）
+> **图标一模一样**，用户分不出哪个是动作、哪个是跳转。
 
 > 旧的 `render_icons_kotlin.py` / `render_icons.py` 解析的是手绘描边的
 > `arcPolyline` API，换成官方图标后已解析不出任何图形，故删除。
@@ -323,6 +340,57 @@ key 一变手势识别器就被重启，**拖动中途会断掉**。只用 `tab.
 > 其实早就写好了 —— 但 `toTabSnapshot()` **从未被任何代码调用**，
 > 整套持久化是死代码，标签从来没有真正恢复过。`check_session.py`
 > 第一项就是防这个："只有定义没有调用"会直接报错。
+
+**设置项：恢复上次浏览页面**（默认开）。关掉后每次启动都是一个干净的主页。
+
+关闭时**连保存也一起停掉**，不是只跳过读取——选择"不恢复"通常意味着
+不想让浏览记录留在磁盘上，继续写盘违背这个预期。关闭的瞬间还会把
+已存的快照清掉：否则用户关掉开关、重启一次、再打开开关，会看到
+**关闭之前**那一批早就该被遗忘的标签，既意外又像 bug。
+
+### 3.4 书签文件夹：不建 folders 表
+
+只有**一层**文件夹（进入文件夹后看到的就是书签，不能再往下钻）。
+这是刻意取舍：手机屏幕上的多层树需要面包屑 + 深度指示，
+收益远不如实现与心智成本，Chrome 手机版同样是扁平布局。
+
+关键决定是**不建 folders 表**，文件夹名从"哪些书签归属于它"派生：
+
+```kotlin
+internal fun deriveFolders(bookmarks: List<Bookmark>): List<String> =
+    bookmarks.mapNotNull { it.folder?.trim() }
+        .filter { it.isNotEmpty() }
+        .distinct()
+        .sortedWith(String.CASE_INSENSITIVE_ORDER)
+```
+
+单独建表会引入两个真相来源——删掉最后一个书签后，表里还留着一个空壳，
+用户看到点进去什么都没有的**幽灵文件夹**。派生法天然不会出现这种状态。
+
+代价是重命名文件夹要一条 `UPDATE` 批量改所有归属书签（而不是逐条 move，
+那样中途失败会留下半新半旧的文件夹名）。书签量级很小，完全可以接受。
+
+几个容易写错的规则，都由 `BookmarkFolderTest` 钉住：
+- 名字先 `trim`：`" 新闻 "` 和 `"新闻"` 是同一个，否则显示成两个看起来
+  完全一样的条目
+- 空串/纯空白**不算**文件夹（早期 insert 可能写过空串，当未分类处理）
+- 去重**大小写敏感**（`News` 与 `news` 算两个）：中文场景无影响，
+  而英文用户确实可能想要两个不同的文件夹
+- 用 `CASE_INSENSITIVE_ORDER` 排序：否则 `Z`(90) 会排在 `a`(97) 前面，
+  用户看到"大写开头的全挤在小写前面"这种莫名其妙的分组
+
+**两个必须有的兜底**：
+
+1. **删除文件夹不删书签**，只把归属置为 `null`（退回"未分类"）。
+   用户说"删掉这个文件夹"时，几乎不会是要把收藏一起丢掉。
+   确认框里也明确写了这一点——这是用户最担心的。
+2. **当前文件夹消失后退回根目录**。删掉文件夹里最后一个书签后，
+   `deriveFolders` 里就没有它了；不兜底的话用户会卡在一个标题还在、
+   内容永远为空的页面上出不去。
+
+> **一个容易忽略的地方**：文件夹由书签派生，所以"把书签放进一个新文件夹"
+> 是**唯一**能创建文件夹的路径。移动菜单里必须有「新建文件夹…」这一项，
+> 否则**永远建不出第一个文件夹**。`check_bookmark_folders.py` 专门盯着它。
 
 ### 4. 主页由 WebView 渲染，不用 Compose 覆盖层
 早期实现把主页做成 Compose 覆盖层（`HomeScreen`），有两个问题：主页不进入
@@ -538,6 +606,7 @@ python tools/preview_home_mark.py old  # 改版前的造型，用于对照
 | `tools/check_download_bytes.py` | 比对 `formatBytes` 在 UI 层与测试层的两份实现，防止测试测的是旧逻辑 |
 | `tools/check_tabs_layer.py` | 校验标签面板的层级与动画约束（遮罩必须画在面板之后、拖拽手势不吞点击等） |
 | `tools/check_session.py` | 校验会话恢复接线：保存挂在 onStop、协程不被 viewModelScope 取消、无痕不落盘 |
+| `tools/check_bookmark_folders.py` | 校验文件夹不建表、删文件夹不连带删书签、导出规则与新建入口 |
 | `tools/check_junit_args.py` | 抓 JUnit 参数顺序写反（应为 `(message, value)`） |
 | `tools/check_workflow.py` | 校验 GitHub Actions YAML 结构 |
 | `tools/check_signing.py` | 抓签名配置里"空字符串被当成路径"的经典崩溃 |
@@ -574,16 +643,16 @@ python tools/preview_launcher_png.py mipmap-xxxhdpi  # 预览启动图标
 | 项目 | 结果 |
 |---|---|
 | `:app:assembleDebug` | ✅ 通过（图标改版后重新验证） |
-| `:app:testDebugUnitTest` | ✅ **120 个用例全部通过**（`UrlUtilsTest` 20 / `HomePageTest` 19 / `TabOrderTest` 15 / `LingSettingsTest` 14 / `LauncherIconTest` 12 / `DownloadTest` 10 / `LingIconsTest` 10 / `SessionSnapshotTest` 9 / `TabInitialTest` 6 / `PendingDownloadTest` 5） |
+| `:app:testDebugUnitTest` | ✅ **135 个用例全部通过**（`UrlUtilsTest` 20 / `HomePageTest` 19 / `TabOrderTest` 15 / `BookmarkFolderTest` 14 / `LingSettingsTest` 14 / `LauncherIconTest` 12 / `LingIconsTest` 11 / `DownloadTest` 10 / `SessionSnapshotTest` 9 / `TabInitialTest` 6 / `PendingDownloadTest` 5） |
 | `:app:assembleRelease`（R8 压缩） | ✅ 通过，产物 1.4 MB（图标改版前） |
 | APK 签名校验 | ✅ v1 + v2 方案均通过 |
 | 真机安装（Xiaomi MI 8 / Android 14） | ✅ `adb install` 成功 |
 | 真机启动 | ✅ 无崩溃，`Displayed MainActivity: +884ms` |
 | WebView 进程 | ✅ sandboxed_process 正常拉起 |
 | View 层级 | ✅ Compose 树与 WebView 宿主 `FrameLayout` 布局正确 |
-| 静态自检（16 个脚本） | ✅ 全部通过 |
+| 静态自检（17 个脚本） | ✅ 全部通过 |
 
-> 图标已全部替换为官方 Material Symbols（26 个，见 §四.2），
+> 图标已全部替换为官方 Material Symbols（27 个，见 §四.2），
 > 并通过 `check_icon_fidelity.py` 与源文件逐点核对。
 > 但**尚未在真机上重新编译运行** —— 图标的实际观感需要在设备上确认。
 
@@ -640,8 +709,8 @@ hello world                -> 必应搜索（默认引擎）
 4. ~~**下载管理**~~ —— 已完成（系统 DownloadManager + 下载前确认）
 5. **阅读模式** —— 正文提取，去除广告与导航
 6. ~~**标签页缩略图与拖拽排序**~~ —— 已完成（favicon 缩略图 + 长按拖拽）
-7. ~~**会话恢复**~~ —— 已完成（onStop 保存 + 冷启动重建，无痕不入库）
-8. **书签文件夹** —— 数据结构已支持 `folder` 字段，缺 UI
+7. ~~**会话恢复**~~ —— 已完成（onStop 保存 + 冷启动重建，无痕不入库；设置里可关闭）
+8. ~~**书签文件夹**~~ —— 已完成（单层文件夹，不建表、由书签派生）
 
 ---
 

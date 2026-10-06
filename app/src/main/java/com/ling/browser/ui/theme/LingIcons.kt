@@ -345,6 +345,59 @@ object LingIcons {
         }
     }
 
+    /** BookmarkAdd（Material Symbols Outlined: bookmark_add，官方）。 */
+    val BookmarkAdd: ImageVector by lazy {
+        materialIcon("BookmarkAdd") {
+            moveTo(200f, 840f)
+            lineTo(200f, 200f)
+            quadTo(200f, 167f, 223.5f, 143.5f)
+            quadTo(247f, 120f, 280f, 120f)
+            lineTo(520f, 120f)
+            quadTo(520f, 143f, 520f, 160f)
+            quadTo(520f, 177f, 520f, 200f)
+            lineTo(280f, 200f)
+            quadTo(280f, 200f, 280f, 200f)
+            quadTo(280f, 200f, 280f, 200f)
+            lineTo(280f, 718f)
+            lineTo(480f, 632f)
+            lineTo(680f, 718f)
+            lineTo(680f, 440f)
+            quadTo(703f, 440f, 720f, 440f)
+            quadTo(737f, 440f, 760f, 440f)
+            lineTo(760f, 840f)
+            lineTo(480f, 720f)
+            lineTo(200f, 840f)
+            close()
+            moveTo(280f, 200f)
+            lineTo(280f, 200f)
+            quadTo(280f, 200f, 280f, 200f)
+            quadTo(280f, 200f, 280f, 200f)
+            lineTo(520f, 200f)
+            quadTo(520f, 200f, 520f, 200f)
+            quadTo(520f, 200f, 520f, 200f)
+            quadTo(520f, 200f, 520f, 200f)
+            quadTo(520f, 200f, 520f, 200f)
+            lineTo(520f, 200f)
+            lineTo(480f, 200f)
+            lineTo(280f, 200f)
+            close()
+            moveTo(680f, 360f)
+            lineTo(680f, 280f)
+            lineTo(600f, 280f)
+            lineTo(600f, 200f)
+            lineTo(680f, 200f)
+            lineTo(680f, 120f)
+            lineTo(760f, 120f)
+            lineTo(760f, 200f)
+            lineTo(840f, 200f)
+            lineTo(840f, 280f)
+            lineTo(760f, 280f)
+            lineTo(760f, 360f)
+            lineTo(680f, 360f)
+            close()
+        }
+    }
+
     /** History（Material Symbols Outlined: history，官方）。 */
     val History: ImageVector by lazy {
         materialIcon("History") {

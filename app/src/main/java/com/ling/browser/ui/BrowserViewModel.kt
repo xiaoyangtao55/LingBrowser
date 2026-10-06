@@ -8,6 +8,7 @@ import com.ling.browser.LingApplication
 import com.ling.browser.data.db.Bookmark
 import com.ling.browser.data.db.DownloadEntry
 import com.ling.browser.data.db.HistoryEntry
+import com.ling.browser.data.repo.deriveFolders
 import com.ling.browser.data.prefs.LingSettings
 import com.ling.browser.data.prefs.NightMode
 import com.ling.browser.data.prefs.SearchEngine
@@ -21,6 +22,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -48,6 +50,15 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
     val activeId: StateFlow<String> = tabManager.activeId
 
     val bookmarks: StateFlow<List<Bookmark>> = container.bookmarks.bookmarks
+
+    /**
+     * 文件夹名列表。从 [bookmarks] 派生而不是单独查询 ——
+     * 这样书签一变，文件夹列表自动跟着变，不会出现两者不同步。
+     */
+    val bookmarkFolders: StateFlow<List<String>> = container.bookmarks.bookmarks
+        .map { deriveFolders(it) }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
     val history: StateFlow<List<HistoryEntry>> = container.history.history
     val downloads: StateFlow<List<DownloadEntry>> = container.downloads.downloads
 
@@ -94,7 +105,15 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
         // 标签覆盖或叠加，用户会看到一个多余的空标签。
         // 正确做法是等 restore 有结果后再决定。
         viewModelScope.launch {
-            val restored = runCatching { container.session.load() }.getOrDefault(emptyList())
+            // 设置项为「不恢复」时直接跳过读取，开一个干净的主页。
+            // 用 settings.value（而不是 collect）取一次即可：这是启动时
+            // 的一次性决策，之后的开关变化对本次启动没有意义。
+            val wantRestore = settings.value.restoreSession
+            val restored = if (wantRestore) {
+                runCatching { container.session.load() }.getOrDefault(emptyList())
+            } else {
+                emptyList()
+            }
             val ok = restored.isNotEmpty() && tabManager.restore(restored)
             if (!ok) {
                 tabManager.newTab(url = UrlUtils.HOME_URL)
@@ -233,6 +252,39 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
 
     fun deleteBookmark(id: Long) {
         viewModelScope.launch { container.bookmarks.delete(id) }
+    }
+
+    // ------------------------------------------------------------ 书签文件夹
+
+    /** 把书签移动到某文件夹；[folder] 为 null 表示移出到"未分类"。 */
+    fun moveBookmarkToFolder(id: Long, folder: String?) {
+        viewModelScope.launch {
+            container.bookmarks.move(id, folder?.trim()?.takeIf { it.isNotEmpty() })
+            _message.value = if (folder.isNullOrBlank()) "已移出文件夹" else "已移到「$folder」"
+        }
+    }
+
+    /** 重命名文件夹。名字重复或为空时给出提示并放弃。 */
+    fun renameBookmarkFolder(from: String, to: String) {
+        val clean = to.trim()
+        when {
+            clean.isEmpty() -> _message.value = "文件夹名不能为空"
+            // 只有改成**别的**已存在名字才算冲突；改回自己（含大小写变化）应放行
+            !clean.equals(from, ignoreCase = false) && container.bookmarks.folderExists(clean) ->
+                _message.value = "已存在同名文件夹"
+            else -> viewModelScope.launch {
+                container.bookmarks.renameFolder(from, clean)
+                _message.value = "已重命名为「$clean」"
+            }
+        }
+    }
+
+    /** 删除文件夹，其中的书签退回"未分类"（不连带删除）。 */
+    fun deleteBookmarkFolder(folder: String) {
+        viewModelScope.launch {
+            container.bookmarks.deleteFolder(folder)
+            _message.value = "已删除文件夹，其中的书签移到了未分类"
+        }
     }
 
     fun renameBookmark(id: Long, title: String, folder: String?) {
@@ -403,6 +455,18 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
     fun setDynamicColor(on: Boolean) = io { container.settings.setDynamicColor(on) }
     fun setTabsHeight(height: TabsHeight) = io { container.settings.setTabsHeight(height) }
 
+    /**
+     * 切换"恢复上次浏览页面"。
+     *
+     * 关掉时顺手把已存的快照清掉：否则用户关掉开关、重启一次、
+     * 再打开开关，会看到**关掉之前**那一批早就该被遗忘的标签 ——
+     * 既意外又像 bug。
+     */
+    fun setRestoreSession(enabled: Boolean) {
+        io { container.settings.setRestoreSession(enabled) }
+        if (!enabled) clearSession()
+    }
+
     private fun io(block: suspend () -> Unit) {
         viewModelScope.launch { block() }
     }
@@ -465,6 +529,12 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
      * 无痕标签在这一步被过滤掉（见 `TabSnapshot.isPersistable`）。
      */
     fun persistSession() {
+        // 关掉"恢复上次浏览页面"后就不再写盘。
+        //
+        // 两个理由：一是写了也不会被读，纯属浪费；二是这更符合用户意图 ——
+        // 选择不恢复通常意味着不想让自己的浏览记录留在磁盘上，
+        // 继续写反而违背预期。
+        if (!settings.value.restoreSession) return
         val snapshots = tabManager.snapshots()
         CoroutineScope(Dispatchers.IO).launch {
             runCatching { container.session.save(snapshots) }

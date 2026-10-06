@@ -180,6 +180,90 @@ if re.search(r"beginTransaction\(\)", session) and re.search(r"setTransactionSuc
 else:
     bad("save 未用事务，中途失败会导致标签全丢")
 
+# ---------- 9. 「恢复上次浏览页面」开关 ----------
+print("\n9. 「恢复上次浏览页面」设置项")
+prefs = read(f"{SRC}/data/prefs/SettingsStore.kt")
+settings_ui = read(f"{SRC}/ui/screens/SettingsScreen.kt")
+
+if "restoreSession" in prefs:
+    ok("LingSettings 有 restoreSession 字段")
+else:
+    bad("设置里缺少 restoreSession")
+
+if re.search(r"RESTORE_SESSION\s*=\s*booleanPreferencesKey", prefs):
+    ok("已声明 DataStore key")
+else:
+    bad("缺少 RESTORE_SESSION 持久化 key")
+
+if re.search(r"restoreSession\s*=\s*p\[Keys\.RESTORE_SESSION\]\s*\?\:\s*true", prefs):
+    ok("默认值为 true（切走再回来应看到原样，是浏览器主流行为）")
+else:
+    bad("restoreSession 默认值不是 true")
+
+if re.search(r"fun setRestoreSession", prefs):
+    ok("有 setRestoreSession 写入方法")
+else:
+    bad("缺少 setRestoreSession")
+
+if re.search(r"wantRestore[\s\S]{0,300}?session\.load\(\)", vm):
+    ok("启动时按开关决定是否读取快照")
+else:
+    bad("启动时未判断开关，关掉也照样恢复")
+
+# 保存端也要尊重：关掉开关通常意味着"不想让浏览记录留在磁盘上"
+if re.search(r"fun persistSession\(\)[\s\S]{0,400}?restoreSession[\s\S]{0,80}?return", vm):
+    ok("persistSession 在开关关闭时不写盘")
+else:
+    bad("persistSession 未判断开关，关掉后仍会写盘")
+
+if re.search(r"fun setRestoreSession[\s\S]{0,400}?clearSession\(\)", vm):
+    ok("关闭开关时清掉旧快照（避免重新打开后看到本该遗忘的标签）")
+else:
+    bad("关闭开关时未清旧快照")
+
+if re.search(r"onRestoreSession\s*:\s*\(Boolean\)\s*->\s*Unit", settings_ui):
+    ok("SettingsScreen 声明了 onRestoreSession 回调")
+else:
+    bad("SettingsScreen 缺少回调参数")
+
+if re.search(r"onCheckedChange\s*=\s*onRestoreSession", settings_ui):
+    ok("开关已接到回调上")
+else:
+    bad("开关没有接到回调")
+
+if "onRestoreSession = viewModel::setRestoreSession" in main:
+    ok("MainActivity 已接线")
+else:
+    bad("MainActivity 未接线")
+
+# 副标题要说明无痕不受影响，否则用户会误解。
+#
+# ⚠️ 这个判断写过两版都是错的，记下来免得再犯：
+#   1) 先写成 `restoreSession[\s\S]{0,240}?无痕` —— 只朝**后**找，
+#      而"无痕"其实在 checked= 的**上方**（注释和 subtitle 都可能在上），
+#      对正确代码误报。
+#   2) 再改成 `SwitchRow\([\s\S]*?checked = settings.restoreSession` ——
+#      惰性匹配从**第一个** SwitchRow（夜间模式）就开始了，一路扫到
+#      restoreSession 那一行，把中间所有行都吞进来。于是块里必然含有
+#      "无痕"（来自它自己的注释），哪怕真删掉 subtitle 也照样通过 ——
+#      检查是恒真的。
+# 正确做法：先定位到 restoreSession 那一行，再**向上**回退到最近的
+# SwitchRow 起点，取两者之间的片段。
+m_line = re.search(r"^[^\n]*checked\s*=\s*settings\.restoreSession[^\n]*$", settings_ui, re.M)
+if not m_line:
+    bad("找不到「恢复上次浏览页面」的 SwitchRow")
+else:
+    starts = [m.start() for m in re.finditer(r"SwitchRow\(", settings_ui)
+              if m.start() < m_line.start()]
+    if not starts:
+        bad("restoreSession 之前找不到 SwitchRow 起点")
+    else:
+        block = settings_ui[starts[-1]:m_line.end()]
+        if "无痕" in block:
+            ok("副标题说明了无痕不受影响")
+        else:
+            bad("副标题未说明无痕不受影响，用户可能误以为关掉它连无痕也会被保存")
+
 print()
 print("=" * 55)
 if problems:

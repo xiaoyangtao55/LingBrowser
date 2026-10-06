@@ -72,6 +72,16 @@ data class LingSettings(
     val javaScriptEnabled: Boolean = true,
     /** 标签页管理页的高度档位，默认占下半屏。 */
     val tabsHeight: TabsHeight = TabsHeight.HALF,
+    /**
+     * 启动时是否恢复上次的标签页。
+     *
+     * 默认**开**：用户开着几个网页切走再回来，期望看到原样，
+     * 这是浏览器的主流行为。关掉后每次启动都是一个干净的主页。
+     *
+     * 注意：无痕标签无论此项如何都**不会**被保存或恢复，
+     * 见 [com.ling.browser.data.db.TabSnapshot.isPersistable]。
+     */
+    val restoreSession: Boolean = true,
 ) {
     /**
      * 用户实际要打开的主页。
@@ -102,6 +112,7 @@ class SettingsStore(private val context: Context) {
         val JS_ENABLED = booleanPreferencesKey("js_enabled")
         val TABS_HEIGHT = stringPreferencesKey("tabs_height")
         val TAB_COUNT = intPreferencesKey("tab_count")
+        val RESTORE_SESSION = booleanPreferencesKey("restore_session")
     }
 
     val settings: Flow<LingSettings> = context.dataStore.data.map { p ->
@@ -124,6 +135,7 @@ class SettingsStore(private val context: Context) {
             tabsHeight = p[Keys.TABS_HEIGHT]
                 ?.let { runCatching { TabsHeight.valueOf(it) }.getOrNull() }
                 ?: TabsHeight.HALF,
+            restoreSession = p[Keys.RESTORE_SESSION] ?: true,
         )
     }
 
@@ -153,6 +165,9 @@ class SettingsStore(private val context: Context) {
 
     suspend fun setTabsHeight(height: TabsHeight) =
         context.dataStore.edit { it[Keys.TABS_HEIGHT] = height.name }
+
+    suspend fun setRestoreSession(enabled: Boolean) =
+        context.dataStore.edit { it[Keys.RESTORE_SESSION] = enabled }
 
     suspend fun setTabCount(count: Int) =
         context.dataStore.edit { it[Keys.TAB_COUNT] = count }

@@ -56,6 +56,10 @@ class LingIconsTest {
         return nodes
     }
 
+    /** 把图标的全部路径节点压成一个可比对的字符串指纹。 */
+    private fun pathSignature(icon: ImageVector): String =
+        pathNodes(icon).joinToString("|") { it.toString() }
+
     private val allIcons: Map<String, ImageVector> = mapOf(
         "ArrowBack" to LingIcons.ArrowBack,
         "ArrowForward" to LingIcons.ArrowForward,
@@ -83,11 +87,35 @@ class LingIconsTest {
         "Folder" to LingIcons.Folder,
         "FolderOpen" to LingIcons.FolderOpen,
         "Bookmark" to LingIcons.Bookmark,
+        "BookmarkBorder" to LingIcons.BookmarkBorder,
+        "BookmarkAdd" to LingIcons.BookmarkAdd,
     )
 
     @Test
     fun `图标集完整`() {
-        assertEquals("图标数量发生变化时请同步更新本测试", 26, allIcons.size)
+        assertEquals("图标数量发生变化时请同步更新本测试", 27, allIcons.size)
+    }
+
+    @Test
+    fun `三个书签图标的形状互不相同`() {
+        // 用途不同就必须长得不同，否则用户分不出哪个是动作、哪个是状态：
+        //   BookmarkBorder 空心书签      —— 未收藏
+        //   Bookmark       实心书签      —— 已收藏
+        //   BookmarkAdd    空心书签+加号 —— "添加书签"动作
+        //
+        // 这里直接比对 pathData 字符串：三者只要有任何两个相同，
+        // 就意味着某个场景的图标用错了（历史上"添加书签"就误用过
+        // 与书签入口完全相同的纯 bookmark）。
+        val sigs = listOf(
+            "BookmarkBorder" to LingIcons.BookmarkBorder,
+            "Bookmark" to LingIcons.Bookmark,
+            "BookmarkAdd" to LingIcons.BookmarkAdd,
+        ).map { (name, icon) -> name to pathSignature(icon) }
+        assertEquals(
+            "三个书签图标必须两两不同，实际出现了重复：$sigs",
+            3,
+            sigs.map { it.second }.toSet().size,
+        )
     }
 
     @Test

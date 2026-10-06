@@ -1,4 +1,4 @@
-﻿package com.ling.browser.ui.screens
+package com.ling.browser.ui.screens
 
 import com.ling.browser.ui.theme.LingIcons
 import androidx.compose.foundation.clickable
@@ -57,6 +57,7 @@ fun SettingsScreen(
     onBlockImages: (Boolean) -> Unit,
     onJavaScript: (Boolean) -> Unit,
     onTabsHeight: (TabsHeight) -> Unit,
+    onRestoreSession: (Boolean) -> Unit,
     onClearData: () -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
@@ -139,6 +140,16 @@ fun SettingsScreen(
                     title = "标签页面板高度",
                     subtitle = settings.tabsHeight.label,
                     onClick = { showTabsHeightDialog = true },
+                )
+            }
+            item {
+                SwitchRow(
+                    icon = LingIcons.History,
+                    title = "恢复上次浏览页面",
+                    // 说清"无痕不受影响"，免得用户以为关掉它连无痕也会被保存
+                    subtitle = "启动时重建上次的标签页（无痕标签从不保存）",
+                    checked = settings.restoreSession,
+                    onCheckedChange = onRestoreSession,
                 )
             }
 

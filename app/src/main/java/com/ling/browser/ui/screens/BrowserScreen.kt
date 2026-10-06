@@ -273,12 +273,20 @@ fun BrowserScreen(
             DropdownMenuItem(
                 text = { Text(if (isBookmarked) "取消收藏" else "添加书签") },
                 leadingIcon = {
-                    // 用「实心 / 空心」表达收藏状态，而不是靠文字：
-                    // 已收藏 -> bookmark_added_fill（实心带加号）
-                    // 未收藏 -> bookmark（空心）
-                    // 之前两种状态都用空心图标，用户只能读文字才知道当前状态。
+                    // 三种图标各司其职，不要混用：
+                    //   未收藏 -> bookmark              空心书签
+                    //   已收藏 -> bookmark_added_fill   **实心**书签（收好了）
+                    //   动  作 -> bookmark_add          空心书签 + 加号
+                    //
+                    // 本项是一个**动作**（添加/取消），所以未收藏时用带加号的
+                    // bookmark_add；否则它和下面那个「书签」入口图标完全相同
+                    // （都只是空心书签），用户分不出哪个是动作、哪个是跳转。
+                    // 已收藏时用实心图标，一眼看出当前状态。
                     Icon(
-                        if (isBookmarked) LingIcons.Bookmark else LingIcons.BookmarkBorder,
+                        when {
+                            isBookmarked -> LingIcons.Bookmark
+                            else -> LingIcons.BookmarkAdd
+                        },
                         contentDescription = null,
                     )
                 },
