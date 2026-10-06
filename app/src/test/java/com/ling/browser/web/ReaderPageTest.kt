@@ -30,7 +30,6 @@ class ReaderPageTest {
         background = "#ffffff",
         onBackground = "#000000",
         primary = "#0066cc",
-        onPrimary = "#ffffff",
         primaryContainer = "#eeeeee",
         onPrimaryContainer = "#111111",
         dark = dark,
@@ -183,5 +182,38 @@ class ReaderPageTest {
         // URI 解析失败要有兜底，否则阅读视图直接崩
         val html = render(url = "这不是网址")
         assertTrue(html.contains("</html>"))
+    }
+
+    // ------------------------------------------------------- 主题跟随
+
+    @Test
+    fun `深色与浅色产出不同的配色变量值`() {
+        // 把主题色注入后必须真的体现在输出里，否则"跟随夜间模式"是假的
+        val dark = ReaderPage.html(
+            title = "t", site = "", url = "https://e.com", content = "<p>x</p>",
+            background = "#121212", onBackground = "#e0e0e0",
+            primary = "#90caf9",
+            primaryContainer = "#00497d", onPrimaryContainer = "#d1e4ff",
+            dark = true, fontPx = 18,
+        )
+        val light = render()
+        assertTrue("深色应写入深色背景", dark.contains("--bg: #121212"))
+        assertTrue("浅色应写入浅色背景", light.contains("--bg: #ffffff"))
+        assertFalse("深色模板里不该残留浅色背景", dark.contains("--bg: #ffffff"))
+        assertTrue("深色应标记 color-scheme", dark.contains("color-scheme: dark"))
+        assertTrue("浅色应标记 color-scheme", light.contains("color-scheme: light"))
+    }
+
+    @Test
+    fun `所有主题色都真的被使用而不只是定义`() {
+        // 定义了却没用的变量是最隐蔽的失效方式：页面看起来"正常"，
+        // 但换主题时它纹丝不动。
+        val html = render()
+        val defined = Regex("(--[a-z-]+):").findAll(html).map { it.groupValues[1] }.toSet()
+        // --font-size 用 var() 引用，其余颜色变量也应被引用
+        for (name in defined) {
+            assertTrue("变量 $name 定义了却从未被使用", html.contains("var($name)"))
+        }
+        assertTrue("应至少定义了背景与前景", defined.containsAll(setOf("--bg", "--fg")))
     }
 }

@@ -21,7 +21,7 @@
 | 多标签页 | 每个标签页保留独立 WebView 实例，切换不丢页面状态；超过 6 个实例按 LRU 回收；favicon 缩略图 + 长按拖拽排序 |
 | 智能地址栏 | 自动区分「网址」与「搜索词」；聚焦时全选，输入时给出书签/历史联想 |
 | 书签 | 一键收藏/取消，独立管理页；支持**网站图标**、重命名、删除确认、单层文件夹归档 |
-| 阅读模式 | **正文提取**（Readability 算法 + 中文适配），去除广告/导航/评论区，可调四档字号 |
+| 阅读模式 | **正文提取**（Readability 算法 + 中文适配），去除广告/导航/评论区；可调四档字号，明暗跟随夜间模式与动态取色 |
 | 历史记录 | 自动去重 + 次数累加，按「今天/昨天/更早」分组，支持单条删除与清空 |
 | 无痕模式 | 独立标签页；不写历史、关闭 DOM storage 与 Cookie |
 | 前进/后退/刷新/停止 | 刷新常驻在地址栏右侧；底部工具栏保留前进/后退/主页/标签页/更多 |
@@ -568,6 +568,39 @@ Readability 原文用 `textLength >= 100` 判断段落是否够长，**那个阈
 "阅读模式"而不是"退出阅读模式"。已改为从 `tabs` 派生的 `StateFlow` 并 `collect`。
 `check_reader.py` 专门盯着这一条。
 
+#### 与既有功能撞车的四个静默失效点
+
+阅读视图是**第二个原生渲染的内部页面**（第一个是主页）。主页当初踩过的坑，
+阅读视图一个不落全都会再踩一遍 —— 而且**错了一样不报错、不崩，只是"看着没生效"**：
+
+| 失效点 | 不处理的后果 |
+|---|---|
+| 切主题时不重绘 | `ensureHomeRendered()` 原本只过滤 `ling://home`，在阅读模式里切换夜间模式，配色**停在旧值**，要退出重进才更新 |
+| 强制夜间模式的反色 CSS | `injectDarkMode` 只在 `isHome` 时跳过。阅读视图本来就是深色，再套一层 `invert+hue-rotate` 会**反成亮底白字**，正好与预期相反 |
+| 回调改写逻辑地址 | `onPageStarted`/`onPageFinished` 会把 `ling://reader` 改写成 `ReaderPage.BASE_URL`，破坏返回栈与阅读态识别 |
+| 合成地址进历史 | `ling://reader` 记进历史会留下**点不开**的条目 |
+
+修法是引入统一的 `isInternal = 主页 || 阅读视图` 判定，四处共用。
+顺带明确：**历史只记真实网址** —— 原文地址在进入阅读模式前就已记过，跳过不会漏记。
+
+> 这四条是分两次才补全的。第一遍只想到"切主题要重绘"，写检查脚本时
+> 逐条对着代码推演，才发现反色 CSS 会把深色阅读视图反成白的 ——
+> 那条**只有在强制夜间模式开启时**才触发，光看代码很容易划过去。
+
+#### 一条自我否定的测试
+
+为"可调主题"写了个断言：`ReaderPage` 里定义的每个 CSS 变量都必须被 `var()` 用到。
+它当场抓出 `--on-primary` **定义了却没人用** —— 阅读视图里 `primary` 只作为
+页面底色上的文字色（链接），从来没有"primary 实心块上的字"。
+已删掉该变量与对应的 `onPrimary` 参数。
+
+这类"定义了却不使用"的代码最隐蔽：页面看着完全正常，换主题时它纹丝不动。
+
+> 检查脚本本身也修了两个**误报/漏报**：`onPageFinished` 是两参数签名
+> （`{ url, title ->`），按 `{ url` 匹配永远找不到它 —— 变成**永远报失败**；
+> 而"数一数有几处 `isInternal`"的写法会让其中一个回调退化后仍能凑够数量，
+> 属于**漏报**。改成按回调名切片、逐个独立校验才可靠。
+
 #### 验证方式：用 Node 真实运行算法
 
 JS 是**字符串常量**嵌在 Kotlin 里，Kotlin 编译器完全不检查它 ——
@@ -842,7 +875,7 @@ python tools/preview_launcher_png.py mipmap-xxxhdpi  # 预览启动图标
 | 项目 | 结果 |
 |---|---|
 | `:app:assembleDebug` | ✅ 通过（图标改版后重新验证） |
-| `:app:testDebugUnitTest` | ✅ **180 个用例全部通过**（`UrlUtilsTest` 20 / `FaviconFetcherTest` 12 / `ReaderPageTest` 18 / `ReaderResultTest` 15 / `HomePageTest` 19 / `TabOrderTest` 15 / `BookmarkFolderTest` 14 / `LingSettingsTest` 14 / `LauncherIconTest` 12 / `LingIconsTest` 11 / `DownloadTest` 10 / `SessionSnapshotTest` 9 / `TabInitialTest` 6 / `PendingDownloadTest` 5） |
+| `:app:testDebugUnitTest` | ✅ **182 个用例全部通过**（`UrlUtilsTest` 20 / `FaviconFetcherTest` 12 / `ReaderPageTest` 20 / `ReaderResultTest` 15 / `HomePageTest` 19 / `TabOrderTest` 15 / `BookmarkFolderTest` 14 / `LingSettingsTest` 14 / `LauncherIconTest` 12 / `LingIconsTest` 11 / `DownloadTest` 10 / `SessionSnapshotTest` 9 / `TabInitialTest` 6 / `PendingDownloadTest` 5） |
 | `:app:assembleRelease`（R8 压缩） | ✅ 通过，产物 1.4 MB（图标改版前） |
 | APK 签名校验 | ✅ v1 + v2 方案均通过 |
 | 真机安装（Xiaomi MI 8 / Android 14） | ✅ `adb install` 成功 |
@@ -850,6 +883,10 @@ python tools/preview_launcher_png.py mipmap-xxxhdpi  # 预览启动图标
 | WebView 进程 | ✅ sandboxed_process 正常拉起 |
 | View 层级 | ✅ Compose 树与 WebView 宿主 `FrameLayout` 布局正确 |
 | 静态自检（19 个脚本） | ✅ 全部通过 |
+
+> **阅读模式**：逻辑层与接线已全部通过单测与静态检查，但**中文站点的实际
+> 提取效果尚未在真机验证** —— 提取质量依赖具体站点的 DOM 结构，
+> 需要用户实测若干站点后反馈。
 
 > 图标已全部替换为官方 Material Symbols（28 个，见 §四.2），
 > 并通过 `check_icon_fidelity.py` 与源文件逐点核对，

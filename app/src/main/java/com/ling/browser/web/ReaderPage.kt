@@ -74,7 +74,6 @@ object ReaderPage {
         background: String,
         onBackground: String,
         primary: String,
-        onPrimary: String,
         primaryContainer: String,
         onPrimaryContainer: String,
         dark: Boolean,
@@ -100,7 +99,10 @@ object ReaderPage {
     --bg: $background;
     --fg: $onBackground;
     --primary: $primary;
-    --on-primary: $onPrimary;
+    /* 这里刻意**没有** --on-primary：阅读视图里 primary 只作为
+       「页面底色上的文字色」出现（链接），从来没有"primary 实心块上的字"。
+       定义却不使用是种隐性失效 —— 换主题时它纹丝不动，看着像坏了。
+       ReaderPageTest 里有一条断言专门防止变量定义了却没人用。 */
     --pc: $primaryContainer;
     --on-pc: $onPrimaryContainer;
     --font-size: ${fontPx}px;

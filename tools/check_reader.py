@@ -440,6 +440,78 @@ if "Article" in read("ui/theme/LingIcons.kt"):
 else:
     bad("缺少 Article 图标")
 
+# ---------- 7. 主题与内部页面的四个静默失效点 ----------
+# 这四条的共同点是：错了不报错、不崩，只是"看起来没生效"，
+# 因此必须靠静态检查盯着。
+print("\n7. 主题跟随与内部页面处理")
+
+
+def body_of(src, pattern, span=1200):
+    m = re.search(pattern, src)
+    return src[m.start():m.start() + span] if m else ""
+
+
+# (1) 切主题时要重绘阅读视图，否则停在旧配色
+ensure = body_of(mgr, r"fun ensureHomeRendered\(\)")
+if "ReaderPage.isReaderUrl" in ensure:
+    ok("切主题时阅读视图跟着重新配色（否则要退出重进才更新）")
+else:
+    bad("ensureHomeRendered 只重绘主页 —— 阅读模式在切换夜间模式后配色不会变")
+
+# (2) 阅读视图不能被强制夜间模式的反色 CSS 二次处理
+# 判据是 injectDarkMode 位于 `if (!isInternal)` 块内 ——
+# 中间可能夹着注释，所以允许跨行但不允许出现右花括号。
+if re.search(r"if \(!isInternal\) \{(?:[^{}]|\n)*?wv\.injectDarkMode", mgr):
+    ok("强制夜间模式的反色 CSS 不注入内部页面")
+else:
+    bad("内部页面被注入反色 CSS —— 深色阅读视图会被反成亮底白字")
+
+if re.search(r"val isInternal = HomePage\.isHomeUrl\(url\) \|\| ReaderPage\.isReaderUrl\(url\)", mgr):
+    ok("用统一的 isInternal 判定内部页面（主页 + 阅读视图）")
+else:
+    bad("未统一判定内部页面，容易出现只处理主页、漏掉阅读视图的情况")
+
+# (3) 回调不能把逻辑地址改写成 baseUrl
+# 必须**逐个回调**检查，不能只数总数：onPageStarted 与 onPageFinished
+# 都要各自处理，只修一个的话另一个仍会把 ling://reader 改写掉。
+# （踩过：一开始用 `count(...) >= 2` 计数，退化掉其中一个仍能凑够数。）
+if mgr.count("if (isInternal) it.url else url") >= 2:
+    ok("onPageStarted/onPageFinished 都不会把 ling://reader 改写成 baseUrl")
+else:
+    bad("有回调会把阅读视图的逻辑地址改写掉，导致返回栈与识别错乱")
+
+# 逐个回调独立校验：每个回调块内都必须算出 isInternal。
+#
+# 这里按"从回调名起、到下一个回调名（或 webViewClient 块结束）为止"切片，
+# 而不是去找 `\n                },` 这种缩进敏感的行尾 —— 回调体长短不一，
+# 用固定长度窗口会漏掉较长的 onPageFinished，导致**永远误报失败**（踩过）。
+for cb, nxt in (("onPageStarted", "onPageFinished"),
+                ("onPageFinished", "onReceivedTitle")):
+    start = mgr.find(cb + " = {")
+    end = mgr.find(nxt, start + 1) if start >= 0 else -1
+    blk = mgr[start:end] if start >= 0 and end > start else ""
+    if "ReaderPage.isReaderUrl(url)" in blk:
+        ok(f"{cb} 内部页面判定含阅读视图")
+    else:
+        bad(f"{cb} 的判定漏了阅读视图 —— 会把 ling://reader 改写成 baseUrl")
+
+# (4) 合成地址不写入历史
+if re.search(r"onVisited\?\.invoke[\s\S]{0,500}?合成", mgr):
+    ok("合成地址（ling://reader）不写入历史记录")
+else:
+    bad("未说明合成地址是否写入历史 —— ling://reader 记进去点不开")
+
+# (5) 主题确实传到了阅读视图
+if re.search(r"private fun readerHtml[\s\S]{0,900}?dark = homeColors\.dark", mgr):
+    ok("阅读视图的明暗由 homeColors.dark 驱动（跟随夜间模式与动态取色）")
+else:
+    bad("阅读视图未接入主题明暗")
+
+if re.search(r"dark = colorScheme\.background\.luminance\(\) < 0\.5f", screen):
+    ok("dark 由实际背景亮度推导，而不是只读设置项")
+else:
+    bad("dark 未按亮度推导，动态取色/跟随系统时可能判断错")
+
 print()
 print("=" * 55)
 if problems:

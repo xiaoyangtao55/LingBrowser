@@ -402,7 +402,6 @@ class WebTabManager(private val context: Context) {
         background = homeColors.background,
         onBackground = homeColors.onBackground,
         primary = homeColors.primary,
-        onPrimary = homeColors.onPrimary,
         primaryContainer = homeColors.primaryContainer,
         onPrimaryContainer = homeColors.onPrimaryContainer,
         dark = homeColors.dark,
@@ -520,6 +519,21 @@ class WebTabManager(private val context: Context) {
         _tabs.value.filter { HomePage.isHomeUrl(it.url) }.forEach { tab ->
             loadHome(tab.id, obtainWebView(tab.id))
         }
+        // 阅读视图同样是原生渲染的自包含页面，也必须跟着重新配色 ——
+        // 否则在阅读模式里切换夜间模式时，页面会停在旧配色，
+        // 直到用户退出再重进才更新（很像是"夜间模式对阅读模式没用"）。
+        // 这里复用缓存的正文重排版，不需要重新提取。
+        _tabs.value.filter { ReaderPage.isReaderUrl(it.url) }.forEach { tab ->
+            readerContent[tab.id]?.let { cached ->
+                webViews[tab.id]?.loadDataWithBaseURL(
+                    ReaderPage.BASE_URL,
+                    readerHtml(cached),
+                    "text/html",
+                    "utf-8",
+                    null,
+                )
+            }
+        }
     }
 
     fun reload(id: String = _activeId.value) {
@@ -629,16 +643,18 @@ class WebTabManager(private val context: Context) {
             webViewClient = LingWebViewClient(
                 isIncognito = incognito,
                 onPageStarted = { url ->
-                    // 内置主页是用 loadDataWithBaseURL 加载的，WebView 回调回来的
-                    // 是 baseUrl（HomePage.BASE_URL）而不是逻辑地址 ling://home。
-                    // 这里必须挡住这次回写，否则：
-                    //   1. TabState.url 被改写成 baseUrl，refreshHome 的过滤会漏掉本页；
+                    // 内置主页与阅读视图都是用 loadDataWithBaseURL 加载的，
+                    // WebView 回调回来的是 baseUrl（HomePage.BASE_URL /
+                    // ReaderPage.BASE_URL）而不是逻辑地址（ling://home /
+                    // ling://reader）。这里必须挡住这次回写，否则：
+                    //   1. TabState.url 被改写成 baseUrl，主页与阅读视图的
+                    //      识别（以及 ensureHomeRendered 的过滤）会全部失效；
                     //   2. canGoBack/canGoForward 被重置，返回键会闪一下。
-                    val isHome = HomePage.isHomeUrl(url)
+                    val isInternal = HomePage.isHomeUrl(url) || ReaderPage.isReaderUrl(url)
                     updateTab(id) {
                         it.copy(
-                            url = if (isHome) it.url else url,
-                            isLoading = !isHome,
+                            url = if (isInternal) it.url else url,
+                            isLoading = !isInternal,
                             errorText = null,
                             canGoBack = canGoBack(),
                             canGoForward = canGoForward(),
@@ -646,11 +662,15 @@ class WebTabManager(private val context: Context) {
                     }
                 },
                 onPageFinished = { url, title ->
+                    // 阅读视图与主页同理：它在状态里的 url 是逻辑地址 ling://reader，
+                    // 不能让回调把它改写成 ReaderPage.BASE_URL。
+                    val isInternal = HomePage.isHomeUrl(url) || ReaderPage.isReaderUrl(url)
                     val isHome = HomePage.isHomeUrl(url)
                     updateTab(id) {
                         it.copy(
-                            url = if (isHome) it.url else url,
-                            // 主页标题固定为「主页」，不用 WebView 的 <title>翎</title>
+                            url = if (isInternal) it.url else url,
+                            // 主页标题固定为「主页」，不用 WebView 的 <title>翎</title>；
+                            // 阅读视图的标题已经是文章标题，保留即可。
                             title = if (isHome) it.title else title.ifBlank { it.title },
                             isLoading = false,
                             progress = 100,
@@ -660,21 +680,31 @@ class WebTabManager(private val context: Context) {
                     }
                     // 强制夜间模式的 CSS 兜底必须在页面加载**完成后**注入，
                     // 加载中注入会被随后到达的文档覆盖掉。
-                    // 主页不注入：它是自包含 HTML，配色由 CSS 变量精确控制，
-                    // 再套一层反色只会把调好的主题毁掉。
-                    if (!isHome) {
+                    //
+                    // 主页与阅读视图都**不注入**：它们是自包含 HTML，
+                    // 配色由 CSS 变量精确控制。再套一层 invert+hue-rotate
+                    // 会把这套配色整个反过来 —— 深色模式下反而变成亮底白字，
+                    // 正好与预期相反。
+                    if (!isInternal) {
                         // 必须写 this@WebTabManager.settings：在 apply 作用域里
                         // 裸写 `settings` 会解析成 WebView.settings（WebSettings），
                         // 那个对象没有 forceDarkWebPages 字段。
                         wv.injectDarkMode(this@WebTabManager.settings.forceDarkWebPages)
+
+                        // 历史记录只记真实网址。阅读视图的 url 是合成的
+                        // ling://reader，主页是 ling://home —— 两者都没有记录价值，
+                        // 记进去只会在历史列表里留下点不开的条目。
+                        // 注意：它们对应的**原文地址**早在进入阅读模式前就已记过，
+                        // 所以这里跳过不会漏记。
                         onVisited?.invoke(url, title, incognito)
                     }
                 },
                 onProgress = { p -> updateTab(id) { it.copy(progress = p) } },
                 onReceivedTitle = { t ->
-                    // 同上：主页保留「主页」这个标题
+                    // 主页保留「主页」这个标题；阅读视图的标题已是文章标题，
+                    // 让它跟随 <title> 更新即可，但合成的 ling://reader 不该被覆盖。
                     val cur = _tabs.value.firstOrNull { it.id == id }
-                    if (!HomePage.isHomeUrl(cur?.url)) {
+                    if (!HomePage.isHomeUrl(cur?.url) && !ReaderPage.isReaderUrl(cur?.url)) {
                         updateTab(id) { it.copy(title = t) }
                     }
                 },
