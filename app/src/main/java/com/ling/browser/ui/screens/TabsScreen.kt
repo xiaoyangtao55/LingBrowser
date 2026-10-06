@@ -232,7 +232,7 @@ fun TabsScreen(
     }
 }
 
-/** 高度档位切换：全屏 / 一半 / 四分之一。 */
+/** 高度档位切换：全屏 / 一半。 */
 @Composable
 private fun HeightToggle(
     current: TabsHeight,

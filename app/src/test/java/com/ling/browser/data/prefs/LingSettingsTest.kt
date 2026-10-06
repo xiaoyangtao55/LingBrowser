@@ -3,6 +3,7 @@ package com.ling.browser.data.prefs
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -56,16 +57,26 @@ class LingSettingsTest {
     }
 
     @Test
-    fun `标签页高度默认是四分之一`() {
-        assertEquals(TabsHeight.QUARTER, LingSettings().tabsHeight)
+    fun `标签页高度默认是一半`() {
+        assertEquals(TabsHeight.HALF, LingSettings().tabsHeight)
     }
 
     @Test
-    fun `标签页高度三档且比例正确`() {
-        assertEquals(3, TabsHeight.entries.size)
+    fun `标签页高度只有两档且比例正确`() {
+        // 1/4 档已移除：面板太矮时列表显示不全，滚动起来就失去总览意义
+        assertEquals(2, TabsHeight.entries.size)
         assertEquals(1.0f, TabsHeight.FULL.fraction, 0.001f)
         assertEquals(0.5f, TabsHeight.HALF.fraction, 0.001f)
-        assertEquals(0.25f, TabsHeight.QUARTER.fraction, 0.001f)
+    }
+
+    @Test
+    fun `已移除的四分之一档位名会安全降级`() {
+        // 老版本可能往 DataStore 里存过 "QUARTER"。升级后枚举里没有它，
+        // 读取路径必须能兜住而不是抛异常导致闪退。
+        assertNull(
+            runCatching { TabsHeight.valueOf("QUARTER") }.getOrNull(),
+            "QUARTER 应已从枚举中移除",
+        )
     }
 
     @Test

@@ -20,14 +20,16 @@ enum class NightMode { FOLLOW_SYSTEM, ALWAYS_ON, ALWAYS_OFF }
 /**
  * 标签页管理页的高度档位。
  *
- * Via 把标签页做成可上拉的面板，这里简化为三档固定高度：
- * 默认 [QUARTER]（只占屏幕下 1/4），既能扫到标签列表，
- * 又不会把正在浏览的页面完全盖住。
+ * 只有两档。原先还有个 1/4 档，但配合半透明面板后，1/4 的高度连两三个
+ * 标签都显示不全，列表一滚动就失去"总览"的意义 —— 面板太矮时反而不如
+ * 直接看网页，所以去掉了。
+ *
+ * 默认 [HALF]：既能扫到若干个标签，又能透出后面的网页，
+ * 符合"标签页是临时面板而非独立页面"的直觉。
  */
 enum class TabsHeight(val label: String, val fraction: Float) {
     FULL("全屏", 1.0f),
     HALF("一半", 0.5f),
-    QUARTER("四分之一", 0.25f),
 }
 
 /** 搜索引擎。 */
@@ -62,8 +64,8 @@ data class LingSettings(
     val blockImages: Boolean = false,
     /** 是否启用 JavaScript。 */
     val javaScriptEnabled: Boolean = true,
-    /** 标签页管理页的高度档位，默认只占下 1/4。 */
-    val tabsHeight: TabsHeight = TabsHeight.QUARTER,
+    /** 标签页管理页的高度档位，默认占下半屏。 */
+    val tabsHeight: TabsHeight = TabsHeight.HALF,
 ) {
     /**
      * 用户实际要打开的主页。
@@ -110,9 +112,12 @@ class SettingsStore(private val context: Context) {
             forceDarkWebPages = p[Keys.FORCE_DARK] ?: false,
             blockImages = p[Keys.BLOCK_IMAGES] ?: false,
             javaScriptEnabled = p[Keys.JS_ENABLED] ?: true,
+            // valueOf 用 runCatching 兜底：老版本存过 "QUARTER"，
+            // 该档位已移除，valueOf 会抛 IllegalArgumentException，
+            // 这里捕获后回退到默认值，用户不会因为升级而闪退。
             tabsHeight = p[Keys.TABS_HEIGHT]
                 ?.let { runCatching { TabsHeight.valueOf(it) }.getOrNull() }
-                ?: TabsHeight.QUARTER,
+                ?: TabsHeight.HALF,
         )
     }
 

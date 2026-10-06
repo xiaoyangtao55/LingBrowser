@@ -134,6 +134,52 @@ if re.search(r"\.fillMaxSize\(\)\s*\n\s*\.background\(Color\.Black", tabs):
 else:
     ok("已移除整屏遮罩写法")
 
+# ---------- 4b. 高度档位只有两档 ----------
+print("\n4b. 高度档位（1/4 已移除）")
+store = read("app/src/main/java/com/ling/browser/data/prefs/SettingsStore.kt")
+# 排除注释：老数据兼容的那段说明里会提到 "QUARTER" 这个字符串字面量，
+# 那是解释文字，不是残留的枚举条目。
+store_code = "\n".join(
+    ln for ln in store.split("\n") if not ln.strip().startswith("//")
+)
+if "QUARTER" in store_code:
+    bad("SettingsStore 里仍有 QUARTER，1/4 档位未移除干净")
+else:
+    ok("TabsHeight 已无 QUARTER（仅注释中作为历史说明提及）")
+entries = re.findall(r"^\s+([A-Z_]+)\(\"", store, re.M)
+# 只取 TabsHeight 枚举体内的条目
+m_enum = re.search(r"enum class TabsHeight.*?\{(.*?)\n\}", store, re.S)
+if m_enum:
+    names = re.findall(r"([A-Z_]+)\(", m_enum.group(1))
+    if names == ["FULL", "HALF"]:
+        ok(f"TabsHeight 只有两档：{names}")
+    else:
+        bad(f"TabsHeight 档位应为 [FULL, HALF]，实际 {names}")
+else:
+    bad("没找到 TabsHeight 枚举定义")
+
+if re.search(r"val tabsHeight: TabsHeight = TabsHeight\.HALF", store):
+    ok("默认档位是 HALF")
+else:
+    bad("默认档位不是 HALF")
+
+# 老数据兼容：valueOf 必须被 runCatching 包住
+if re.search(r"runCatching \{ TabsHeight\.valueOf\(it\) \}", store):
+    ok("读取时用 runCatching 兜住已移除的枚举名（老数据不会闪退）")
+else:
+    bad("读取 tabsHeight 未做异常兜底，老版本存过 QUARTER 会崩")
+
+if re.search(r"\?\: TabsHeight\.HALF", store):
+    ok("解析失败时回退到 HALF")
+else:
+    bad("解析失败未回退到 HALF")
+
+# 面板与遮罩逻辑用的是 != FULL，因此天然支持两档
+if "TabsHeight.entries.forEach" in tabs:
+    ok("高度切换 UI 遍历 entries，档位增删无需改代码")
+else:
+    bad("高度切换 UI 未遍历 entries，改档位时容易漏改")
+
 # ---------- 5. WebView 宿主生命周期 ----------
 print("\n5. WebView 宿主生命周期（关键是别被卸载）")
 if "DisposableEffect(host)" in browser and "attachHost" in browser:
