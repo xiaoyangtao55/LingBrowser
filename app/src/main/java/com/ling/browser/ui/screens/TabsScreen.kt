@@ -1,6 +1,10 @@
 package com.ling.browser.ui.screens
 
 import com.ling.browser.ui.theme.LingIcons
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -31,26 +35,41 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.ling.browser.data.prefs.TabsHeight
 import com.ling.browser.web.TabState
+import kotlinx.coroutines.launch
 
 /**
  * 非全屏档位下面板的底色透明度。
  *
  * 取值理由：太低（< 0.6）面板上的文字会与网页内容互相干扰、读不清；
  * 太高（> 0.9）就等于不透明，"能看到后面的网页"这个设计意图就没了。
- * 0.82 配合下方的模糊/压暗遮罩，既能看清列表又能感知背后的页面。
+ *
+ * 从 0.82 提到 0.92：实机上半屏面板里要读标签标题，0.82 时背后的
+ * 网页文字会透上来干扰阅读。0.92 仍然能看出背后"有内容"，
+ * 但不再和标题抢注意力 —— 可读性优先于通透感。
  */
-private const val PANEL_ALPHA = 0.82f
+private const val PANEL_ALPHA = 0.92f
+
+/** 面板升起动画时长。180ms 够快，不拖沓，又能看清"从下方滑上来"。 */
+private const val PANEL_SLIDE_IN_MS = 180
+
+/** 遮罩淡入时长，略长于面板，让背景先暗下去。 */
+private const val SCRIM_FADE_IN_MS = 220
+
+/** 遮罩最暗时的黑度。0.28 能压住网页又不至于发闷。 */
+private const val SCRIM_MAX_ALPHA = 0.28f
 
 /**
  * 标签页管理页。
@@ -78,6 +97,19 @@ fun TabsScreen(
     //
     // 遮罩只压暗**面板上方**的区域，让底下的网页隐约可见（Via 的做法）：
     // 完全盖死会让用户失去"我还在那个网页上"的空间感。
+    //
+    // 入场动画：面板从下方滑入，遮罩同时淡入。
+    // 用 Animatable 而不是 AnimatedVisibility —— 这里没有"显示/隐藏"的
+    // 状态切换（TabsScreen 被加入组合树时才存在），需要的是挂载即播放，
+    // LaunchedEffect 触发一次最直接。
+    val slide = remember { Animatable(1f) }
+    val scrimAlpha = remember { Animatable(0f) }
+
+    LaunchedEffect(Unit) {
+        launch { slide.animateTo(0f, tween(PANEL_SLIDE_IN_MS, easing = FastOutSlowInEasing)) }
+        launch { scrimAlpha.animateTo(1f, tween(SCRIM_FADE_IN_MS, easing = LinearOutSlowInEasing)) }
+    }
+
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -109,6 +141,11 @@ fun TabsScreen(
             modifier = Modifier
                 .fillMaxWidth()
                 .fillMaxHeight(tabsHeight.fraction)
+                // 面板自下而上滑入：用 graphicsLayer 平移而非改布局高度，
+                // 这样不会触发重新测量，动画期间列表不会抖。
+                .graphicsLayer {
+                    translationY = slide.value * size.height
+                }
                 // 面板自身拦截点击，避免穿透到遮罩把面板关掉
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
@@ -136,7 +173,7 @@ fun TabsScreen(
                                 TextButton(onClick = onCloseAll) { Text("关闭全部") }
                             }
                         },
-                        colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
+                        colors = TopAppBarDefaults.topAppBarColors(
                             containerColor = Color.Transparent,
                         ),
                     )
@@ -226,7 +263,8 @@ fun TabsScreen(
                     .fillMaxWidth()
                     .fillMaxHeight(1f - tabsHeight.fraction)
                     .align(Alignment.TopCenter)
-                    .background(Color.Black.copy(alpha = 0.28f)),
+                    // alpha 由动画驱动：背景先淡入，视觉上更连贯
+                    .background(Color.Black.copy(alpha = SCRIM_MAX_ALPHA * scrimAlpha.value)),
             )
         }
     }

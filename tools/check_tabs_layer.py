@@ -110,10 +110,12 @@ else:
     bad("遮罩未顶部对齐")
 
 # 遮罩必须画在 Surface 之后（否则会盖住面板）
-idx_scrim = tabs.find("alpha = 0.28f")
+# 注意搜"使用处"而不是常量名本身：SCRIM_MAX_ALPHA 在文件顶部有声明，
+# 直接 find("SCRIM_MAX_ALPHA") 会命中声明行，导致永远判定"在面板之前"。
+idx_scrim = tabs.find("SCRIM_MAX_ALPHA * scrimAlpha.value")
 idx_surface = tabs.find("color = if (tabsHeight == TabsHeight.FULL)")
 if idx_scrim == -1:
-    bad("没有找到遮罩的 alpha 值")
+    bad("没有找到遮罩 alpha 的使用处")
 elif idx_surface == -1:
     bad("没有找到面板 Surface 的颜色定义")
 elif idx_scrim > idx_surface:
@@ -121,10 +123,44 @@ elif idx_scrim > idx_surface:
 else:
     bad("遮罩在面板之前绘制，会把面板也压暗")
 
+# 遮罩 alpha 必须由动画驱动，否则加了动画也只有面板在动
+if re.search(r"SCRIM_MAX_ALPHA\s*\*\s*scrimAlpha\.value", tabs):
+    ok("遮罩 alpha 由动画值驱动（会随面板一起淡入）")
+else:
+    bad("遮罩 alpha 未接动画，淡入会缺失")
+
 if re.search(r"if \(tabsHeight != TabsHeight\.FULL\)", tabs):
     ok("全屏档位不画遮罩")
 else:
     bad("全屏档位仍会画遮罩")
+
+# ---------- 3b. 入场动画 ----------
+print("\n3b. 入场动画")
+if "Animatable(1f)" in tabs:
+    ok("面板位移动画初值 1f（在屏幕外）")
+else:
+    bad("未找到面板位移动画的 Animatable")
+
+if re.search(r"translationY\s*=\s*slide\.value\s*\*\s*size\.height", tabs):
+    ok("用 graphicsLayer.translationY 平移（不触发重新测量）")
+else:
+    bad("面板位移未用 graphicsLayer，动画期间列表可能抖动")
+
+if re.search(r"LaunchedEffect\(Unit\)", tabs):
+    ok("挂载时播放一次动画")
+else:
+    bad("未找到 LaunchedEffect 触发动画")
+
+# 动画时长：太快看不见，太慢拖沓
+durs = re.findall(r"private const val (\w+_MS)\s*=\s*(\d+)", tabs)
+if not durs:
+    bad("没有定义动画时长常量")
+for name, v in durs:
+    v = int(v)
+    if 100 <= v <= 400:
+        ok(f"{name} = {v}ms（在合理区间）")
+    else:
+        bad(f"{name} = {v}ms 不在 100~400ms，手感会不对")
 
 # ---------- 4. 不能再用整屏不透明遮罩 ----------
 print("\n4. 回归：旧的整屏遮罩写法")
