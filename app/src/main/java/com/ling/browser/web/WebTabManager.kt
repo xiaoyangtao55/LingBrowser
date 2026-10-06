@@ -4,7 +4,6 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Bitmap
 import android.net.Uri
-import android.util.Log
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebStorage
@@ -100,16 +99,11 @@ class WebTabManager(private val context: Context) {
         // post 到下一帧时焦点释放已经落定，requestFocus 才是可靠的。
         val run: () -> Unit = {
             runCatching {
-                val okHost = container?.requestFocus() ?: false
-                val okWv = wv.requestFocus()
-                // 焦点问题在真机上排查过一次、走了弯路，因此留一条日志：
-                // 万一还有下次，`adb logcat -s LingFocus` 就能直接看到
-                // 每一步是否成功，不必再靠猜。
-                Log.d(
-                    TAG_FOCUS,
-                    "focusWebContent host=$okHost webview=$okWv " +
-                        "wvHasFocus=${wv.hasFocus()} hostHasFocus=${container?.hasFocus()}",
-                )
+                // 返回值刻意不接：真机上实测两者恒为 true
+                // （日志 host=true webview=true wvHasFocus=true 已确认），
+                // 排障用的 Log.d 在确认修复后已移除。
+                container?.requestFocus()
+                wv.requestFocus()
                 // 把焦点下沉到网页里。View 层拿到焦点**不等于**网页内的
                 // input 拿到焦点 —— 后者由 Blink 内部管理，要 JS 帮一把。
                 // 不这样做时，用户点输入框仍可能唤不起输入法。
@@ -608,8 +602,5 @@ class WebTabManager(private val context: Context) {
     companion object {
         /** 同时存活的 WebView 实例上限。Via 这类轻量浏览器也维持类似的少量实例。 */
         private const val MAX_WEBVIEWS = 6
-
-        /** 焦点问题排查用的日志标签：`adb logcat -s LingFocus`。 */
-        private const val TAG_FOCUS = "LingFocus"
     }
 }

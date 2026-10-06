@@ -431,39 +431,86 @@ internal fun deriveFolders(bookmarks: List<Bookmark>): List<String> =
 
 ### 3.6 地址栏提交后必须真的释放焦点
 
-一个真机上发现、后果比表面严重的 bug：地址栏输入后按回车，页面加载了，
-但**输入光标继续闪**，而且**网页里的输入框唤不起输入法**。
+### 3.6 地址栏提交后必须把焦点**交还**给网页
 
-根因是只改了状态、没动真实焦点：
+一个真机上发现的 bug：地址栏输入后按回车，页面加载了，但**网页里的输入框
+唤不起输入法**。这个问题**修了两次才对**，两次的思路差异值得记下来。
 
-```kotlin
-onGo = {
-    onSubmit(field.text)   // ViewModel 里把 addressEditing 置 false
-    keyboard?.hide()       // 只是收起键盘
-}                          // ← 没有任何地方调用 clearFocus()
-```
-
-`BasicTextField` **物理上仍然持有焦点**。键盘虽然收起了，但只要用户去点
-网页里的输入框，焦点之争会让 WebView 拿不到焦点，软键盘自然弹不出来。
-光看地址栏是察觉不到这个问题的 —— 光标闪动只是表象。
-
-修法是三件事缺一不可（`releaseFocus`）：
+**第一版（错）**：以为问题是"地址栏没放开焦点"，于是加 `clearFocus()`：
 
 ```kotlin
-focusManager.clearFocus()   // 真正释放焦点，光标随之消失
-keyboard?.hide()            // 收起软键盘
-onFocusChange(false)        // 让 ViewModel 状态与真实焦点保持一致
+focusManager.clearFocus()   // 光标确实消失了
+keyboard?.hide()
+onFocusChange(false)
 ```
 
-**还发现 `onFocusChange` 这个参数从未被调用过** —— 它声明在
-`AddressBar` 的参数表里，但没有任何地方接上 `Modifier.onFocusChanged`，
-编辑态完全靠手动同步。现已补上观察者，状态与真实焦点不会再脱节。
+真机实测：**光标消失了，但网页输入框依然唤不起输入法**。
 
-**顺带修掉一个连带竞态**：失焦回调会调 `syncAddressFromActiveTab()`，
-而那一刻 `tabManager.loadUrl` 可能还没把 `activeTab().url` 更新过来
-（WebView 的 URL 要等页面真正开始加载才变），于是地址栏会被清空 ——
-表现为"点了回车，地址栏闪一下空白"。现在 `submitAddress` 显式锁定
-地址栏文本，不等失焦回调去猜。
+**用户的复现步骤给出了决定性线索**：
+
+| 观察 | 说明 |
+|---|---|
+| 回车后光标消失 | `clearFocus()` **生效了** |
+| 网页输入框仍唤不起输入法 | 问题不在"地址栏有没有放开焦点" |
+| 点地址栏键盘能起来 | IME 本身正常 |
+| 回到网页，**光标又出现了** | 有东西把焦点抢回去了 |
+
+最后一条是关键：焦点不是"还在地址栏"，而是**悬空了**。
+
+**真正的根因**：Compose 的 `clearFocus()` 只是让焦点消失，
+**并不会**把焦点交回 WebView。没有任何 View 持有焦点时，用户点网页输入框，
+IME 认为没有可输入的焦点，键盘就不弹。而"光标又出现"正是**焦点没有归属**
+的表现 —— 剩下唯一可聚焦的就是地址栏，于是它又被选中。
+
+> 教训：第一版做的是**减法**（释放焦点），但真正需要的是**加法**（交还焦点）。
+> 更麻烦的是，当时的静态检查只盯着「有没有 `clearFocus()`」——
+> 第一版**满足了检查却没解决问题**。这类"检查覆盖不到真正根因"比漏检更危险，
+> 因此 `check_ux_fixes.py` 第 1 节已改为检查「有没有把焦点**交还**回去」。
+
+修法是四步，缺一不可：
+
+```kotlin
+focusManager.clearFocus()   // 1. 释放焦点，光标随之消失
+keyboard?.hide()            // 2. 收起软键盘
+onFocusChange(false)        // 3. ViewModel 状态与真实焦点保持一致
+onReleaseFocus()            // 4. ★ 把焦点交给 WebView（前三个都做了也不够）
+```
+
+第 4 步背后是三件事（`WebTabManager.focusWebContent()`）：
+
+1. **宿主 `FrameLayout` 必须显式可聚焦** —— 它默认 `focusable = false`，
+   而 WebView 是被 `addView` 进去的子 View；父容器不可聚焦时，
+   触摸能到 WebView，但焦点无法在 View 树里正常流转
+2. **`requestFocus()` 要 post 到下一帧** —— 它与 `clearFocus()` 在同一帧里
+   被调用，而 Android 的焦点变化要等这帧 View 树遍历结束才生效，
+   紧接着 requestFocus 可能被丢弃（表现为"偶尔灵、偶尔不灵"）
+3. **用 JS 把焦点下沉到 `body`** —— View 层拿到焦点**不等于**网页内的
+   `input` 拿到焦点，后者由 Blink 内部管理，需要 JS 帮一把
+
+另加一道保险：`setOnTouchListener` 里若 WebView 未聚焦则取回
+（只观察不消费，返回 `false`，不影响滚动与点击）。
+
+> ⚠️ 刻意**不加** `setOnFocusChangeListener -> focusWebContent`：
+> 那会在 `focusWebContent` 内部 `requestFocus` 时再次触发监听器，
+> 形成**无限递归**。`check_ux_fixes.py` 专门盯着这一条。
+
+真机确认日志（四个值全为 `true`，说明焦点确实落到了 WebView 而非悬空）：
+
+```
+D LingFocus: focusWebContent host=true webview=true wvHasFocus=true hostHasFocus=true
+```
+
+确认修复后该诊断日志已移除。
+
+**顺带修掉两个连带问题**：
+
+- `onFocusChange` 这个参数**从未被调用过** —— 它声明在 `AddressBar` 的参数表里，
+  但没有任何地方接上 `Modifier.onFocusChanged`，编辑态完全靠手动同步。
+  现已补上观察者。
+- **失焦竞态**：失焦回调会调 `syncAddressFromActiveTab()`，而那一刻
+  `tabManager.loadUrl` 可能还没把 `activeTab().url` 更新过来（WebView 的 URL
+  要等页面真正开始加载才变），于是地址栏被清空 —— 表现为"回车后闪一下空白"。
+  现在 `submitAddress` 显式锁定地址栏文本。
 
 ### 4. 主页由 WebView 渲染，不用 Compose 覆盖层
 早期实现把主页做成 Compose 覆盖层（`HomeScreen`），有两个问题：主页不进入
@@ -743,12 +790,22 @@ python tools/preview_launcher_png.py mipmap-xxxhdpi  # 预览启动图标
 | 官方图标观感 | ✅ |
 | 会话恢复（含关闭开关后的表现） | ✅ |
 | 书签文件夹（移动 / 重命名 / 删除确认） | ✅ |
+| 地址栏提交后焦点归还网页 | ✅ 见下方日志 |
+
+地址栏焦点修复的真机确认日志（`focusWebContent` 每一步都成功）：
+
+```
+D LingFocus: focusWebContent host=true webview=true wvHasFocus=true hostHasFocus=true
+```
+
+四个值全为 `true` 说明：宿主取回焦点、WebView 取回焦点、且最终两级
+`hasFocus()` 都为真 —— 焦点确实落到了 WebView 这一层，而不是悬空。
+确认修复后该诊断日志已移除（见 §三.6）。
 
 **尚待在真机确认**（本轮改动）：
 
 | 功能 | 需要重点看什么 |
 |---|---|
-| 地址栏提交后释放焦点 | **网页里的输入框能否正常唤起输入法**（本次修复的核心） |
 | 书签网站图标 | 进书签页后图标是否逐步出现（需联网） |
 | 升级保留数据 | **覆盖安装**（`adb install -r`）后书签/历史/文件夹是否完整 |
 
