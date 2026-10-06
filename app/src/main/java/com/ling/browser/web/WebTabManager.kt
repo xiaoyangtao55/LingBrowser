@@ -202,13 +202,27 @@ class WebTabManager(private val context: Context) {
         val links: List<Pair<String, String>> = emptyList(),
     )
 
-    /** 由 UI 层在主题变化时写入；下次打开主页即生效。 */
+    /**
+     * 由 UI 层在主题变化时写入。
+     *
+     * ⚠️ 这个字段必须在**创建 WebView 之前**就已是正确值，因为 [loadHome]
+     * 渲染时直接读它。冷启动时 [newTab] 会先建好 WebView，若此时还是默认
+     * 浅色配色，主页就会一直用浅色 —— 这正是"主页不跟随夜间模式"的成因。
+     */
     var homeColors: HomeColors = HomeColors()
 
-    /** 重新渲染所有正在显示主页的标签页（主题或书签变化时调用）。 */
-    fun refreshHome() {
+    /**
+     * 给当前所有显示主页的标签页补渲染一次，**没有 WebView 的就先建出来**。
+     *
+     * 这里没有单独的 refreshHome()：早先版本的实现是
+     * `webViews[tab.id]?.let { loadHome(...) }`，对"显示主页但 WebView
+     * 尚未创建"的标签页会静默跳过 —— 而这恰恰是冷启动时的常态，
+     * 主页于是停在默认浅色配色上，表现为"没有跟随夜间模式"。
+     * 现在统一走 obtainWebView，直接消灭那条会静默失效的路径。
+     */
+    fun ensureHomeRendered() {
         _tabs.value.filter { HomePage.isHomeUrl(it.url) }.forEach { tab ->
-            webViews[tab.id]?.let { loadHome(tab.id, it) }
+            loadHome(tab.id, obtainWebView(tab.id))
         }
     }
 
@@ -266,7 +280,11 @@ class WebTabManager(private val context: Context) {
         val tab = _tabs.value.firstOrNull { it.id == id }
         val incognito = tab?.isIncognito ?: false
 
-        val wv = LingWebView(context).apply {
+        val wv = LingWebView(context)
+        // 先建实例再配置（而不是 LingWebView(context).apply { ... }）：
+        // 下面的回调 lambda 会在 apply 作用域**之外**执行，若没有这个名字，
+        // 回调里想调 wv 自己的方法（如 injectDarkMode）就没有接收者可用。
+        wv.apply {
             // 注意：在 LingWebView 的 apply 作用域里，裸写 `settings` 会解析成
             // WebView.settings（WebSettings），必须显式限定到本类的字段。
             applySettings(this@WebTabManager.settings, incognito)
@@ -316,8 +334,17 @@ class WebTabManager(private val context: Context) {
                             canGoForward = canGoForward(),
                         )
                     }
-                    // 主页是内部页面，不该进历史记录
-                    if (!isHome) onVisited?.invoke(url, title, incognito)
+                    // 强制夜间模式的 CSS 兜底必须在页面加载**完成后**注入，
+                    // 加载中注入会被随后到达的文档覆盖掉。
+                    // 主页不注入：它是自包含 HTML，配色由 CSS 变量精确控制，
+                    // 再套一层反色只会把调好的主题毁掉。
+                    if (!isHome) {
+                        // 必须写 this@WebTabManager.settings：在 apply 作用域里
+                        // 裸写 `settings` 会解析成 WebView.settings（WebSettings），
+                        // 那个对象没有 forceDarkWebPages 字段。
+                        wv.injectDarkMode(this@WebTabManager.settings.forceDarkWebPages)
+                        onVisited?.invoke(url, title, incognito)
+                    }
                 },
                 onProgress = { p -> updateTab(id) { it.copy(progress = p) } },
                 onReceivedTitle = { t ->

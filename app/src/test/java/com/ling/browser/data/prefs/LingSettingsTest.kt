@@ -39,6 +39,13 @@ class LingSettingsTest {
     }
 
     @Test
+    fun `默认搜索引擎是必应`() {
+        // 从百度改为必应：必应对轻量浏览器更友好（无强制登录、
+        // 无广告跳转中间页，https 首页体积小、首屏快）
+        assertEquals(SearchEngine.BING, LingSettings().searchEngine)
+    }
+
+    @Test
     fun `切换搜索引擎不会改变默认主页`() {
         // 搜索引擎只影响「搜索」，不该把主页一起带跑
         SearchEngine.entries.forEach { e ->

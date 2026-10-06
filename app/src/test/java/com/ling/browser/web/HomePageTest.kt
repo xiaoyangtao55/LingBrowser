@@ -260,8 +260,39 @@ class HomePageTest {
     }
 
     @Test
-    fun `prefersDarkCss 与入参一致`() {
-        assertEquals("color-scheme: dark;", HomePage.prefersDarkCss(true))
-        assertEquals("color-scheme: light;", HomePage.prefersDarkCss(false))
+    fun `深色模式写入 color-scheme`() {
+        // 回归用例：早期版本把这段逻辑写成 prefersDarkCss() 函数却从未调用，
+        // 于是 dark 参数完全不起作用，深色模式下滚动条仍是白的。
+        // 现在直接内联到 :root，这里断言它真的出现在了 HTML 里。
+        val dark = HomePage.html(
+            background = "#111412", onBackground = "#E1E3DF",
+            primary = "#7EDBAE", onPrimary = "#00391F",
+            primaryContainer = "#005231", onPrimaryContainer = "#A8F2CB",
+            dark = true,
+        )
+        assertTrue("深色模式应写入 color-scheme: dark", dark.contains("color-scheme: dark"))
+
+        val light = HomePage.html(
+            background = "#FBFDF8", onBackground = "#191C1A",
+            primary = "#1B6C4B", onPrimary = "#FFFFFF",
+            primaryContainer = "#A8F2CB", onPrimaryContainer = "#00210F",
+            dark = false,
+        )
+        assertTrue("浅色模式应写入 color-scheme: light", light.contains("color-scheme: light"))
+        assertFalse("浅色不应出现 dark 声明", light.contains("color-scheme: dark"))
+    }
+
+    @Test
+    fun `深色配色确实注入到 CSS 变量`() {
+        // 保证"跟随夜间模式"不只是 color-scheme，背景/文字色也跟着换，
+        // 否则页面仍是白底黑字，只是滚动条变深了而已。
+        val html = HomePage.html(
+            background = "#111412", onBackground = "#E1E3DF",
+            primary = "#7EDBAE", onPrimary = "#00391F",
+            primaryContainer = "#005231", onPrimaryContainer = "#A8F2CB",
+            dark = true,
+        )
+        assertTrue("背景色应注入 --bg", html.contains("--bg: #111412"))
+        assertTrue("文字色应注入 --fg", html.contains("--fg: #E1E3DF"))
     }
 }

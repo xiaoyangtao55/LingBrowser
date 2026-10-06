@@ -91,7 +91,12 @@ object HomePage {
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>翎</title>
 <style>
+  /* color-scheme 决定浏览器内置控件（下拉框、滚动条、光标）与
+     "系统默认色"的明暗。不写这一行，深色模式下滚动条依然是白的。
+     早期版本把它做成了 prefersDarkCss() 函数却从未调用 ——
+     那种"定义了但没人用"的代码最危险，测试还会因为它存在而变绿。 */
   :root {
+    color-scheme: ${if (dark) "dark" else "light"};
     --bg: $background;
     --fg: $onBackground;
     --primary: $primary;
@@ -199,8 +204,4 @@ object HomePage {
         .replace(">", "&gt;")
         .replace("\"", "&quot;")
         .replace("'", "&#39;")
-
-    /** 供 JS 判断深色模式使用（保留以便后续扩展）。 */
-    fun prefersDarkCss(dark: Boolean): String =
-        if (dark) "color-scheme: dark;" else "color-scheme: light;"
 }

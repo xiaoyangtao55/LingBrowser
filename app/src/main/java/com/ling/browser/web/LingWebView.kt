@@ -1,4 +1,4 @@
-﻿package com.ling.browser.web
+package com.ling.browser.web
 
 import android.annotation.SuppressLint
 import android.content.Context
@@ -35,10 +35,13 @@ class LingWebView @JvmOverloads constructor(
     }
 
     /** 依据设置应用 WebSettings。切设置后需重新调用。 */
+    @Suppress("DEPRECATION")
     fun applySettings(settings: LingSettings, incognito: Boolean) {
         this.settings.apply {
             javaScriptEnabled = settings.javaScriptEnabled
             domStorageEnabled = !incognito
+            // databaseEnabled 已废弃，但 WebSQL 早已从 Chromium 移除，
+            // 这里保留赋值只是为了兼容仍会读该标志的老 WebView 实现。
             databaseEnabled = !incognito
             loadWithOverviewMode = true
             useWideViewPort = true
@@ -90,8 +93,20 @@ class LingWebView @JvmOverloads constructor(
         get() = WebSettings.getDefaultUserAgent(context)
 
     /**
-     * 注入强制夜间模式的 CSS。`setForceDark` 在部分页面失效，
-     * 这里补一层「反色 + 降低亮度」的兜底样式。
+     * 注入强制夜间模式的 CSS。
+     *
+     * 为什么在 `setForceDark` / `isAlgorithmicDarkeningAllowed` 之外还要这一层：
+     * 系统级的算法变暗只处理「有明确定义浅色背景」的元素，对
+     *   - 用 CSS 变量或 JS 动态上色的页面
+     *   - 只设了 `background-image` 的渐变块
+     *   - 内联 `style="background:#fff"` 的容器
+     * 经常失效，结果就是深色模式下白底闪眼。
+     *
+     * 兜底做法是整体 invert + hue-rotate(180deg)（色相转一圈回到原位，
+     * 因此彩色不会变成反色负片），再对 img/video/canvas 反色一次还原。
+     *
+     * 调用时机很关键：必须在**页面加载完成后**注入。早期版本这个方法
+     * 定义了却从未被调用，等于强制夜间只有系统那一层，漏网页面就没救。
      */
     fun injectDarkMode(enabled: Boolean) {
         if (!enabled) return

@@ -52,7 +52,13 @@ const val UA_DESKTOP =
         "(KHTML, like Gecko) Version/17.0 Safari/605.1.15"
 
 data class LingSettings(
-    val searchEngine: SearchEngine = SearchEngine.BAIDU,
+    /**
+     * 默认搜索引擎。
+     *
+     * 选必应而不是百度：必应对「翎」这类轻量浏览器更友好 ——
+     * 无强制登录、无广告跳转中间页，且 https 首页体积小、首屏快。
+     */
+    val searchEngine: SearchEngine = SearchEngine.BING,
     val customHomepage: String = "",
     val nightMode: NightMode = NightMode.FOLLOW_SYSTEM,
     val desktopMode: Boolean = false,
@@ -102,7 +108,7 @@ class SettingsStore(private val context: Context) {
         LingSettings(
             searchEngine = p[Keys.SEARCH_ENGINE]
                 ?.let { runCatching { SearchEngine.valueOf(it) }.getOrNull() }
-                ?: SearchEngine.BAIDU,
+                ?: SearchEngine.BING,
             customHomepage = p[Keys.CUSTOM_HOMEPAGE] ?: "",
             nightMode = p[Keys.NIGHT_MODE]
                 ?.let { runCatching { NightMode.valueOf(it) }.getOrNull() }

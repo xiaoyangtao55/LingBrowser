@@ -29,8 +29,8 @@
 ### 页面适配
 | 功能 | 说明 |
 |---|---|
-| 夜间模式 | 跟随系统 / 始终开启 / 始终关闭 三态 |
-| 网页强制夜间 | Android 10+ 用 `setForceDark`/`setAlgorithmicDarkeningAllowed`，并注入兜底 CSS |
+| 夜间模式 | 跟随系统 / 始终开启 / 始终关闭 三态；**内置主页同步跟随** |
+| 网页强制夜间 | Android 10+ 用 `setForceDark`/`setAlgorithmicDarkeningAllowed`，页面加载完成后再注入兜底 CSS |
 | 电脑模式 | 切换为桌面版 Safari UA，触发站点桌面布局（有顶部提示条） |
 | 无图模式 | 关闭图片加载，省流量 |
 | JavaScript 开关 | 可关闭以提速、去干扰 |
@@ -38,7 +38,7 @@
 | 标签页面板高度 | 全屏 / 一半 两档，默认一半；面板半透明，可透出后方网页 |
 
 ### 搜索引擎
-内置 百度 / 必应 / Google / DuckDuckGo 四家，可随时切换。
+内置 百度 / 必应 / Google / DuckDuckGo 四家，可随时切换。**默认必应**。
 
 ---
 
@@ -239,6 +239,39 @@ Compose 中多个 `BackHandler` 同时启用时，**后注册的优先**
 处理方式是在回调里用 `HomePage.isHomeUrl(url)` 判断，命中则保留原有状态，
 并且**不写入历史记录**（内部页面不该出现在历史里）。
 
+### 9. 「定义了但没人调用」的函数最危险
+项目里同一个坑踩了两次，症状都是**功能静默失效**：
+
+| 死掉的函数 | 后果 |
+|---|---|
+| `HomePage.prefersDarkCss()` | 主页 `dark` 参数完全不起作用，不跟随夜间模式 |
+| `LingWebView.injectDarkMode()` | 强制网页夜间的 CSS 兜底从未生效，漏网页面仍是白底 |
+
+两者的共同特征是：**单元测试直接调用了它们**，所以测试全绿，
+给人"这块有覆盖"的错觉，而线上根本没走这条路。
+
+因此新增 `tools/check_dead_code.py`，扫描 `main` 源集里语义明确的
+「动作型」函数（`inject*` / `prefers*` / `ensure*` 等），确认至少有一处
+调用点；若只在测试里被调用，会当作危险信号报出来。
+
+> 该脚本有意**只检查少数前缀**，不检查 `set*` / `to*` 这类名字 ——
+> 它们常以函数引用（`viewModel::setNightMode`）或扩展函数
+> （`cursor.toBookmark()`）形式调用，纯文本匹配抓不到，强行检查会产出
+> 几十条误报。**没人看的检查等于没有检查**，宁可漏报不可误报。
+
+### 10. 主页配色必须早于 WebView 创建就绪
+冷启动时 `newTab` 会先建好主页 WebView，随后 `applyHomeTheme` 才写入
+配色。早先的 `refreshHome()` 写法是：
+
+```kotlin
+webViews[tab.id]?.let { loadHome(tab.id, it) }   // WebView 不存在就静默跳过
+```
+
+`?.let` 在"显示主页但 WebView 尚未创建"时**什么都不做** —— 而这恰恰是
+冷启动时的常态，于是主页停在默认浅色上。现在统一走
+`ensureHomeRendered()`，内部用 `obtainWebView` 把 WebView 建出来再渲染，
+直接消灭这条会静默失效的路径。
+
 ---
 
 ## 五、启动图标
@@ -355,7 +388,7 @@ python tools/preview_home_mark.py old  # 改版前的造型，用于对照
 
 ## 六、静态自检工具
 
-设备编译太慢（真机跑 Gradle 要数分钟），因此 `tools/` 下提供了三个不依赖
+设备编译太慢（真机跑 Gradle 要数分钟），因此 `tools/` 下提供了一批不依赖
 编译的检查脚本，改动后先跑它们能挡掉大部分低级错误：
 
 | 脚本 | 作用 |
@@ -367,6 +400,12 @@ python tools/preview_home_mark.py old  # 改版前的造型，用于对照
 | `tools/check_launcher_icons.py` | 校验生成的 3 层自适应图标矢量：pathData 可解析、前景是否落在 72dp 安全区内 |
 | `tools/check_launcher_png.py` | 校验 API<26 的 PNG 图标：圆形遮罩、渐变方向、白色元素占比 |
 | `tools/check_icon_composition.py` | 量化图标构图：羽毛是否压在环的笔画上、高光点是否被羽毛遮住 |
+| `tools/check_dead_code.py` | 找出「定义了但没人调用」的动作型函数（见 §四.9，此坑踩过两次） |
+| `tools/check_download_bytes.py` | 比对 `formatBytes` 在 UI 层与测试层的两份实现，防止测试测的是旧逻辑 |
+| `tools/check_tabs_layer.py` | 校验标签面板的层级与动画约束（遮罩必须画在面板之后等） |
+| `tools/check_junit_args.py` | 抓 JUnit 参数顺序写反（应为 `(message, value)`） |
+| `tools/check_workflow.py` | 校验 GitHub Actions YAML 结构 |
+| `tools/check_signing.py` | 抓签名配置里"空字符串被当成路径"的经典崩溃 |
 | `tools/render_icons_kotlin.py` | 直接解析 `LingIcons.kt` 把矢量图标栅格化成 ASCII，用于肉眼校验图标造型 |
 | `tools/preview_home_mark.py` | 把 `HomePage.kt` 里的主页 logo（描边线画）渲染成 PNG，终端里看不到图形时用它 |
 | `tools/preview_launcher_png.py` | 把 PNG 图标渲染成 ASCII 预览（终端里就能看构图） |
@@ -379,6 +418,8 @@ python tools/verify_home_assertions.py
 python tools/check_launcher_icons.py
 python tools/check_launcher_png.py
 python tools/check_icon_composition.py
+python tools/check_dead_code.py
+python tools/check_download_bytes.py
 python tools/render_icons_kotlin.py Refresh          # 渲染指定图标
 python tools/preview_launcher_png.py mipmap-xxxhdpi  # 预览启动图标
 ```
@@ -390,17 +431,17 @@ python tools/preview_launcher_png.py mipmap-xxxhdpi  # 预览启动图标
 | 项目 | 结果 |
 |---|---|
 | `:app:assembleDebug` | ✅ 通过（图标改版后重新验证） |
-| `:app:testDebugUnitTest` | ✅ **69 个用例全部通过**，含 `LauncherIconTest` 12 个、`HomePageTest` 18 个 |
+| `:app:testDebugUnitTest` | ✅ **87 个用例全部通过**（`UrlUtilsTest` 20 / `HomePageTest` 20 / `LingSettingsTest` 15 / `LauncherIconTest` 12 / `DownloadTest` 10 / `LingIconsTest` 7 / `PendingDownloadTest` 5） |
 | `:app:assembleRelease`（R8 压缩） | ✅ 通过，产物 1.4 MB（图标改版前） |
 | APK 签名校验 | ✅ v1 + v2 方案均通过 |
 | 真机安装（Xiaomi MI 8 / Android 14） | ✅ `adb install` 成功 |
 | 真机启动 | ✅ 无崩溃，`Displayed MainActivity: +884ms` |
 | WebView 进程 | ✅ sandboxed_process 正常拉起 |
 | View 层级 | ✅ Compose 树与 WebView 宿主 `FrameLayout` 布局正确 |
-| 静态自检（3 个脚本） | ✅ 全部通过 |
+| 静态自检（14 个脚本） | ✅ 全部通过 |
 
-> 本轮改动（主页可打开 / 刷新按钮移位 / 更多菜单右对齐 / 标签页高度 /
-> 二级页返回）已通过三个静态检查脚本校验，但**尚未在真机上重新编译运行**。
+> 下载管理与夜间模式修复已通过本地 `--offline` 编译、87 个单元测试与
+> 14 个静态检查脚本校验，但**尚未在真机上重新编译运行**。
 
 ### 羽毛造型改版的验证记录
 
@@ -432,8 +473,8 @@ example.com                -> https://example.com
 192.168.1.1:8080           -> http://192.168.1.1:8080
 about:blank                -> about:blank          (不带 // 的 scheme)
 C:\Users\a.html            -> file://C:\Users\a.html (盘符不被误判)
-hello world                -> 百度搜索
-中文搜索                    -> 百度搜索
+hello world                -> 必应搜索（默认引擎）
+中文搜索                    -> 必应搜索
 例子.中国                   -> https://例子.中国
 ```
 

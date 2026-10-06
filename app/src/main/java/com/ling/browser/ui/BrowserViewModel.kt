@@ -418,7 +418,9 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
         )
         if (colors == tabManager.homeColors) return
         tabManager.homeColors = colors
-        tabManager.refreshHome()
+        // 用 ensureHomeRendered 而不是 refreshHome：冷启动时主页 WebView
+        // 可能还没建出来，refreshHome 会静默跳过，导致主页停在默认浅色。
+        tabManager.ensureHomeRendered()
     }
 
     // ------------------------------------------------------------ 其它

@@ -77,12 +77,30 @@ def main():
     src = open(KOTLIN, encoding="utf-8").read()
     tpl = extract_template(src)
 
-    # 替换 $var 模板占位
+    # 先替换 $var 模板占位
     body = tpl
     for k, v in SAMPLE.items():
         body = body.replace("$" + k, v)
 
-    left = re.findall(r"\$\{?(\w+)\}?", body)
+    # 找出仍未替换的模板变量。
+    #
+    # 关键：`${...}` 里是**任意 Kotlin 表达式**，不只是变量名。
+    # 例如 `${if (dark) "dark" else "light"}` 是合法的内联表达式，
+    # 早期版本用 `\$\{?(\w+)\}?` 去匹配，会把 `if` 当成"未替换的变量"
+    # 报假警。这里改成：
+    #   - `$name`        → 简单变量插值，必须已在 SAMPLE 里
+    #   - `${...}`       → 只要里面有非标识符字符（空格、括号、点等），
+    #                      就认定是表达式，跳过；纯 `${name}` 才算变量。
+    left = []
+    for m in re.finditer(r"\$(\w+)|\$\{([^}]*)\}", body):
+        simple, expr = m.group(1), m.group(2)
+        if simple is not None:
+            left.append(simple)
+        elif expr is not None and re.fullmatch(r"\w+", expr.strip()):
+            # 纯 ${name}：仍是变量插值
+            left.append(expr.strip())
+        # 其余 ${...} 视为 Kotlin 表达式，不属于"未替换变量"
+
     problems = []
     if left:
         problems.append(f"未替换的模板变量: {sorted(set(left))}")
