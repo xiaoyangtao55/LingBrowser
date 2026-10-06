@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      启动图标的配色已移入 res/drawable/ic_launcher_background.xml 的 <gradient>，
+      因此这里不再需要 ic_launcher_background 纯色资源。
+      应用内配色全部走 Material You / Compose 主题，无需在此定义。
+    -->
+</resources>

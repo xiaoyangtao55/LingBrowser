@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  API 27 (O_MR1) 起才有浅色导航栏图标属性，单独放在 values-v27，
+  低版本设备不会碰到这两个属性，避免 AAPT 报资源不存在。
+-->
+<resources>
+    <style name="Theme.Ling" parent="android:Theme.DeviceDefault.Light.NoActionBar">
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightNavigationBar">true</item>
+    </style>
+</resources>

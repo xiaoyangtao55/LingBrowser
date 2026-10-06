@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- 应用内下载目录，供 FileProvider 对外分享 -->
+    <files-path
+        name="downloads"
+        path="downloads/" />
+    <cache-path
+        name="cache"
+        path="." />
+    <external-files-path
+        name="ext"
+        path="." />
+</paths>

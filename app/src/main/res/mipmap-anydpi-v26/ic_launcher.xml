@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  「翎」自适应启动图标（API 26+）。
+  背景铺满画布、前景收在安全区内，任何遮罩形状都不会裁到图形。
+  各层由 tools/gen_launcher_icon.py 从 tools/icon.xml 生成。
+-->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@drawable/ic_launcher_background" />
+    <foreground android:drawable="@drawable/ic_launcher_foreground" />
+    <monochrome android:drawable="@drawable/ic_launcher_monochrome" />
+</adaptive-icon>

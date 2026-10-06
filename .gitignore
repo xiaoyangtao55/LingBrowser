@@ -1,0 +1,31 @@
+# ---- Kotlin / Android 默认 ----
+*.iml
+.gradle/
+build/
+local.properties
+.idea/
+.DS_Store
+captures/
+.externalNativeBuild/
+.cxx/
+
+# ---- Python 工具缓存 ----
+__pycache__/
+*.pyc
+
+# ---- 构建产物 ----
+*.apk
+*.aab
+!debug.keystore
+
+# ---- 签名密钥：绝对不能进仓库 ----
+# 正式签名密钥一旦泄漏，任何人都能冒名发布你的应用更新。
+*.jks
+*.keystore
+!debug.keystore
+
+# 只排除 keystore/ 里的密钥本身，而**不是**整个目录。
+# 若写成 `keystore/`，git 不会进入被排除的目录，`!keystore/README.md`
+# 这类反向规则就会失效，README 会静默丢失（CI 说明就没了）。
+keystore/*.jks
+keystore/*.keystore

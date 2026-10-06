@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      UI 全部由 Compose 的 MaterialTheme 渲染（Material You 3 动态取色），
+      XML 主题只负责窗口层面：背景、系统栏、深浅色。
+
+      注意：android:Theme.DeviceDefault.DayNight 是 API 29+ 才有的资源，
+      minSdk 23 直接引用会 AAPT 报错；而 Material3 的系统主题只由
+      Material Components 库提供（不带 android: 前缀，需额外依赖）。
+      因此基线用 API 21+ 必然存在的 Theme.DeviceDefault.Light.NoActionBar，
+      深色下的窗口背景由 Compose 的 Surface 覆盖，不会露出白底。
+    -->
+    <style name="Theme.Ling" parent="android:Theme.DeviceDefault.Light.NoActionBar">
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+    </style>
+</resources>
