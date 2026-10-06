@@ -14,8 +14,10 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -38,15 +40,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.ling.browser.data.prefs.NightMode
 import com.ling.browser.ui.BrowserViewModel
+import com.ling.browser.ui.PendingDownload
 import com.ling.browser.ui.components.AddressBar
 import com.ling.browser.ui.components.BottomToolbar
 import com.ling.browser.ui.components.DesktopModeBanner
 import com.ling.browser.ui.components.IncognitoBanner
+import com.ling.browser.util.UrlUtils
 
 /**
  * 浏览器主界面：地址栏 + WebView 容器 + 底部工具栏。
@@ -92,6 +97,7 @@ fun BrowserScreen(
     // 主页的快捷入口来自书签，必须在这里无条件收集 ——
     // 放进 when 分支里会形成条件式 composable 调用，破坏重组时的槽位稳定性。
     val bookmarks by viewModel.bookmarks.collectAsStateWithLifecycle()
+    val pendingDownload by viewModel.pendingDownload.collectAsStateWithLifecycle()
 
     var showMoreMenu by remember { mutableStateOf(false) }
     var exitConfirm by remember { mutableStateOf(false) }
@@ -124,9 +130,10 @@ fun BrowserScreen(
             }.getOrDefault(false)
         }
         viewModel.tabManager.onDownloadRequested = { url, mimeType ->
-            // 文件名交给 DownloadManager 从 Content-Disposition 推断（比在这里
-            // 猜 URL 末段可靠），因此这里只传 null。
-            viewModel.enqueueDownload(url, mimeType, fileName = null)
+            // 文件名交给 DownloadManager 从 Content-Disposition 推断
+            // （比在这里猜 URL 末段可靠），因此传 null。
+            // 注意这里只是「请求」，真正开始下载要等用户在确认框里点确认。
+            viewModel.requestDownload(url, mimeType, fileName = null)
         }
     }
 
@@ -348,6 +355,53 @@ fun BrowserScreen(
         }
     }
 
+    // ---- 下载确认 ----
+    // 网页可以自行触发下载（弹窗广告、误触都会），因此不能静默开始。
+    val pending = pendingDownload
+    if (pending != null) {
+        AlertDialog(
+            onDismissRequest = viewModel::dismissPendingDownload,
+            icon = { Icon(LingIcons.Download, contentDescription = null) },
+            title = { Text("要下载这个文件吗？") },
+            text = {
+                Column {
+                    Text(
+                        text = pending.fileName,
+                        style = MaterialTheme.typography.bodyLarge,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = buildString {
+                            append(sizeLabel(pending))
+                            pending.mimeType?.let {
+                                append("  ·  ")
+                                append(it)
+                            }
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = UrlUtils.hostOf(pending.url),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = viewModel::confirmPendingDownload) { Text("下载") }
+            },
+            dismissButton = {
+                TextButton(onClick = viewModel::dismissPendingDownload) { Text("取消") }
+            },
+        )
+    }
+
     // ---- 退出确认 ----
     if (exitConfirm) {
         AlertDialog(
@@ -367,10 +421,21 @@ fun BrowserScreen(
     }
 }
 
+/**
+ * 确认框里的大小文案。
+ *
+ * 三种状态分开写：探测中、探测失败（大小未知）、已知大小。
+ * 复用下载页的 [formatBytes]，两处口径一致。
+ */
+private fun sizeLabel(pending: PendingDownload): String = when {
+    pending.probing -> "正在获取大小…"
+    pending.sizeBytes != null && pending.sizeBytes > 0 -> formatBytes(pending.sizeBytes)
+    else -> "大小未知"
+}
+
 /** 加载失败页。 */
 @Composable
-private fun ErrorScreen(
-    message: String,
+private fun ErrorScreen(    message: String,
     url: String,
     onRetry: () -> Unit,
     modifier: Modifier = Modifier,

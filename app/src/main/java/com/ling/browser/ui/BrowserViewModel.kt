@@ -15,12 +15,15 @@ import com.ling.browser.data.prefs.TabsHeight
 import com.ling.browser.util.UrlUtils
 import com.ling.browser.web.TabState
 import com.ling.browser.web.WebTabManager
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * 浏览器主界面的状态与业务逻辑。
@@ -223,18 +226,104 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
     // ------------------------------------------------------------ 下载
 
     /**
-     * 发起下载。
+     * 待确认的下载请求。
      *
-     * 文件名从 URL 末段推断；[WebTabManager.onDownloadRequested] 给不出
-     * 文件名，只能靠 URL（系统的 Content-Disposition 由 DownloadManager
-     * 自己解析，比我们可靠）。
+     * 网页触发下载时不直接开始，先交给 UI 弹确认框 —— 有些页面会自动
+     * 发起下载（弹窗广告、误触），静默落盘既费流量又让人措手不及。
+     * 用户确认后再调 [confirmPendingDownload]。
      */
-    fun enqueueDownload(url: String, mimeType: String?, fileName: String? = null) {
+    private val _pendingDownload = MutableStateFlow<PendingDownload?>(null)
+    val pendingDownload: StateFlow<PendingDownload?> = _pendingDownload.asStateFlow()
+
+    /**
+     * 网页请求下载：先摆出确认框，并尽力探测文件大小。
+     *
+     * 大小探测是「尽力而为」：发一个 HEAD 请求读 Content-Length。
+     * 很多站点不返回该响应头，或对 HEAD 直接 403/405，因此失败时
+     * 界面显示「大小未知」而不是报错 —— 不能因为探不到大小就不让下载。
+     */
+    fun requestDownload(url: String, mimeType: String?, fileName: String? = null) {
+        val name = fileName
+            ?: url.substringAfterLast('/').substringBefore('?').takeIf { it.isNotBlank() }
+            ?: "download"
+        _pendingDownload.value = PendingDownload(
+            url = url,
+            fileName = name,
+            mimeType = mimeType,
+            sizeBytes = null,
+            probing = true,
+        )
+
         viewModelScope.launch {
-            val ok = container.downloads.enqueue(url, fileName, mimeType)
+            val size = probeContentLength(url)
+            // 期间用户可能已经取消或确认了，只在仍是同一个请求时回填
+            _pendingDownload.update { cur ->
+                if (cur?.url == url) cur.copy(sizeBytes = size, probing = false) else cur
+            }
+        }
+    }
+
+    /** 用户确认下载。 */
+    fun confirmPendingDownload() {
+        val req = _pendingDownload.value ?: return
+        _pendingDownload.value = null
+        viewModelScope.launch {
+            val ok = container.downloads.enqueue(req.url, req.mimeType, req.fileName)
             _message.value = if (ok) "已开始下载" else "无法下载该文件"
         }
     }
+
+    /** 用户取消下载。 */
+    fun dismissPendingDownload() {
+        _pendingDownload.value = null
+    }
+
+    /**
+     * 尽力获取远端文件大小。失败返回 null（界面显示「大小未知」）。
+     *
+     * 用 HEAD 而非 GET：只取响应头，不下载正文，代价极小。
+     * 不用 DownloadManager 预检是因为它无法「只探测不下载」。
+     */
+    private suspend fun probeContentLength(url: String): Long? = withContext(Dispatchers.IO) {
+        runCatching {
+            val conn = (java.net.URL(url).openConnection() as java.net.HttpURLConnection).apply {
+                requestMethod = "HEAD"
+                connectTimeout = PROBE_TIMEOUT_MS
+                readTimeout = PROBE_TIMEOUT_MS
+                // 有些站点对无 UA 的请求直接拒绝
+                setRequestProperty("User-Agent", USER_AGENT)
+                instanceFollowRedirects = true
+            }
+            try {
+                // 部分站点不实现 HEAD，回退到 Range 请求只取 1 字节
+                if (conn.responseCode !in 200..299) {
+                    return@runCatching probeWithRange(url)
+                }
+                val len = conn.contentLengthLong
+                if (len > 0) len else probeWithRange(url)
+            } finally {
+                runCatching { conn.disconnect() }
+            }
+        }.getOrNull()
+    }
+
+    /** HEAD 不可用时的退路：Range: bytes=0-0，从 Content-Range 里读总大小。 */
+    private fun probeWithRange(url: String): Long? = runCatching {
+        val conn = (java.net.URL(url).openConnection() as java.net.HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = PROBE_TIMEOUT_MS
+            readTimeout = PROBE_TIMEOUT_MS
+            setRequestProperty("User-Agent", USER_AGENT)
+            setRequestProperty("Range", "bytes=0-0")
+        }
+        try {
+            // Content-Range: bytes 0-0/12345 → 取斜杠后的总大小
+            val range = conn.getHeaderField("Content-Range")
+            range?.substringAfterLast('/')?.trim()?.toLongOrNull()
+        } finally {
+            runCatching { conn.disconnect() }
+        }
+    }.getOrNull()
 
     fun cancelDownload(entry: DownloadEntry) {
         viewModelScope.launch {
@@ -363,3 +452,31 @@ data class Suggestion(
     val url: String,
     val kind: SuggestionKind,
 )
+
+/**
+ * 等待用户确认的下载。
+ *
+ * [sizeBytes] 为 null 表示探测失败或还没探完，界面据此显示「大小未知」
+ * 或「正在获取大小」。绝不因为探不到大小就阻止下载 —— 那会误伤一大批
+ * 不支持 HEAD 的站点。
+ */
+data class PendingDownload(
+    val url: String,
+    val fileName: String,
+    val mimeType: String?,
+    val sizeBytes: Long?,
+    val probing: Boolean,
+)
+
+/** 大小探测超时。设短一些：探测只是锦上添花，不该让确认框卡着不显示。 */
+private const val PROBE_TIMEOUT_MS = 4000
+
+/**
+ * 探测大小用的 UA。
+ *
+ * 用桌面版 UA 而不是应用自己的名字：部分站点对陌生 UA 返回 403，
+ * 而桌面 UA 的通过率最高，这里只关心响应头，不影响后续真实下载。
+ */
+private const val USER_AGENT =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+        "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
