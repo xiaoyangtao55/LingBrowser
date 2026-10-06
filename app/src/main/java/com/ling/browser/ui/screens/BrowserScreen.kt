@@ -110,6 +110,13 @@ fun BrowserScreen(
                 ViewGroup.LayoutParams.MATCH_PARENT,
             )
             setBackgroundColor(AndroidColor.TRANSPARENT)
+            // ⚠️ 必须显式打开可聚焦。FrameLayout 默认 `focusable = false`，
+            // 而 WebView 是被 addView 进来的**子 View**：父容器不可聚焦时，
+            // 触摸事件虽然能到 WebView，但焦点无法在 View 树里正常流转，
+            // 网页里的输入框就唤不起输入法（见 focusWebContent 的说明）。
+            isFocusable = true
+            isFocusableInTouchMode = true
+            descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
         }
     }
 
@@ -192,6 +199,9 @@ fun BrowserScreen(
             suggestions = suggestions,
             onTextChange = viewModel::onAddressChanged,
             onFocusChange = viewModel::onAddressFocusChanged,
+            // 焦点交还给网页内容。少了这一步，Compose 释放焦点后焦点悬空，
+            // 网页里的输入框唤不起输入法（真机实测确认）。
+            onReleaseFocus = { viewModel.tabManager.focusWebContent() },
             onSubmit = viewModel::submitAddress,
             onSuggestionClick = { s ->
                 viewModel.navigate(s.url)

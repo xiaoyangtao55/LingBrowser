@@ -36,6 +36,8 @@ def read(rel):
 SRC = "app/src/main/java/com/ling/browser"
 addr = read(f"{SRC}/ui/components/AddressBar.kt")
 vm = read(f"{SRC}/ui/BrowserViewModel.kt")
+browser_screen = read(f"{SRC}/ui/screens/BrowserScreen.kt")
+mgr = read(f"{SRC}/web/WebTabManager.kt")
 bm_screen = read(f"{SRC}/ui/screens/BookmarksScreen.kt")
 repo = read(f"{SRC}/data/repo/BookmarkRepository.kt")
 models = read(f"{SRC}/data/db/Models.kt")
@@ -44,44 +46,104 @@ fetcher = read(f"{SRC}/util/FaviconFetcher.kt")
 main = read(f"{SRC}/MainActivity.kt")
 
 # ---------- 1. 地址栏焦点 ----------
-print("1. 地址栏提交后必须真的释放焦点")
-if re.search(r"val releaseFocus[\s\S]{0,400}?focusManager\.clearFocus\(\)", addr):
-    ok("releaseFocus 调用了 clearFocus()（只改 isEditing 不够，光标会继续闪）")
-else:
-    bad("没有 clearFocus() —— 光标会继续闪且网页唤不起输入法")
+print("1. 地址栏交出焦点后必须把焦点还给网页")
+#
+# 这个问题修了两次才对，两版都记下来，因为**第一版的思路是错的**：
+#   第一版：只加 clearFocus() + keyboard.hide()
+#           -> 光标确实消失了，但网页输入框**依然**唤不起输入法（真机实测）
+#   第二版：clearFocus() 之后显式把焦点交给 WebView（focusWebContent）
+#           -> 这才是根因：Compose 释放焦点并不会让焦点回到 WebView，
+#              焦点只是"悬空"了，没有任何 View 持有它，IME 自然不弹。
+# 所以本节的检查重点从"有没有 clearFocus"改为"有没有把焦点还回去"。
 
-if re.search(r"val releaseFocus[\s\S]{0,400}?keyboard\?\.hide\(\)", addr):
-    ok("releaseFocus 收起了软键盘")
+if re.search(r"val releaseFocus[\s\S]{0,600}?focusManager\.clearFocus\(\)", addr):
+    ok("releaseFocus 调用了 clearFocus()")
 else:
-    bad("releaseFocus 未收起软键盘")
+    bad("没有 clearFocus()")
 
-if re.search(r"val releaseFocus[\s\S]{0,500}?onFocusChange\(false\)", addr):
-    ok("releaseFocus 同步了 ViewModel 状态（否则状态与真实焦点永久脱节）")
+if re.search(r"val releaseFocus[\s\S]{0,700}?onReleaseFocus\(\)", addr):
+    ok("releaseFocus 把焦点**交还**给网页（这才是根因；只 clearFocus 不够）")
 else:
-    bad("releaseFocus 未同步 onFocusChange(false)")
+    bad("releaseFocus 未交还焦点 —— 焦点悬空，网页输入框唤不起输入法")
 
-# 提交路径必须用 releaseFocus
-if re.search(r"onGo\s*=\s*\{[\s\S]{0,200}?onSubmit[\s\S]{0,200}?releaseFocus\(\)", addr):
-    ok("回车提交走 releaseFocus")
+if re.search(r"onReleaseFocus:\s*\(\)\s*->\s*Unit", addr):
+    ok("AddressBar 声明了 onReleaseFocus 回调")
 else:
-    bad("回车提交未释放焦点 —— 这正是上报的 bug")
+    bad("AddressBar 缺少 onReleaseFocus 参数")
 
-if re.search(r"onSuggestionClick\(s\)[\s\S]{0,120}?releaseFocus\(\)", addr):
-    ok("点联想项也释放焦点（与回车等价）")
+if re.search(r"onReleaseFocus\s*=\s*\{[\s\S]{0,160}?focusWebContent\(\)", browser_screen):
+    ok("调用方把 onReleaseFocus 接到了 focusWebContent")
 else:
-    bad("点联想项未释放焦点")
+    bad("onReleaseFocus 未接到 focusWebContent")
 
-# onFocusChange 必须真的被调用（历史上它是个从未被调用的死参数）
+# focusWebContent 本身
+if re.search(r"fun focusWebContent\(\)", mgr):
+    ok("WebTabManager 有 focusWebContent")
+else:
+    bad("缺少 focusWebContent")
+
+if re.search(r"fun focusWebContent[\s\S]{0,900}?container\?\.requestFocus\(\)", mgr):
+    ok("focusWebContent 让宿主 requestFocus")
+else:
+    bad("focusWebContent 未让宿主取回焦点")
+
+if re.search(r"fun focusWebContent[\s\S]{0,1100}?evaluateJavascript", mgr):
+    ok("focusWebContent 用 JS 把焦点下沉到网页内（View 层有焦点≠网页内有焦点）")
+else:
+    bad("focusWebContent 未把焦点下沉到网页")
+
+# 必须 post 到下一帧。
+# 用"函数体"而不是固定字符窗口：focusWebContent 里注释很长，
+# 写死 {0,1400} 会因为注释变长而漏判（先前就这么误报过一次）。
+m_fw = re.search(r"fun focusWebContent\(\)[\s\S]*?\n    \}", mgr)
+if not m_fw:
+    bad("找不到 focusWebContent 函数体")
+elif ".post(run)" in m_fw.group(0):
+    ok("focusWebContent 推迟到下一帧执行（同帧 requestFocus 可能被丢弃）")
+else:
+    bad("focusWebContent 未 post —— 与 clearFocus 同帧时可能失效")
+
+# 宿主可聚焦
+if re.search(r"FrameLayout\(context\)\.apply[\s\S]{0,700}?isFocusable = true", browser_screen):
+    ok("WebView 宿主 FrameLayout 显式可聚焦（默认 focusable=false）")
+else:
+    bad("宿主不可聚焦 —— WebView 拿不到焦点")
+
+if re.search(r"isFocusableInTouchMode = true", browser_screen):
+    ok("宿主开启 isFocusableInTouchMode（触摸模式下才可聚焦）")
+else:
+    bad("宿主未开启 isFocusableInTouchMode")
+
+# 第二道保险：点网页时取回焦点
+if re.search(r"setOnTouchListener \{[\s\S]{0,300}?v\.isFocused[\s\S]{0,120}?requestFocus", mgr):
+    ok("触摸网页时自动取回焦点（第二道保险）")
+else:
+    bad("缺少触摸取回焦点的保险")
+
+# 触摸监听必须只观察不消费，否则会吃掉滚动/点击
+if re.search(r"setOnTouchListener \{[\s\S]{0,400}?\n\s+false\s*\n", mgr):
+    ok("触摸监听返回 false（只观察不消费，不影响滚动与点击）")
+else:
+    bad("触摸监听可能消费了事件，会破坏网页滚动/点击")
+
+# 不能加会递归的焦点监听。
+# ⚠️ 必须先剔掉注释再判断：解释"为什么不这么做"的注释里也会同时出现
+# `setOnFocusChangeListener` 和 `focusWebContent`，直接匹配会误报（踩过）。
+mgr_code = re.sub(r"//.*$", "", mgr, flags=re.M)
+if re.search(r"setOnFocusChangeListener[\s\S]{0,200}?focusWebContent", mgr_code):
+    bad("WebView 上挂了 onFocusChange -> focusWebContent，会无限递归")
+else:
+    ok("未挂自递归的焦点监听")
+
 if re.search(r"\.onFocusChanged\s*\{[\s\S]{0,160}?onFocusChange\(", addr):
     ok("onFocusChanged 观察者已接到 onFocusChange（此前该参数从未被调用）")
 else:
-    bad("onFocusChange 仍未接入焦点观察者，编辑态只靠手动同步")
+    bad("onFocusChange 仍未接入焦点观察者")
 
-# 提交时地址栏文本要锁住，避免失焦回调读到尚未更新的 tab.url
 if re.search(r"fun submitAddress[\s\S]{0,700}?_addressText\.value\s*=\s*url", vm):
     ok("submitAddress 锁定地址栏文本（避免失焦回调用旧 url 把地址栏清空）")
 else:
-    bad("submitAddress 未锁定地址栏文本，可能出现回车后地址栏闪空")
+    bad("submitAddress 未锁定地址栏文本")
 
 # ---------- 2. 书签重命名与删除确认 ----------
 print("\n2. 书签的重命名与删除确认")

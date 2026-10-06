@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Bitmap
 import android.net.Uri
+import android.util.Log
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebStorage
@@ -70,6 +71,60 @@ class WebTabManager(private val context: Context) {
     fun detachHost(container: FrameLayout) {
         container.removeAllViews()
         if (host === container) host = null
+    }
+
+    /**
+     * 把输入焦点交还给网页内容。
+     *
+     * 为什么必须有这个方法：地址栏（Compose 的 `BasicTextField`）拿到焦点后，
+     * 光在它自己那边 `clearFocus()` 是**不够**的 —— Compose 释放焦点并不会
+     * 让焦点自动回到 WebView 上。结果是焦点悬空，用户点网页里的输入框时
+     * **软键盘弹不出来**（真机实测：地址栏输入后回车，之后网页输入框
+     * 一直唤不起输入法）。
+     *
+     * 必须显式 `requestFocus()` 交给宿主 View，并把焦点下沉到网页内部。
+     * 三步缺一不可：
+     *  1. 宿主要可聚焦（见 BrowserScreen 里 FrameLayout 的 isFocusable）
+     *  2. [host] 自己 requestFocus —— 让焦点回到这一层 View 树
+     *  3. `evaluateJavascript` 把焦点下沉到网页里的目标元素 ——
+     *     View 层拿到焦点不等于网页内的 input 拿到焦点，后者要 JS 帮忙
+     */
+    fun focusWebContent() {
+        val wv = webViews[_activeId.value] ?: return
+        val container = host
+        // 用 post 推迟到下一帧执行。
+        //
+        // 原因：本方法是在地址栏 `clearFocus()` 的**同一帧**里被调用的。
+        // Android 的焦点变化要等这一帧的 View 树遍历结束才生效，紧接着
+        // requestFocus 有可能被丢弃（表现为"偶尔管用、偶尔不管用"）。
+        // post 到下一帧时焦点释放已经落定，requestFocus 才是可靠的。
+        val run: () -> Unit = {
+            runCatching {
+                val okHost = container?.requestFocus() ?: false
+                val okWv = wv.requestFocus()
+                // 焦点问题在真机上排查过一次、走了弯路，因此留一条日志：
+                // 万一还有下次，`adb logcat -s LingFocus` 就能直接看到
+                // 每一步是否成功，不必再靠猜。
+                Log.d(
+                    TAG_FOCUS,
+                    "focusWebContent host=$okHost webview=$okWv " +
+                        "wvHasFocus=${wv.hasFocus()} hostHasFocus=${container?.hasFocus()}",
+                )
+                // 把焦点下沉到网页里。View 层拿到焦点**不等于**网页内的
+                // input 拿到焦点 —— 后者由 Blink 内部管理，要 JS 帮一把。
+                // 不这样做时，用户点输入框仍可能唤不起输入法。
+                wv.evaluateJavascript(
+                    "(function(){try{" +
+                        "var a=document.activeElement;" +
+                        "if(a&&(a.tagName==='INPUT'||a.tagName==='TEXTAREA'||a.isContentEditable))return;" +
+                        "document.body&&document.body.focus();" +
+                        "}catch(e){}})()",
+                    null,
+                )
+            }
+            Unit
+        }
+        if (container != null) container.post(run) else run()
     }
 
     /** 应用设置；已存在的 WebView 立即生效。 */
@@ -393,6 +448,27 @@ class WebTabManager(private val context: Context) {
         // 下面的回调 lambda 会在 apply 作用域**之外**执行，若没有这个名字，
         // 回调里想调 wv 自己的方法（如 injectDarkMode）就没有接收者可用。
         wv.apply {
+            // 让 WebView 自身可聚焦：地址栏交出焦点后要把焦点还给网页，
+            // 不可聚焦的 View 调 requestFocus() 是无效的。
+            //
+            // 刻意**不加** setOnFocusChangeListener -> focusWebContent：
+            // 那样会在 focusWebContent 里 requestFocus 时再次触发监听器，
+            // 形成无限递归。焦点归还由调用方显式触发（见 focusWebContent）。
+            isFocusable = true
+            isFocusableInTouchMode = true
+            // 触摸网页时自动取回焦点。
+            //
+            // 这是 focusWebContent 之外的第二道保险：用户完全可能用别的方式
+            // 把焦点弄丢（切标签、系统弹窗、返回手势……），只要他手指点在
+            // 网页上，就说明意图是"跟网页交互"，此时必须有焦点，
+            // 否则点输入框依然唤不起输入法。
+            //
+            // 用 setOnTouchListener **只观察不消费**（返回 false），
+            // 事件照常传给 WebView，不影响滚动与点击。
+            setOnTouchListener { v, _ ->
+                if (!v.isFocused) v.requestFocus()
+                false
+            }
             // 注意：在 LingWebView 的 apply 作用域里，裸写 `settings` 会解析成
             // WebView.settings（WebSettings），必须显式限定到本类的字段。
             applySettings(this@WebTabManager.settings, incognito)
@@ -532,5 +608,8 @@ class WebTabManager(private val context: Context) {
     companion object {
         /** 同时存活的 WebView 实例上限。Via 这类轻量浏览器也维持类似的少量实例。 */
         private const val MAX_WEBVIEWS = 6
+
+        /** 焦点问题排查用的日志标签：`adb logcat -s LingFocus`。 */
+        private const val TAG_FOCUS = "LingFocus"
     }
 }

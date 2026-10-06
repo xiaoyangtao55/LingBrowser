@@ -67,6 +67,8 @@ fun AddressBar(
     suggestions: List<Suggestion>,
     onTextChange: (String) -> Unit,
     onFocusChange: (Boolean) -> Unit,
+    /** 地址栏交出焦点后调用，用于把焦点还给网页内容。 */
+    onReleaseFocus: () -> Unit,
     onSubmit: (String) -> Unit,
     onSuggestionClick: (Suggestion) -> Unit,
     onReloadOrStop: () -> Unit,
@@ -94,23 +96,28 @@ fun AddressBar(
     }
 
     /**
-     * 提交后必须**真的**把焦点移走，只把 isEditing 置 false 是不够的。
+     * 提交后必须**真的**把焦点交还给网页。
      *
-     * 曾经的 bug：点回车后 ViewModel 把 `addressEditing` 置 false，
-     * 但 BasicTextField **物理上仍然持有焦点** —— 光标继续闪，
-     * 而且更严重的是**网页里的输入框唤不起输入法**：焦点还在
-     * 地址栏上，WebView 拿不到焦点，软键盘自然弹不出来。
+     * 曾经两次都没修对，记下来避免再走弯路：
      *
-     * 这里三件事缺一不可：
-     *   1. clearFocus()  —— 真正释放焦点，光标随之消失
-     *   2. keyboard?.hide() —— 收起软键盘
-     *   3. onFocusChange(false) —— 让 ViewModel 的状态与真实焦点了保持一致
-     *      （否则 isEditing 与实际的焦点状态会永久脱节）
+     * 第一版只把 `addressEditing` 置 false 并 `keyboard?.hide()` ——
+     * 光标继续闪，网页输入框唤不起输入法。
+     *
+     * 第二版加了 `focusManager.clearFocus()`，光标确实消失了，
+     * **但网页输入框依然唤不起输入法**（真机实测）。原因是：
+     * Compose 释放焦点并不会让焦点自动回到 WebView —— 焦点只是"消失了"，
+     * 没有任何 View 持有它。用户点网页输入框时，IME 认为没有可输入的焦点，
+     * 键盘就不弹。
+     *
+     * 所以必须**显式**把焦点交给 WebView（[onReleaseFocus] ->
+     * `WebTabManager.focusWebContent()`），四步缺一不可。
      */
     val releaseFocus: () -> Unit = {
         focusManager.clearFocus()
         keyboard?.hide()
         onFocusChange(false)
+        // 关键一步：把焦点还回去，否则焦点悬空、网页唤不起输入法
+        onReleaseFocus()
     }
 
     Column(modifier = modifier.fillMaxWidth()) {
