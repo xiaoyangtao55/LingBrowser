@@ -573,16 +573,15 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
             _message.value = when (result) {
                 // 用户自己能在设置里解决，所以要说清楚原因
                 is ReaderResult.Error ->
-                    if (result.reason == "js_disabled") {
-                        "阅读模式需要 JavaScript，请在设置中开启"
-                    } else {
-                        "无法进入阅读模式：${result.reason}"
+                    when (result.reason) {
+                        "js_disabled" -> "阅读模式需要 JavaScript，请在设置中开启"
+                        "page_loading" -> "页面还在加载，请稍候再试"
+                        else -> "无法进入阅读模式：${result.reason}"
                     }
                 is ReaderResult.NoContent ->
-                    if (result.reason == "already_reader") {
-                        "已在阅读模式"
-                    } else {
-                        "这个页面没有可提取的正文"
+                    when (result.reason) {
+                        "already_reader" -> "已在阅读模式"
+                        else -> "这个页面没有可提取的正文"
                     }
                 is ReaderResult.Ok -> null
             }

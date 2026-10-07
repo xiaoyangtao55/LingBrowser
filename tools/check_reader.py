@@ -626,6 +626,59 @@ if "UrlScheme.isNavigable" in mgr:
 else:
     bad("协议判定未抽到可测试的位置")
 
+# ---------- 8. shouldOverrideUrlLoading 的返回值语义 ----------
+#
+# 真机现象"知乎回答页一直闪"的根因就在这里：
+# 把 onExternalScheme 的返回值直接当 handleUri 的结果返回。
+# 系统没有能处理该协议的应用时它是 false，等于告诉 WebView
+# "你来加载" —— WebView 不认识 zhihu://，渲染 ERR_UNKNOWN_URL_SCHEME，
+# 页面反复发起该导航就一直在"尝试加载 → 报错"之间循环。
+print("\n8. 外部协议接管（'一直闪'的根因）")
+
+client = read("web/LingWebViewClient.kt")
+
+# 绝不能出现 `else -> onExternalScheme(uri)` 这种直接返回外部结果的写法
+if re.search(r"else\s*->\s*onExternalScheme\(uri\)", client):
+    bad("handleUri 直接返回外部处理结果 —— 失败时会放行给 WebView，报 ERR_UNKNOWN_URL_SCHEME")
+else:
+    ok("handleUri 没有直接返回外部处理结果")
+
+if re.search(r"onExternalScheme\(uri\)\s*\n\s*return true", client):
+    ok("外部协议一律接管（无论系统能否打开）")
+else:
+    bad("外部协议未无条件接管 —— 打不开时会白屏或一直闪")
+
+if re.search(r"if \(!UrlScheme\.shouldTakeOver\(uri\.toString\(\)\)\) return false", client):
+    ok("接管判定走 UrlScheme.shouldTakeOver（可单测）")
+else:
+    bad("接管判定没走 UrlScheme，无法单测")
+
+# ⚠️ 必须先剥掉 // 注释再找：源码里那句 `// intent:// 必须走 Intent.parseUri…`
+# 注释本身就含这个字符串，直接 in 判断会被注释骗过 ——
+# 把真正的调用删掉、只留注释，检查照样通过（踩过）。
+screen_code = re.sub(r"//[^\n]*", "", screen)
+if re.search(r"Intent\.parseUri\(uri\.toString\(\), 0\)", screen_code):
+    ok("intent:// 走 Intent.parseUri（ACTION_VIEW 包 intent: 地址没有应用能接）")
+else:
+    bad("intent:// 未特殊处理，会静默失败（点了没反应）")
+
+# 未加载完就提取会拿到半成品 DOM
+if re.search(r"fun enterReaderMode[\s\S]{0,2200}?tab\.isLoading \|\| wv\.progress < 100", mgr):
+    ok("页面未加载完时拒绝进入阅读模式（否则提取到半成品 DOM）")
+else:
+    bad("未检查加载状态 —— 加载中进阅读模式会拿到残缺正文，且 canonical 还没解析到")
+
+if "page_loading" in vm:
+    ok("'页面还在加载' 有对用户可见的提示文案")
+else:
+    bad("加载中进入阅读模式没有提示，用户不知道为什么没反应")
+
+# 异步提取回来时用户可能已经切走
+if re.search(r"if \(_activeId\.value != id\) return@evaluateJavascript", mgr):
+    ok("提取回调校验标签未切换（否则会把 A 页正文渲染到 B 页）")
+else:
+    bad("提取回调未校验标签，切页后可能把旧正文渲染到新页面")
+
 if re.search(r"fun exitReaderMode\(\)[\s\S]{0,900}?isNavigable\(cached\.url\)", mgr):
     ok("退出阅读模式前先校验原文地址可加载性")
 else:

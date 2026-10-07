@@ -43,6 +43,21 @@ object UrlScheme {
     }
 
     /**
+     * `shouldOverrideUrlLoading` 该不该**接管**这次导航。
+     *
+     * 返回 true 表示"我处理了，WebView 别管"；false 表示"交给 WebView 加载"。
+     *
+     * 这里最容易犯的错是把外部处理的结果直接当返回值：
+     * `else -> onExternalScheme(uri)`。系统没有能处理该协议的应用时它返回
+     * false，WebView 于是去加载 `zhihu://...`，直接得到
+     * `net::ERR_UNKNOWN_URL_SCHEME`；若页面反复发起该导航，就会**一直闪**。
+     *
+     * 正确语义是：非可加载协议**一律接管** —— 系统能打开就打开，
+     * 打不开就安静地什么也不做。后者远好于渲染一个必然失败的错误页。
+     */
+    fun shouldTakeOver(url: String): Boolean = !isNavigable(url)
+
+    /**
      * 取出小写的 scheme，取不到返回 null。
      *
      * 必须小写归一：`Uri.parse` 与浏览器地址栏都保留用户输入的大小写，

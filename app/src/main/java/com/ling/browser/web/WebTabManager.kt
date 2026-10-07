@@ -372,10 +372,25 @@ class WebTabManager(private val context: Context) {
             onResult(ReaderResult.Error("js_disabled"))
             return
         }
+        // 页面还没加载完就提取，会拿半成品 DOM：正文可能只有一半，
+        // canonical / og:url 往往还没解析到（于是原文地址退回 location.href，
+        // 又回到自定义协议的老问题）。这种情况让用户稍等再点，
+        // 比渲染出一个残缺页面（或直接失败）体验更好。
+        //
+        // 判据用 TabState.isLoading 与 wv.progress 双保险：
+        // isLoading 在部分站点可能因为跳转时序提前变 false，
+        // 而 progress 是 WebView 自己报的、更贴近真实渲染进度。
+        if (tab.isLoading || wv.progress < 100) {
+            onResult(ReaderResult.Error("page_loading"))
+            return
+        }
 
         wv.evaluateJavascript(ReaderExtractorJs.SCRIPT) { raw ->
             when (val result = ReaderResult.parse(raw)) {
                 is ReaderResult.Ok -> {
+                    // 提取是异步的，回来时用户可能已经切走或又加载了新页面。
+                    // 不做这个校验就会把 A 页面的正文渲染到 B 页面上。
+                    if (_activeId.value != id) return@evaluateJavascript
                     readerContent[id] = result
                     renderReader(id, result)
                 }

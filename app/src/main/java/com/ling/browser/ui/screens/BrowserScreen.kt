@@ -128,16 +128,22 @@ fun BrowserScreen(
         onDispose { viewModel.tabManager.detachHost(host) }
     }
 
-    // 外部协议（tel: / mailto: / intent: …）交给系统
+    // 外部协议（zhihu: / weixin: / tel: / mailto: / intent: …）交给系统
     LaunchedEffect(Unit) {
         viewModel.tabManager.onExternalUri = { uri ->
             runCatching {
-                context.startActivity(
+                // intent:// 必须走 Intent.parseUri 才能还原成目标 Intent，
+                // 直接 ACTION_VIEW 包一个 intent: 地址是没有应用能接的
+                // （会静默失败，用户看到"点了没反应"）。
+                val intent = if (uri.scheme.equals("intent", ignoreCase = true)) {
+                    android.content.Intent.parseUri(uri.toString(), 0)
+                } else {
                     android.content.Intent(android.content.Intent.ACTION_VIEW, uri)
-                        .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-                )
+                }
+                intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                context.startActivity(intent)
                 true
-            }.getOrDefault(false)
+            }.getOrElse { false }
         }
         viewModel.tabManager.onDownloadRequested = { url, mimeType ->
             // 文件名交给 DownloadManager 从 Content-Disposition 推断

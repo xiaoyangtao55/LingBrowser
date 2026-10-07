@@ -107,14 +107,27 @@ class LingWebViewClient(
     }
 
     private fun handleUri(view: WebView?, uri: Uri): Boolean {
+        // 判定统一走 UrlScheme：那是一条纯粹的字符串规则（可否交给 WebView 加载），
+        // 抽出去之后能被单元测试完整覆盖。
+        if (!UrlScheme.shouldTakeOver(uri.toString())) return false
+
+        // 走到这里就是"WebView 加载不了、必须由我们接管"的协议。
         val scheme = uri.scheme?.lowercase().orEmpty()
-        return when (scheme) {
-            // 站内导航交给 WebView 自己处理
-            "http", "https", "file", "about", "data", "blob" -> false
-            // 内置主页：原生渲染，不交给系统（否则会被当成未知协议报错）
-            "ling" -> false
-            // 其余交给系统（tel: mailto: intent: 等）
-            else -> onExternalScheme(uri)
+        if (scheme == "ling") {
+            // 内置主页与阅读视图：原生渲染，不交给系统
+            // （否则会被系统当成未知协议，弹一个"没有应用可打开"）。
+            return true
         }
+
+        // 其余（zhihu: / weixin: / tel: / mailto: / intent: …）尝试交给系统。
+        //
+        // ⚠️ 关键点：无论外部是否成功，这里都必须返回 true，**不能**把
+        // onExternalScheme 的结果直接返回。返回 false 等于告诉 WebView
+        // "我没处理，你来加载" —— 而 WebView 不认识这些协议，结果是
+        // `net::ERR_UNKNOWN_URL_SCHEME` 错误页；若页面反复发起该导航，
+        // 就会在"尝试加载 → 报错"之间反复，表现为**一直闪**。
+        // 系统打不开时宁可安静地什么都不做。
+        onExternalScheme(uri)
+        return true
     }
 }

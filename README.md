@@ -575,6 +575,51 @@ net::ERR_UNKNOWN_URL_SCHEME
 > 协议判定抽到了 [UrlScheme.kt](<app/src/main/java/com/ling/browser/web/UrlScheme.kt>)，
 > 因为留在 `WebTabManager` 里就得构造 WebView/Context 才能测，实际等于测不了。
 
+#### `shouldOverrideUrlLoading` 的返回值语义（"一直闪"的根因）
+
+App 内嵌页里的自定义协议导航，`handleUri` 原本写成：
+
+```kotlin
+else -> onExternalScheme(uri)   // ← 错
+```
+
+`onExternalScheme` 在系统没有能处理该协议的应用时返回 `false`，而
+**`shouldOverrideUrlLoading` 返回 `false` 的意思是"我没处理，WebView 你来加载"**。
+于是 WebView 去加载 `zhihu://...`，得到 `net::ERR_UNKNOWN_URL_SCHEME`；
+页面若反复发起同一次导航，就在"尝试加载 → 报错"之间循环 ——
+真机上表现就是**回答页一直闪**。
+
+正确写法是**无条件接管**：
+
+```kotlin
+if (!UrlScheme.shouldTakeOver(uri.toString())) return false
+if (scheme == "ling") return true
+onExternalScheme(uri)
+return true   // 系统能打开就打开，打不开就安静地什么都不做
+```
+
+系统打不开时"什么也不发生"，远好于渲染一个必然失败的错误页。
+
+顺带修了 `intent://`：它必须走 `Intent.parseUri` 还原成目标 Intent，
+直接 `ACTION_VIEW` 包一个 `intent:` 地址是没有应用能接的，会**静默失败**
+（用户看到"点了没反应"）。
+
+#### 页面没加载完就进阅读模式
+
+真机上"回答页加载完成前开阅读模式"会出问题，原因有两个：
+
+- 提取脚本跑在**半成品 DOM** 上，正文可能只有一半；
+- `canonical` / `og:url` 往往还没解析到，于是原文地址退回 `location.href`，
+  又绕回自定义协议那个坑。
+
+所以 `enterReaderMode` 现在用 `TabState.isLoading || wv.progress < 100`
+双重判据拦住，并给出"页面还在加载，请稍候再试"。用两个判据是因为
+`isLoading` 在部分站点会因跳转时序提前变 `false`，而 `progress` 是
+WebView 自己报的、更贴近真实渲染进度。
+
+另外提取是**异步**的，回调回来时用户可能已经切走，因此加了
+`_activeId != id` 校验 —— 否则会把 A 页的正文渲染到 B 页上。
+
 #### 分层与三个现实约束
 
 正文提取必须注入 JS 到原页面执行（DOM 只在那边），渲染则回到原生侧生成
@@ -906,7 +951,7 @@ python tools/preview_launcher_png.py mipmap-xxxhdpi  # 预览启动图标
 | 项目 | 结果 |
 |---|---|
 | `:app:assembleDebug` | ✅ 通过（图标改版后重新验证） |
-| `:app:testDebugUnitTest` | ✅ **195 个用例全部通过**（`UrlUtilsTest` 20 / `FaviconFetcherTest` 12 / `ReaderPageTest` 20 / `ReaderResultTest` 15 / `UrlSchemeTest` 13 / `HomePageTest` 19 / `TabOrderTest` 15 / `BookmarkFolderTest` 14 / `LingSettingsTest` 14 / `LauncherIconTest` 12 / `LingIconsTest` 11 / `DownloadTest` 10 / `SessionSnapshotTest` 9 / `TabInitialTest` 6 / `PendingDownloadTest` 5） |
+| `:app:testDebugUnitTest` | ✅ **200 个用例全部通过**（`UrlUtilsTest` 20 / `FaviconFetcherTest` 12 / `ReaderPageTest` 20 / `ReaderResultTest` 15 / `UrlSchemeTest` 18 / `HomePageTest` 19 / `TabOrderTest` 15 / `BookmarkFolderTest` 14 / `LingSettingsTest` 14 / `LauncherIconTest` 12 / `LingIconsTest` 11 / `DownloadTest` 10 / `SessionSnapshotTest` 9 / `TabInitialTest` 6 / `PendingDownloadTest` 5） |
 | `:app:assembleRelease`（R8 压缩） | ✅ 通过，产物 1.4 MB（图标改版前） |
 | APK 签名校验 | ✅ v1 + v2 方案均通过 |
 | 真机安装（Xiaomi MI 8 / Android 14） | ✅ `adb install` 成功 |

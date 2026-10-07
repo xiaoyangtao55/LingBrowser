@@ -136,4 +136,73 @@ class UrlSchemeTest {
             )
         }
     }
+
+    // --------------------------------------------- 导航接管判定
+    //
+    // 这一组对应真机现象"知乎回答页一直闪"。
+    //
+    // 根因：handleUri 原本把 onExternalScheme 的返回值直接当结果返回。
+    // 系统没有能处理 zhihu:// 的应用时它返回 false，等于告诉 WebView
+    // "你来加载" —— WebView 不认识该协议，于是渲染
+    // net::ERR_UNKNOWN_URL_SCHEME 错误页；页面若反复发起该导航，
+    // 就在"尝试加载 → 报错"之间循环，表现为一直闪。
+    //
+    // 正确语义：WebView 加载不了的协议**一律由我们接管**（返回 true），
+    // 系统能打开就打开，打不开就安静地什么都不做。
+
+    @Test
+    fun `可加载协议不接管`() {
+        // 返回 false = 交给 WebView 自己加载，这才是站内导航该走的路
+        for (u in listOf("https://zhihu.com/a/1", "http://example.com", HomePage.URL, ReaderPage.URL)) {
+            assertFalse("$u 应交给 WebView 加载", UrlScheme.shouldTakeOver(u))
+        }
+    }
+
+    @Test
+    fun `App 自定义协议必须接管`() {
+        // 这几种若返回 false，WebView 会去加载它们并报
+        // ERR_UNKNOWN_URL_SCHEME（就是"一直闪"的来源）
+        for (u in listOf(
+            "zhihu://answers/2090101772673085808?mcid=c58f0c59",
+            "weixin://dl/business/?t=abc",
+            "alipays://platformapi/startapp?appId=1",
+            "sinaweibo://detail?mblogid=1",
+        )) {
+            assertTrue(
+                "$u 必须被接管，否则 WebView 会报 ERR_UNKNOWN_URL_SCHEME",
+                UrlScheme.shouldTakeOver(u),
+            )
+        }
+    }
+
+    @Test
+    fun `系统级协议必须接管`() {
+        for (u in listOf("tel:10086", "mailto:a@b.com", "sms:10086", "intent://x#Intent;end")) {
+            assertTrue("$u 必须被接管", UrlScheme.shouldTakeOver(u))
+        }
+    }
+
+    @Test
+    fun `无 scheme 的输入必须接管`() {
+        // 让 WebView 去猜是危险的
+        for (u in listOf("example.com", "这不是地址", "", "   ")) {
+            assertTrue("'$u' 必须被接管", UrlScheme.shouldTakeOver(u))
+        }
+    }
+
+    @Test
+    fun `接管判定与可加载判定严格互补`() {
+        // 两者必须互补：任何输入要么交给 WebView、要么我们接管，不能都不做
+        // （都不做 = 点了没反应），也不能都做（争抢同一次导航）。
+        for (u in listOf(
+            "https://a.com", "http://b.com", "zhihu://answers/1", "tel:10086",
+            "intent://x#Intent;end", "ling://home", "ling://reader",
+            "example.com", "", "   ", "这不是地址", "HTTPS://C.COM", "ZHIHU://x",
+        )) {
+            assertTrue(
+                "'$u' 的接管与可加载判定不互补",
+                UrlScheme.shouldTakeOver(u) != UrlScheme.isNavigable(u),
+            )
+        }
+    }
 }
