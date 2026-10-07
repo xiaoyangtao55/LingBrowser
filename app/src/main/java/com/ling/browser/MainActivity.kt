@@ -27,6 +27,7 @@ import com.ling.browser.data.prefs.NightMode
 import com.ling.browser.ui.BrowserViewModel
 import com.ling.browser.ui.screens.AdBlockRulesScreen
 import com.ling.browser.ui.screens.BookmarksScreen
+import com.ling.browser.ui.screens.SniffedResourcesScreen
 import com.ling.browser.ui.screens.BrowserScreen
 import com.ling.browser.ui.screens.DownloadsScreen
 import com.ling.browser.ui.screens.HistoryScreen
@@ -162,6 +163,7 @@ private fun LingApp(viewModel: BrowserViewModel) {
             onOpenHistory = { push(Route.History) },
             onOpenDownloads = { push(Route.Downloads) },
             onOpenSettings = { push(Route.Settings) },
+            onOpenSniff = { push(Route.SniffedResources) },
             canHandleBack = !hasOverlay,
         )
 
@@ -261,6 +263,16 @@ private fun LingApp(viewModel: BrowserViewModel) {
                 onRemove = viewModel::removeAdBlockRule,
                 onBack = pop,
             )
+
+            Route.SniffedResources -> {
+                val sniff by viewModel.sniffResults.collectAsStateWithLifecycle()
+                SniffedResourcesScreen(
+                    result = sniff,
+                    onOpen = { url -> viewModel.openInNewTab(url) },
+                    onDownload = viewModel::downloadResource,
+                    onBack = pop,
+                )
+            }
         }
     }
 }
@@ -273,6 +285,7 @@ private sealed interface Route {
     data object Downloads : Route
     data object Settings : Route
     data object AdBlockRules : Route
+    data object SniffedResources : Route
 }
 
 /**

@@ -18,6 +18,7 @@ import com.ling.browser.util.FaviconFetcher
 import com.ling.browser.util.UrlUtils
 import com.ling.browser.web.ReaderPage
 import com.ling.browser.web.ReaderResult
+import com.ling.browser.web.SniffResult
 import com.ling.browser.web.TabState
 import com.ling.browser.web.WebTabManager
 import kotlinx.coroutines.CoroutineScope
@@ -649,6 +650,55 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
         // 上面那行是异步落盘的，此刻 settings 里还是旧值，
         // 读它会导致"改了字号没反应，要再点一次才生效"。
         tabManager.refreshReaderFontSize(size)
+    }
+
+    /**
+     * 资源嗅探结果。用 StateFlow 承载，二级页 `SniffedResourcesScreen`
+     * collect 它来展示；嗅探是"读 DOM 拿结果"，不改变当前页面，
+     * 因此结果是一次性的快照，进入二级页前触发即可。
+     */
+    private val _sniffResults = MutableStateFlow<SniffResult>(SniffResult.Ok(emptyList()))
+    val sniffResults: StateFlow<SniffResult> = _sniffResults.asStateFlow()
+
+    /**
+     * 触发资源嗅探。
+     *
+     * 成功时把结果写进 [_sniffResults]（UI 已通过路由进入二级页，
+     * 拿到结果后自行展示）；失败时走 [_message] 提示。
+     */
+    fun sniffResources() {
+        tabManager.sniffResources { result ->
+            when (result) {
+                is SniffResult.Ok -> _sniffResults.value = result
+                is SniffResult.Error ->
+                    _message.value = when (result.reason) {
+                        "js_disabled" -> "资源嗅探需要 JavaScript，请在设置中开启"
+                        "page_loading" -> "页面还在加载，请稍候再试"
+                        "internal_page" -> "内置页没有可嗅探的媒体资源"
+                        else -> "嗅探失败：${result.reason}"
+                    }
+            }
+        }
+    }
+
+    /** 清空嗅探结果（退出二级页时调用，避免旧结果残留）。 */
+    fun clearSniffResults() {
+        _sniffResults.value = SniffResult.Ok(emptyList())
+    }
+
+    /**
+     * 直接下载嗅探到的资源。
+     *
+     * 与网页触发的下载不同：这里用户**已经明确点了「下载」按钮**，
+     * 再弹一次确认框是多余的。直接入队，失败时提示。
+     */
+    fun downloadResource(url: String) {
+        val name = url.substringAfterLast('/').substringBefore('?')
+            .takeIf { it.isNotBlank() } ?: "download"
+        viewModelScope.launch {
+            val ok = container.downloads.enqueue(url, null, name)
+            _message.value = if (ok) "已开始下载" else "无法下载该资源"
+        }
     }
 
     private fun io(block: suspend () -> Unit) {

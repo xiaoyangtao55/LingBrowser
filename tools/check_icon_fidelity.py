@@ -55,6 +55,7 @@ MAPPING = [
     ("Settings", "settings"),
     ("Article", "article"),
     ("Block", "block"),
+    ("Movie", "movie"),
 ]
 
 NUM = re.compile(r"-?\d+(?:\.\d+)?")

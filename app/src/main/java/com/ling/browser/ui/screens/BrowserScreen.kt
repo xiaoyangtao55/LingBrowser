@@ -74,6 +74,7 @@ fun BrowserScreen(
     onOpenHistory: () -> Unit,
     onOpenDownloads: () -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenSniff: () -> Unit,
     /**
      * 本页是否接管返回键。
      *
@@ -387,6 +388,17 @@ fun BrowserScreen(
                 leadingIcon = { Icon(LingIcons.Article, contentDescription = null) },
                 onClick = {
                     viewModel.toggleReaderMode()
+                    showMoreMenu = false
+                },
+            )
+            // 资源嗅探：先触发嗅探（写结果），再进二级页展示。
+            // 嗅探是异步的，但页面会 collect sniffResults，结果回来后自动刷新。
+            DropdownMenuItem(
+                text = { Text("资源嗅探") },
+                leadingIcon = { Icon(LingIcons.Movie, contentDescription = null) },
+                onClick = {
+                    viewModel.sniffResources()
+                    onOpenSniff()
                     showMoreMenu = false
                 },
             )

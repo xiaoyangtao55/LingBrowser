@@ -94,11 +94,12 @@ class LingIconsTest {
         "Settings" to LingIcons.Settings,
         "Article" to LingIcons.Article,
         "Block" to LingIcons.Block,
+        "Movie" to LingIcons.Movie,
     )
 
     @Test
     fun `图标集完整`() {
-        assertEquals("图标数量发生变化时请同步更新本测试", 29, allIcons.size)
+        assertEquals("图标数量发生变化时请同步更新本测试", 30, allIcons.size)
     }
 
     @Test

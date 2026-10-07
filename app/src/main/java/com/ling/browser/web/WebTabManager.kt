@@ -400,6 +400,42 @@ class WebTabManager(private val context: Context) {
     }
 
     /**
+     * 嗅探当前页面的媒体资源（视频/音频/图片/可下载文件）。
+     *
+     * 与阅读模式同一套注入套路：`evaluateJavascript` 跑 [ResourceSnifferJs.SCRIPT]，
+     * 回调里解析结构化结果。三个边界与 enterReaderMode 相同：
+     *   - JS 关闭 → Error("js_disabled")，用户能自己去打开
+     *   - 页面未加载完 → Error("page_loading")，提示稍候
+     *   - 回调回来时用户可能已切走 → 丢弃（不校验会把 A 页结果挂到 B 页）
+     *
+     * 与阅读模式不同：嗅探**不改变当前页面**，只是读 DOM 拿结果，
+     * 因此不需要缓存、不需要"退出"路径，结果直接交给 UI 展示。
+     */
+    fun sniffResources(onResult: (SniffResult) -> Unit = {}) {
+        val id = _activeId.value
+        val wv = webViews[id] ?: return
+        val tab = _tabs.value.firstOrNull { it.id == id } ?: return
+
+        if (HomePage.isHomeUrl(wv.url) || ReaderPage.isReaderUrl(wv.url)) {
+            onResult(SniffResult.Error("internal_page"))
+            return
+        }
+        if (!settings.javaScriptEnabled) {
+            onResult(SniffResult.Error("js_disabled"))
+            return
+        }
+        if (tab.isLoading || wv.progress < 100) {
+            onResult(SniffResult.Error("page_loading"))
+            return
+        }
+
+        wv.evaluateJavascript(ResourceSnifferJs.SCRIPT) { raw ->
+            if (_activeId.value != id) return@evaluateJavascript
+            onResult(SniffResult.parse(raw))
+        }
+    }
+
+    /**
      * 用阅读视图替换当前页面。
      *
      * 与主页一样用 loadDataWithBaseURL：自包含、不联网、主题色由原生注入。

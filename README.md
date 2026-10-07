@@ -22,6 +22,7 @@
 | 智能地址栏 | 自动区分「网址」与「搜索词」；聚焦时全选，输入时给出书签/历史联想 |
 | 书签 | 一键收藏/取消，独立管理页；支持**网站图标**、重命名、删除确认、单层文件夹归档 |
 | 阅读模式 | **正文提取**（Readability 算法 + 中文适配），去除广告/导航/评论区；可调四档字号，明暗跟随夜间模式与动态取色 |
+| 资源嗅探 | 注入 JS 扫描 DOM，抓取视频/音频/图片/可下载文件；结果二级页按类型分组，可打开或直接下载 |
 | 历史记录 | 自动去重 + 次数累加，按「今天/昨天/更早」分组，支持单条删除与清空 |
 | 无痕模式 | 独立标签页；不写历史、关闭 DOM storage 与 Cookie |
 | 前进/后退/刷新/停止 | 刷新常驻在地址栏右侧；底部工具栏保留前进/后退/主页/标签页/更多 |
@@ -784,6 +785,28 @@ JS 是**字符串常量**嵌在 Kotlin 里，Kotlin 编译器完全不检查它 
 
 自定义规则同样走 **lambda 现读**，改完立即生效。
 
+### 3.9 资源嗅探：注入 JS 读 DOM，不改页面
+
+与阅读模式同一套注入套路（`evaluateJavascript` 跑一段字符串脚本），但语义
+相反：阅读模式**改造**页面（提取正文替换视图），嗅探**只读** DOM —— 拿到
+结果就走，不碰当前页面，因此没有"进入/退出"状态、也不需要缓存。
+
+几个设计点：
+
+1. **为什么必须用 JS 而非解析 HTML**：DOM 只在 WebView 那边，且很多站是
+   JS 动态渲染的，静态 HTML 里根本没有 `<video>` 标签。必须等页面加载完、
+   DOM 就绪后从**活的 DOM**里读。
+2. **相对地址要解析成绝对地址**（`new URL(src, baseURI)`），否则列表里
+   一堆 `/media/clip.mp4`，既不能打开也不能下载。base 优先用 `document.baseURI`
+   而非 `location.href` —— 这与阅读模式修 `ERR_UNKNOWN_URL_SCHEME` 是同一个坑。
+3. **剔除 data: 与 1x1 占位图**：很多站用 1x1 gif 当 tracking pixel，
+   不筛掉会刷出一堆无意义的"图片"。
+4. **结果解析继续手写迷你解析器**（`SniffResult`）：嗅探返回的是**数组**，
+   比阅读模式的扁平对象复杂，但 `org.json` 在本地 JVM 单测里是空壳（抛
+   `Stub!`），所以照旧手写——顺带把"括号不配对返回 null"这类边界也测到了。
+5. **下载动作不走确认框**：与网页触发的下载不同，用户已经明确点了「下载」，
+   再弹确认是多余的，直接入队。
+
 ### 4. 主页由 WebView 渲染，不用 Compose 覆盖层
 早期实现把主页做成 Compose 覆盖层（`HomeScreen`），有两个问题：主页不进入
 前进/后退历史；且切页时 `AndroidView` 会被销毁重建，打断正在加载的页面。
@@ -1037,7 +1060,7 @@ python tools/preview_launcher_png.py mipmap-xxxhdpi  # 预览启动图标
 | 项目 | 结果 |
 |---|---|
 | `:app:assembleDebug` | ✅ 通过（图标改版后重新验证） |
-| `:app:testDebugUnitTest` | ✅ **219 个用例全部通过**（`UrlUtilsTest` 20 / `FaviconFetcherTest` 12 / `ReaderPageTest` 20 / `ReaderResultTest` 15 / `UrlSchemeTest` 18 / `AdBlockerTest` 16 / `HomePageTest` 19 / `TabOrderTest` 15 / `BookmarkFolderTest` 14 / `LingSettingsTest` 17 / `LauncherIconTest` 12 / `LingIconsTest` 11 / `DownloadTest` 10 / `SessionSnapshotTest` 9 / `TabInitialTest` 6 / `PendingDownloadTest` 5） |
+| `:app:testDebugUnitTest` | ✅ **231 个用例全部通过**（`UrlUtilsTest` 20 / `FaviconFetcherTest` 12 / `ReaderPageTest` 20 / `ReaderResultTest` 15 / `UrlSchemeTest` 18 / `AdBlockerTest` 16 / `SniffResultTest` 12 / `HomePageTest` 19 / `TabOrderTest` 15 / `BookmarkFolderTest` 14 / `LingSettingsTest` 17 / `LauncherIconTest` 12 / `LingIconsTest` 11 / `DownloadTest` 10 / `SessionSnapshotTest` 9 / `TabInitialTest` 6 / `PendingDownloadTest` 5） |
 | `:app:assembleRelease`（R8 压缩） | ✅ 通过，产物 1.4 MB（图标改版前） |
 | APK 签名校验 | ✅ v1 + v2 方案均通过 |
 | 真机安装（Xiaomi MI 8 / Android 14） | ✅ `adb install` 成功 |
@@ -1132,8 +1155,7 @@ hello world                -> 必应搜索（默认引擎）
 
 参照 Via 的完整能力，以下功能尚未实现，按优先级排列：
 
-1. **资源嗅探** —— 注入 JS 扫描页面媒体链接，抓取视频/音频/图片
-2. **插件脚本扩展** —— 用户脚本注入机制
+1. **插件脚本扩展** —— 用户脚本注入机制
 
 ### 已完成的清单（原「后续方向」）
 
@@ -1146,6 +1168,7 @@ hello world                -> 必应搜索（默认引擎）
 | 书签网站图标 | 按 URL 自行抓取 `/favicon.ico`；存压缩字节而非 `Bitmap` |
 | 阅读模式 | 移植 Readability 打分算法（<11 KB）+ **中文阈值适配**；可调四档字号 |
 | 广告拦截 | `shouldInterceptRequest` 资源级拦截，域名黑名单 + 路径关键字；抽 `AdBlocker` 纯 Kotlin 可单测；主文档保护；默认开；**支持自定义域名规则（二级菜单增删）** |
+| 资源嗅探 | 注入 JS 扫描 DOM，抓视频/音频/图片/下载链接；结果二级页分组展示，可打开或下载 |
 | 外部链接开关 | 非 http(s) 链接是否交给外部 App，**默认关**（本机没装该 App 时更稳定） |
 
 > 早先下载的 8 个未使用官方图标（`help` / `language` / `license` / `menu` 等）

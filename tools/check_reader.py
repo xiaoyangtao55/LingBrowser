@@ -874,6 +874,183 @@ if "fun AdBlockRulesScreen(" in rules_screen and "onAdd" in rules_screen and "on
 else:
     bad("AdBlockRulesScreen 能力不全（缺增或删）")
 
+# ---------- 10.2 资源嗅探 ----------
+print("\n10.2 资源嗅探")
+
+sniffer_kt = read("web/ResourceSnifferJs.kt")
+sniff_screen = read("ui/screens/SniffedResourcesScreen.kt")
+
+# JS 常量与执行
+if "ResourceSnifferJs.SCRIPT" in mgr and "evaluateJavascript" in mgr:
+    ok("WebTabManager 真的执行了嗅探脚本")
+else:
+    bad("嗅探脚本没有被执行 —— 资源嗅探永远拿不到结果")
+
+# 结果解析委托给 SniffResult（可单测）
+if "SniffResult.parse(raw)" in mgr:
+    ok("嗅探结果委托给 SniffResult.parse（可单测）")
+else:
+    bad("嗅探结果未委托 SniffResult —— 无法单测解析逻辑")
+
+# ViewModel 状态与触发
+if "_sniffResults" in vm and "fun sniffResources()" in vm:
+    ok("ViewModel 有嗅探状态与触发入口")
+else:
+    bad("ViewModel 缺少嗅探状态或触发入口")
+
+# 菜单入口 + 二级页
+# 只查"资源嗅探"字符串不够：注释里也含这个词，会漏掉"菜单项被删"的回归。
+# 必须确认菜单项本身（Text("资源嗅探") + 触发嗅探）还在。
+if 'text = { Text("资源嗅探") }' in screen and "viewModel.sniffResources()" in screen \
+        and "onOpenSniff" in screen:
+    ok("浏览器菜单有「资源嗅探」入口（菜单项 + 触发 + 跳转）")
+else:
+    bad("浏览器菜单缺少资源嗅探入口")
+
+if "Route.SniffedResources" in activity and "SniffedResourcesScreen(" in activity:
+    ok("SniffedResources 二级页在 MainActivity 接上（Route + 屏幕）")
+else:
+    bad("SniffedResources 二级页未接入导航")
+
+# 屏幕能力：打开 + 下载
+if "onOpen" in sniff_screen and "onDownload" in sniff_screen:
+    ok("SniffedResourcesScreen 提供打开/下载两个能力")
+else:
+    bad("SniffedResourcesScreen 能力不全（缺打开或下载）")
+
+# ---- 嗅探脚本本身的校验：抽 JS、node --check、DOM 桩运行 ----
+sniff_script = extract_js(sniffer_kt, "SCRIPT")
+if sniff_script is None:
+    bad("取不到 ResourceSnifferJs.SCRIPT")
+else:
+    if "${" in sniff_script:
+        bad("嗅探 JS 里含 ${...} —— 会被 Kotlin 当模板求值")
+    else:
+        ok("嗅探 JS 不含 ${...}")
+    if '"""' in sniff_script:
+        bad("嗅探 JS 里含三引号")
+    else:
+        ok("嗅探 JS 不含三引号")
+
+    if node is None:
+        print("  SKIP 未找到 node，跳过嗅探 JS 语法与运行检查")
+    else:
+        tmp_s = os.path.join(tempfile.gettempdir(), "ling_sniffer_check.js")
+        with open(tmp_s, "w", encoding="utf-8") as f:
+            f.write(sniff_script)
+        r_s = subprocess.run([node, "--check", tmp_s], capture_output=True, text=True)
+        if r_s.returncode == 0:
+            ok("嗅探 JS 语法正确（node --check）")
+        else:
+            bad("嗅探 JS 语法错误：" + (r_s.stderr or "").strip()[:400])
+
+        # 迷你 DOM 桩：只需脚本用到的几个方法
+        harness_s = r"""
+function mkNode(tag, attrs, text) {
+  var n = {
+    tagName: String(tag).toUpperCase(),
+    attrs: attrs || {},
+    textContent: text || '',
+    width: 0, height: 0, currentSrc: ''
+  };
+  n.getAttribute = function (k) {
+    if (k === 'width') return String(n.width || '');
+    if (k === 'height') return String(n.height || '');
+    return (k in n.attrs) ? n.attrs[k] : null;
+  };
+  n.getElementsByTagName = function (t) {
+    t = String(t).toUpperCase();
+    var out = [];
+    (function walk(m) {
+      if (m.tagName === t) out.push(m);
+      (m.childNodes || []).forEach(walk);
+    })(n);
+    return out;
+  };
+  n.childNodes = [];
+  return n;
+}
+function append(p, c) { c.parentNode = p; p.childNodes.push(c); return c; }
+function byTag(root, tag) {
+  tag = String(tag).toUpperCase();
+  var out = [];
+  (function walk(n) {
+    if (tag === '*' || n.tagName === tag) out.push(n);
+    (n.childNodes || []).forEach(walk);
+  })(root);
+  return out;
+}
+
+var html = mkNode('html'), body = mkNode('body');
+append(html, body);
+
+var video = mkNode('video', { src: '/media/clip.mp4', title: '演示视频' });
+append(body, video);
+append(video, mkNode('source', { src: 'https://cdn.example.com/clip_hd.mp4' }));
+var audio = mkNode('audio', { src: 'https://cdn.example.com/bgm.mp3' });
+append(body, audio);
+var img1 = mkNode('img', { src: 'https://cdn.example.com/photo.jpg', alt: '照片' });
+img1.width = 800; img1.height = 600;
+append(body, img1);
+var img2 = mkNode('img', { src: 'https://cdn.example.com/pixel.gif' });
+img2.width = 1; img2.height = 1;   // 1x1 占位图，应被跳过
+append(body, img2);
+var img3 = mkNode('img', { src: 'data:image/gif;base64,AAAA' });  // data: 应跳过
+append(body, img3);
+var link = mkNode('a', { href: '/files/manual.pdf' }, '使用手册');
+append(body, link);
+
+var document = {
+  baseURI: 'https://example.com/page',
+  getElementsByTagName: function (t) { return byTag(html, t); }
+};
+var location = { href: 'https://example.com/page' };
+
+var RESULT = eval(__SCRIPT__);
+console.log('__SNIFF__' + RESULT);
+"""
+        harness_s = harness_s.replace("__SCRIPT__", json.dumps(sniff_script))
+        tmp_h = os.path.join(tempfile.gettempdir(), "ling_sniffer_harness.js")
+        with open(tmp_h, "w", encoding="utf-8") as f:
+            f.write(harness_s)
+        r_h = subprocess.run([node, tmp_h], capture_output=True, text=True)
+        out_h = (r_h.stdout or "").strip()
+        if "__SNIFF__" not in out_h:
+            bad("嗅探运行失败（无返回值）: " + (r_h.stderr or out_h).strip()[:500])
+        else:
+            payload = out_h.split("__SNIFF__", 1)[1]
+            try:
+                res_s = json.loads(payload)
+            except Exception as e:
+                bad("嗅探返回值不是合法 JSON: %s" % e)
+                res_s = None
+            if res_s:
+                if res_s.get("status") != "ok":
+                    bad("嗅探返回非 ok: %s" % res_s.get("reason"))
+                else:
+                    items = res_s.get("resources", [])
+                    urls = [it.get("url", "") for it in items]
+                    ok("嗅探到 %d 个资源" % len(items))
+                    # 相对地址应解析成绝对地址
+                    if "https://example.com/media/clip.mp4" in urls:
+                        ok("相对地址已解析成绝对地址")
+                    else:
+                        bad("相对地址未解析（<video src=/media/...> 应成绝对）")
+                    # data: 与 1x1 占位图应被剔除
+                    if any("pixel.gif" in u for u in urls):
+                        bad("1x1 占位图未被剔除")
+                    else:
+                        ok("1x1 占位图已剔除")
+                    if any("data:" in u for u in urls):
+                        bad("data: URI 未被剔除")
+                    else:
+                        ok("data: URI 已剔除")
+                    # 下载链接应被识别
+                    if any("manual.pdf" in u for u in urls):
+                        ok("媒体扩展名链接已识别为资源")
+                    else:
+                        bad("媒体扩展名链接未识别")
+
 print()
 print("=" * 55)
 if problems:
