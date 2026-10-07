@@ -32,7 +32,7 @@ import com.ling.browser.web.SniffResult
  * 列出当前页面里嗅探到的媒体资源（视频/音频/图片/可下载文件），
  * 每条提供两个动作：
  *   - 点击行 → 在新标签页打开该资源（看图/看视频/听音频）
- *   - 尾部「下载」→ 直接入队下载
+ *   - 尾部「下载」→ 弹确认框（复用网页下载流程，探测大小）
  *
  * 结果来自 [com.ling.browser.ui.BrowserViewModel.sniffResults]，
  * 是进入本页前触发嗅探得到的一次性快照，本页只读不写。

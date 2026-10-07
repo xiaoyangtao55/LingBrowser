@@ -268,7 +268,12 @@ private fun LingApp(viewModel: BrowserViewModel) {
                 val sniff by viewModel.sniffResults.collectAsStateWithLifecycle()
                 SniffedResourcesScreen(
                     result = sniff,
-                    onOpen = { url -> viewModel.openInNewTab(url) },
+                    // 打开资源后自动回浏览页：新标签页已就位，留在嗅探页
+                    // 没有意义，用户还得手动按返回 —— 多一步操作。
+                    onOpen = { url ->
+                        viewModel.openInNewTab(url)
+                        pop()
+                    },
                     onDownload = viewModel::downloadResource,
                     onBack = pop,
                 )

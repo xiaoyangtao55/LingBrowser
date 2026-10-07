@@ -687,19 +687,14 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * 直接下载嗅探到的资源。
+     * 下载嗅探到的资源：复用 [requestDownload] 的确认流程。
      *
-     * 与网页触发的下载不同：这里用户**已经明确点了「下载」按钮**，
-     * 再弹一次确认框是多余的。直接入队，失败时提示。
+     * 用户点「下载」确实表达了意图，但**下载仍然是有副作用的重动作**——
+     * 会占流量、占存储、还可能下到一个意想不到的大文件（嗅探到的视频
+     * 动辄几十 MB）。与网页触发的下载一致，弹确认框 + 探测大小，让用户
+     * 看清"要下什么、大概多大"再决定，而不是静默开始。
      */
-    fun downloadResource(url: String) {
-        val name = url.substringAfterLast('/').substringBefore('?')
-            .takeIf { it.isNotBlank() } ?: "download"
-        viewModelScope.launch {
-            val ok = container.downloads.enqueue(url, null, name)
-            _message.value = if (ok) "已开始下载" else "无法下载该资源"
-        }
-    }
+    fun downloadResource(url: String) = requestDownload(url, mimeType = null)
 
     private fun io(block: suspend () -> Unit) {
         viewModelScope.launch { block() }
