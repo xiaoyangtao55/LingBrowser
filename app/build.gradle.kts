@@ -18,8 +18,23 @@ android {
         applicationId = "com.ling.browser"
         minSdk = 23
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0.0"
+        // 版本号遵循 Semantic Versioning 2.0.0。
+        //
+        // 1.1.0 而不是 2.0.0：自 1.0.0 以来全是**向后兼容的新增**——
+        // 阅读模式、下载管理、书签文件夹、会话恢复、标签页缩略图等，
+        // 都只增加能力，没有移除任何用户可依赖的行为，
+        // 数据库也只有加法迁移（VERSION 1→2→3，均为 ALTER TABLE ADD COLUMN）。
+        // 因此按 SemVer「向后兼容的功能性新增」递增 MINOR。
+        //
+        // 唯一两处"用户能感知的行为变化"不构成 MAJOR：
+        //  - 标签面板去掉 1/4 档：老值 "QUARTER" 走 runCatching 兜底为默认值，
+        //    不会闪退，属于偏好项变更而非 API 破坏。
+        //  - 默认搜索引擎 百度 → 必应：只影响未显式设置过的新用户。
+        //
+        // versionCode 是给系统判断"能否覆盖安装"的单调整数，与 SemVer 无关，
+        // 每次发版 +1，绝不能回退（回退会导致无法覆盖安装）。
+        versionCode = 2
+        versionName = "1.1.0"
     }
 
     androidResources {

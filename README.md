@@ -6,7 +6,7 @@
 把速度提到最快，不做新闻流、不做信息流干扰，只专心把「打开网页」这件事做好。
 
 - **包名**：`com.ling.browser`
-- **版本**：1.0.0 (versionCode 1)
+- **版本**：1.1.0 (versionCode 2)
 - **体积**：release APK **约 1.4 MB**
 - **兼容**：Android 6.0 (API 23) ~ Android 16 (API 36)
 - **UI**：Jetpack Compose + **Material You 3**（Android 12+ 自动跟随壁纸动态取色）
