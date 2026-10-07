@@ -59,6 +59,7 @@ fun SettingsScreen(
     onJavaScript: (Boolean) -> Unit,
     onTabsHeight: (TabsHeight) -> Unit,
     onReaderFontSize: (ReaderFontSize) -> Unit,
+    onOpenLinksExternal: (Boolean) -> Unit,
     onRestoreSession: (Boolean) -> Unit,
     onClearData: () -> Unit,
     onBack: () -> Unit,
@@ -191,6 +192,17 @@ fun SettingsScreen(
                     subtitle = "不加载图片，省流量",
                     checked = settings.blockImages,
                     onCheckedChange = onBlockImages,
+                )
+            }
+            item {
+                SwitchRow(
+                    icon = LingIcons.Public,
+                    title = "用外部 App 打开链接",
+                    // 默认关的原因要写清楚，否则用户会以为是漏做的功能
+                    subtitle = "遇到 zhihu://、weixin:// 等链接时尝试拉起对应 App；" +
+                        "关掉则忽略这类链接（推荐：本机没装该 App 时更稳定）",
+                    checked = settings.openLinksInExternalApp,
+                    onCheckedChange = onOpenLinksExternal,
                 )
             }
 

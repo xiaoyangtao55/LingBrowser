@@ -92,6 +92,22 @@ data class LingSettings(
      */
     val restoreSession: Boolean = true,
     /**
+     * 是否把非 http(s) 链接交给外部 App 打开。
+     *
+     * 默认**关**。关掉时这类导航被静默吃掉（什么都不发生），
+     * 打开时才尝试 `ACTION_VIEW` 拉起系统应用。
+     *
+     * 为什么默认关：App 内嵌页（知乎、微博等）会用自定义协议做
+     * **内部跳转**，而本机往往没装对应 App。此时"交给系统"只会失败，
+     * 失败后又容易连带把 WebView 的导航状态搞乱（真机日志里表现为
+     * 渲染进程被拆掉重建、页面卡在中间态）。默认关掉就等于绕开
+     * 整条转发路径 —— 对绝大多数国内站点来说，这些链接本来也不是
+     * 用户想点的。
+     *
+     * 需要跳到外部 App 的用户可以在设置里打开，行为与主流浏览器一致。
+     */
+    val openLinksInExternalApp: Boolean = false,
+    /**
      * 阅读模式的字号档位。
      *
      * 存的是档位而不是像素值：字号需要在**阅读视图里**改，而那边是
@@ -131,6 +147,7 @@ class SettingsStore(private val context: Context) {
         val TAB_COUNT = intPreferencesKey("tab_count")
         val RESTORE_SESSION = booleanPreferencesKey("restore_session")
         val READER_FONT_SIZE = stringPreferencesKey("reader_font_size")
+        val OPEN_LINKS_EXTERNAL = booleanPreferencesKey("open_links_external")
     }
 
     val settings: Flow<LingSettings> = context.dataStore.data.map { p ->
@@ -154,6 +171,7 @@ class SettingsStore(private val context: Context) {
                 ?.let { runCatching { TabsHeight.valueOf(it) }.getOrNull() }
                 ?: TabsHeight.HALF,
             restoreSession = p[Keys.RESTORE_SESSION] ?: true,
+            openLinksInExternalApp = p[Keys.OPEN_LINKS_EXTERNAL] ?: false,
             // 与 tabsHeight 同理：用 runCatching 兜底，
             // 万一将来删掉某个档位，老用户不会因为 valueOf 抛异常而闪退。
             readerFontSize = p[Keys.READER_FONT_SIZE]
@@ -194,6 +212,9 @@ class SettingsStore(private val context: Context) {
 
     suspend fun setReaderFontSize(size: ReaderFontSize) =
         context.dataStore.edit { it[Keys.READER_FONT_SIZE] = size.name }
+
+    suspend fun setOpenLinksInExternalApp(enabled: Boolean) =
+        context.dataStore.edit { it[Keys.OPEN_LINKS_EXTERNAL] = enabled }
 
     suspend fun setTabCount(count: Int) =
         context.dataStore.edit { it[Keys.TAB_COUNT] = count }

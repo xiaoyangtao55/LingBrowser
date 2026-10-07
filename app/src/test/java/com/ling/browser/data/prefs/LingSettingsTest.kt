@@ -142,4 +142,28 @@ class LingSettingsTest {
         assertFalse("默认不开启无图模式", s.blockImages)
         assertFalse("默认不强制网页夜间", s.forceDarkWebPages)
     }
+
+    @Test
+    fun `默认不把链接交给外部 App`() {
+        // 回归用例：真机上这个开关默认开时，知乎回答页会遇到
+        // zhihu:// 导航 —— 本机没装知乎 App，交给系统必然失败，
+        // 失败后 WebView 的导航状态被搅乱，页面卡在中间态。
+        // 默认关掉等于绕开整条转发路径。
+        assertFalse(
+            "默认必须关：本机没装对应 App 时'交给系统'只会失败",
+            LingSettings().openLinksInExternalApp,
+        )
+    }
+
+    @Test
+    fun `外部 App 开关是唯一的转发开关`() {
+        // 这个开关必须能真的关掉转发，而不是"关掉了但代码里还在转发"。
+        // 这里只能断言数据层，行为层由 check_reader.py 静态校验。
+        val off = LingSettings(openLinksInExternalApp = false)
+        val on = LingSettings(openLinksInExternalApp = true)
+        assertFalse(off.openLinksInExternalApp)
+        assertTrue(on.openLinksInExternalApp)
+        // 复制不改动其它字段，避免哪天加字段时漏同步
+        assertEquals(off.copy(openLinksInExternalApp = true), on)
+    }
 }

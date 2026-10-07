@@ -769,6 +769,13 @@ class WebTabManager(private val context: Context) {
                     updateTab(id) { it.copy(isLoading = false, errorText = desc) }
                 },
                 onExternalScheme = { uri -> onExternalUri?.invoke(uri) ?: false },
+                // 用 lambda 而不是直接传布尔值：WebViewClient 是建 WebView 时
+                // 一次性构造的，传值会让开关"改完要重启才生效"。
+                //
+                // 必须写 this@WebTabManager.settings：在 apply 作用域里裸写
+                // `settings` 会解析成 WebView.settings（WebSettings），
+                // 那个对象没有 openLinksInExternalApp 字段。
+                openExternal = { this@WebTabManager.settings.openLinksInExternalApp },
             )
             setDownloadListener { url, _, _, mimeType, _ ->
                 onDownloadRequested?.invoke(url, mimeType)

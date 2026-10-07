@@ -22,6 +22,15 @@ class LingWebViewClient(
     private val onReceivedTitle: (title: String) -> Unit,
     private val onReceivedIcon: (Bitmap?) -> Unit,
     private val onError: (url: String, description: String) -> Unit,
+    /**
+     * 是否把非 http(s) 链接交给外部 App。
+     *
+     * 默认关。关掉时这类导航被静默吃掉，连 `onExternalScheme` 都不会调用 ——
+     * 本机没装对应 App 时"交给系统"只会失败，失败后还容易把 WebView 的
+     * 导航状态搞乱（真机日志表现为渲染进程被拆掉重建、页面卡在中间态）。
+     * 关掉等于绕开整条转发路径。
+     */
+    private val openExternal: () -> Boolean = { false },
     /** 返回 true 表示已由外部接管（例如外部应用打开），WebView 不应继续加载。 */
     private val onExternalScheme: (Uri) -> Boolean,
 ) : WebViewClient() {
@@ -127,7 +136,12 @@ class LingWebViewClient(
         // `net::ERR_UNKNOWN_URL_SCHEME` 错误页；若页面反复发起该导航，
         // 就会在"尝试加载 → 报错"之间反复，表现为**一直闪**。
         // 系统打不开时宁可安静地什么都不做。
-        onExternalScheme(uri)
+        //
+        // 开关关掉时连尝试都不做：本机没装对应 App 时它本来就会失败，
+        // 而失败后的副作用比"什么都不发生"糟糕得多。
+        if (openExternal()) {
+            onExternalScheme(uri)
+        }
         return true
     }
 }

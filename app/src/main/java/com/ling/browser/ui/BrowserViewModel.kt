@@ -546,6 +546,17 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
         if (!enabled) clearSession()
     }
 
+    /**
+     * 是否把非 http(s) 链接交给外部 App。
+     *
+     * 不需要像其他设置那样重建 WebView：判定发生在
+     * `shouldOverrideUrlLoading` 里，每次都现读设置（见
+     * `WebTabManager` 传进 `LingWebViewClient` 的 lambda），
+     * 因此改完立即生效。
+     */
+    fun setOpenLinksInExternalApp(enabled: Boolean) =
+        io { container.settings.setOpenLinksInExternalApp(enabled) }
+
     // ------------------------------------------------------------ 阅读模式
 
     /**

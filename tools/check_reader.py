@@ -643,8 +643,8 @@ if re.search(r"else\s*->\s*onExternalScheme\(uri\)", client):
 else:
     ok("handleUri 没有直接返回外部处理结果")
 
-if re.search(r"onExternalScheme\(uri\)\s*\n\s*return true", client):
-    ok("外部协议一律接管（无论系统能否打开）")
+if re.search(r"if \(openExternal\(\)\) \{\s*\n\s*onExternalScheme\(uri\)\s*\n\s*\}\s*\n\s*return true", client):
+    ok("外部协议一律接管（开关关掉时也返回 true，不放行给 WebView）")
 else:
     bad("外部协议未无条件接管 —— 打不开时会白屏或一直闪")
 
@@ -678,6 +678,52 @@ if re.search(r"if \(_activeId\.value != id\) return@evaluateJavascript", mgr):
     ok("提取回调校验标签未切换（否则会把 A 页正文渲染到 B 页）")
 else:
     bad("提取回调未校验标签，切页后可能把旧正文渲染到新页面")
+
+# ---------- 9. 外部 App 开关 ----------
+#
+# 真机上"交给系统"这条路在本机没装对应 App 时只会失败，且失败后
+# 会搅乱 WebView 导航状态。所以加了个默认关的开关绕开它。
+print("\n9. 外部 App 打开链接（默认关）")
+
+
+if re.search(r"val openLinksInExternalApp: Boolean = false", settings_kt):
+    ok("设置项默认关")
+else:
+    bad("缺少 openLinksInExternalApp 设置项，或默认值不是 false")
+
+# 三处都要有，且 setter 必须真的存在（只数 OPEN_LINKS_EXTERNAL 出现次数
+# 会被"键和解码都在、setter 被改名/删掉"骗过 —— 踩过）。
+has_key = re.search(r'val OPEN_LINKS_EXTERNAL = booleanPreferencesKey\("open_links_external"\)', settings_kt)
+has_decode = re.search(r"openLinksInExternalApp = p\[Keys\.OPEN_LINKS_EXTERNAL\] \?\: false", settings_kt)
+has_setter = re.search(r"suspend fun setOpenLinksInExternalApp\(enabled: Boolean\)", settings_kt)
+if has_key and has_decode and has_setter:
+    ok("键、解码、setter 三处都写全了")
+else:
+    missing = [n for n, ok_ in (("键", has_key), ("解码", has_decode), ("setter", has_setter)) if not ok_]
+    bad("OPEN_LINKS_EXTERNAL 缺项：" + "、".join(missing))
+
+# 客户端必须真的用开关把转发包起来，而不是"加了开关但照样转发"
+if re.search(r"if \(openExternal\(\)\) \{\s*\n\s*onExternalScheme\(uri\)", client):
+    ok("转发被开关真正包住（关掉时连 onExternalScheme 都不调用）")
+else:
+    bad("开关没包住转发 —— 关掉了还是会把链接交给系统")
+
+# 必须用 lambda 传，不能传值：WebViewClient 是建 WebView 时构造的
+if re.search(r"openExternal = \{ this@WebTabManager\.settings\.openLinksInExternalApp \}", mgr):
+    ok("用 lambda 传递开关（传值会变成'改完要重启才生效'）")
+else:
+    bad("开关按值传递，改完不重启不生效")
+
+# 无论开关状态，都必须返回 true（否则退回 ERR_UNKNOWN_URL_SCHEME 一直闪）
+if re.search(r"if \(openExternal\(\)\) \{[\s\S]{0,200}?\}\s*\n\s*return true", client):
+    ok("开关关掉时依然返回 true（不会退回 ERR_UNKNOWN_URL_SCHEME）")
+else:
+    bad("开关关掉时未返回 true —— 会退回 ERR_UNKNOWN_URL_SCHEME 一直闪")
+
+if "onOpenLinksExternal" in settings_ui and "onOpenLinksExternal = viewModel::setOpenLinksInExternalApp" in activity:
+    ok("设置界面与 MainActivity 都接上了")
+else:
+    bad("设置界面或 MainActivity 未接上开关")
 
 if re.search(r"fun exitReaderMode\(\)[\s\S]{0,900}?isNavigable\(cached\.url\)", mgr):
     ok("退出阅读模式前先校验原文地址可加载性")

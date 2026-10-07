@@ -604,6 +604,38 @@ return true   // 系统能打开就打开，打不开就安静地什么都不做
 直接 `ACTION_VIEW` 包一个 `intent:` 地址是没有应用能接的，会**静默失败**
 （用户看到"点了没反应"）。
 
+#### 「用外部 App 打开链接」开关（默认关）
+
+即使把返回值语义修对，**把非 http(s) 链接交给系统这条路本身也常常没有意义**。
+真机日志（Xiaomi MI 8 / Android 14，抓自开阅读模式的时刻）：
+
+```
+cr_WebViewApkApp: version=125.0.6422.165 ... processName=com.android.webview:sandboxed_process0
+chromium: [WARNING:sync_reader.cc(175)] ASR: No room in socket buffer.: Broken pipe (32)
+```
+
+两点值得注意：
+
+1. **整段日志里没有一条 `ActivityManager: START ... act=android.intent.action.VIEW`** ——
+   说明 `startActivity` 根本没成功。本机没装知乎 App（或它没有 `zhihu://` 过滤器），
+   "交给系统"是空转。
+2. 同时出现 `sync_reader.cc … Broken pipe` 与一个**全新的 sandboxed renderer 进程**，
+   说明渲染进程被拆掉重建过 —— 页面卡在中间态是这么来的。
+
+所以加了这个开关，**默认关**：关掉时连 `onExternalScheme` 都不调用，
+这类导航被静默吃掉（返回 `true`，不放行给 WebView）。
+打开时才走 `ACTION_VIEW` 转发，行为与主流浏览器一致。
+
+> 为什么默认关而不是默认开：App 内嵌页用自定义协议做的多半是**内部跳转**
+> （「在 App 中打开」之类），而浏览器用户在自己手机的文件管理器里打开
+> 一个浏览器，通常并不是想被弹去另一个 App。加上本机可能没装那个 App，
+> 默认关掉是更稳的选择。设置项里写清了原因，免得被当成漏做的功能。
+
+> **仍未定位**：回答页上进入阅读模式这件事本身还没修好（不闪了，但也不行）。
+> 上面那两条日志只能说明"转发失败 + 渲染进程重建"，**不足以断定**阅读模式
+> 失败的根因。需要带 `chromium`/`ActivityManager` 标签的完整日志，
+> 且最好是打开开关与关闭开关各抓一次，才能对比出是哪条路径的问题。
+
 #### 页面没加载完就进阅读模式
 
 真机上"回答页加载完成前开阅读模式"会出问题，原因有两个：
@@ -951,7 +983,7 @@ python tools/preview_launcher_png.py mipmap-xxxhdpi  # 预览启动图标
 | 项目 | 结果 |
 |---|---|
 | `:app:assembleDebug` | ✅ 通过（图标改版后重新验证） |
-| `:app:testDebugUnitTest` | ✅ **200 个用例全部通过**（`UrlUtilsTest` 20 / `FaviconFetcherTest` 12 / `ReaderPageTest` 20 / `ReaderResultTest` 15 / `UrlSchemeTest` 18 / `HomePageTest` 19 / `TabOrderTest` 15 / `BookmarkFolderTest` 14 / `LingSettingsTest` 14 / `LauncherIconTest` 12 / `LingIconsTest` 11 / `DownloadTest` 10 / `SessionSnapshotTest` 9 / `TabInitialTest` 6 / `PendingDownloadTest` 5） |
+| `:app:testDebugUnitTest` | ✅ **202 个用例全部通过**（`UrlUtilsTest` 20 / `FaviconFetcherTest` 12 / `ReaderPageTest` 20 / `ReaderResultTest` 15 / `UrlSchemeTest` 18 / `HomePageTest` 19 / `TabOrderTest` 15 / `BookmarkFolderTest` 14 / `LingSettingsTest` 16 / `LauncherIconTest` 12 / `LingIconsTest` 11 / `DownloadTest` 10 / `SessionSnapshotTest` 9 / `TabInitialTest` 6 / `PendingDownloadTest` 5） |
 | `:app:assembleRelease`（R8 压缩） | ✅ 通过，产物 1.4 MB（图标改版前） |
 | APK 签名校验 | ✅ v1 + v2 方案均通过 |
 | 真机安装（Xiaomi MI 8 / Android 14） | ✅ `adb install` 成功 |
@@ -1060,6 +1092,7 @@ hello world                -> 必应搜索（默认引擎）
 | 书签文件夹 | 单层文件夹；**不建表**，由书签归属派生（无幽灵文件夹） |
 | 书签网站图标 | 按 URL 自行抓取 `/favicon.ico`；存压缩字节而非 `Bitmap` |
 | 阅读模式 | 移植 Readability 打分算法（<11 KB）+ **中文阈值适配**；可调四档字号 |
+| 外部链接开关 | 非 http(s) 链接是否交给外部 App，**默认关**（本机没装该 App 时更稳定） |
 
 > 早先下载的 8 个未使用官方图标（`help` / `language` / `license` / `menu` 等）
 > 可对应「关于页 / 翻译 / 许可」等后续功能，需要时直接映射即可，
