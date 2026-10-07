@@ -264,6 +264,18 @@ def point_in_poly(px, py, pts):
     return inside
 
 
+def dist_to_seg(px, py, a, b):
+    """点到线段的最短距离（描边路径命中判定用）。"""
+    ax, ay = a
+    bx, by = b
+    dx, dy = bx - ax, by - ay
+    if dx == 0 and dy == 0:
+        return math.hypot(px - ax, py - ay)
+    t = ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)
+    t = max(0.0, min(1.0, t))
+    return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+
+
 def render(items, grad, view, W, ss=SS, bg=None):
     vx, vy, vw, vh = view
     S = W * ss
@@ -302,7 +314,24 @@ def render(items, grad, view, W, ss=SS, bg=None):
                              if it["fill"].startswith("url")
                              else hex_rgb(it["fill"])) + (int(255 * it["opacity"]),)
                 else:
-                    if it.get("fill-rule") == "evenodd":
+                    # 描边路径（fill=none）：判断点到各采样线段的距离是否落在
+                    # stroke-width/2 内。用于描边羽毛（与主页 logo 一致）。
+                    if it["stroke"]:
+                        hit = False
+                        half = it["sw"] / 2
+                        for pts, closed in it["polys"]:
+                            segs = list(zip(pts, pts[1:]))
+                            if closed and len(pts) > 2:
+                                segs.append((pts[-1], pts[0]))
+                            for a, b in segs:
+                                if dist_to_seg(wx, wy, a, b) <= half:
+                                    hit = True
+                                    break
+                            if hit:
+                                break
+                        if hit:
+                            c = hex_rgb(it["stroke"]) + (int(255 * it["opacity"]),)
+                    elif it.get("fill-rule") == "evenodd":
                         # even-odd：统计落在几个子路径内，奇数才填。
                         # 这是"负空间挖缝"能生效的前提，否则羽轴会被填成实心。
                         n = sum(
@@ -315,7 +344,7 @@ def render(items, grad, view, W, ss=SS, bg=None):
                             if point_in_poly(wx, wy, pts):
                                 hit = True
                                 break
-                    if hit:
+                    if hit and it.get("fill") and not it["stroke"]:
                         c = hex_rgb(it["fill"]) + (int(255 * it["opacity"]),)
                 if hit:
                     a = c[3] / 255

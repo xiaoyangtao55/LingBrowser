@@ -955,7 +955,7 @@ webViews[tab.id]?.let { loadHome(tab.id, it) }   // WebView 不存在就静默�
 ## 五、启动图标
 
 图标源自 `tools/icon.xml`：**渐变圆底（青 #37E0C8 → 蓝 #1E88E5）+ 白色浏览器外环 +
-一枚带裸羽柄的羽毛 + 高光点**。
+一枚描边羽毛**（与主页 logo 同一造型）。
 
 羽毛的造型目标是"在 48px 下也一眼认得出是羽毛"，而不是"渐变圆里有个白色叶片"：
 根部要露出裸羽柄、羽轴要弯、羽枝要一片片分开。
@@ -969,93 +969,75 @@ Android 的自适应图标有一个容易踩的坑：**画布 108dp，但只有�
 | 层 | 内容 | 为什么 |
 |---|---|---|
 | `ic_launcher_background` | 渐变方底（铺满 108dp） | 背景层被裁是**预期**的，铺满才不会露边 |
-| `ic_launcher_foreground` | 外环 + 羽毛 + 高光（缩到 72dp 内） | 前景必须完整可见，任何遮罩都不能裁 |
-| `ic_launcher_monochrome` | 环 + 羽毛剪影 | Android 13+ 主题图标由系统重新着色，细节多了会糊 |
+| `ic_launcher_foreground` | 外环 + 描边羽毛（缩到 72dp 内） | 前景必须完整可见，任何遮罩都不能裁 |
+| `ic_launcher_monochrome` | 环 + 描边羽毛剪影 | Android 13+ 主题图标由系统重新着色，随壁纸动态取色 |
 
 前景缩放系数 **0.9176**（白环外沿恰好贴住安全区边界）。这个系数不再写死 ——
 `tools/gen_launcher_icon.py` 从 `icon.xml` 里实测的圆环参数算出来，环一改就自动重算。
 
-### 羽毛造型：五条硬约束
+### 羽毛造型：与主页同一枚描边羽毛
 
-羽毛不是"画得像就行"——它最终要在 **48px** 的图标里被认出来。造型经过
-`tools/emit_icon_xml.py` 反复迭代，收敛到五条硬约束：
+早期启动图标用**填充**羽毛（`emit_icon_xml.py` 参数化生成的羽片 + `evenOdd`
+挖羽轴），与主页 logo 的**描边**羽毛是两套造型。用户要求两者一致，于是让
+主页 `HomePage.kt` 里的描边羽毛成为**唯一事实来源**：
 
-1. **根部必须露出一截裸羽柄。** 这是最强的"这是羽毛"信号：羽片之外还有一截光杆。
-   最初那版羽轴整条都埋在羽片里，轮廓是个封闭梭形，读起来就是**叶子**
-   （实测：三个斜切缺口被读成"虫咬的洞"，羽轴被读成"叶脉"）。
-2. **羽轴要弯，不能是直轴。** 直轴的对称梭形 + 两头尖，无论加多少装饰都还是叶子。
-   现在羽轴按 `t^2.6` 侧弯（近尖加速，成钩），凸侧饱满、凹侧近尖内收。
-3. **羽片根部要"截断"、且左右不对称。** 从一点慢慢张开的窄根是叶子的画法；
-   羽毛的羽片在根部就是张开的，右下 12.0 / 左上 5.5，整体偏在羽轴一侧。
-4. **羽枝缝要细口、深进、朝根部斜切 —— 而且必须写进轮廓，不能靠"宽度包络"。**
-   这是最费劲的一条：用"包络线 × 深度系数"的写法，缝在几何上**只能垂直于羽轴**，
-   渲染出来是一排等距方齿，像拉链或梳子。改成在轮廓里显式插入折线
-   （走到缝口 → 向内朝根部斜切到谷底 → 折回缝口另一端）之后才读成"一片片羽枝"。
-   缝口只有 0.012~0.020 宽，谷底却吃掉该处 30%~70% 的宽度。
-5. **羽轴用负空间挖，不能叠白线；而且不能压到外环。**
-   白压白在视觉上等于没画，正确做法是在同一条路径内用 `fillType="evenOdd"`
-   挖一条细槽 —— 注意 Android 拼写是驼峰 `evenOdd`，SVG 是小写 `evenodd`，
-   写错了子路径会被填成实心。每道缝的谷底都留出"槽半宽 + 1.3"的余量，
-   缝不会把羽轴切断（`emit_icon_xml.py` 会逐段复算并在超界时报出来）。
-   羽毛离环心最远 66.4，环内沿 71.0，留 4.6 间隙：两个白块一旦相切，
-   在低分辨率下会粘连成一坨。
+- `tools/emit_icon_xml.py` 从 `HomePage.kt` 抽出内联 SVG 的 6 条 stroke 路径，
+  等比缩放 + 平移到 256×256 的外环内（描边宽随缩放等比放大 1.6 → 9），
+  写出 `tools/icon.xml` —— 不再是手工参数化的填充造型。
+- 描边外沿离环内沿留 **5 单位**间隙（缩放系数由"尖端 + 半描边 ≤ 环内沿 − 余量"
+  解出），低分辨率下羽毛描边不会和外环粘连。
+- 去掉旧版的高光点（主页没有）。
 
-> 这些全是"看起来"的问题，静态检查抓不到，只能靠预览逐轮比对：
-> `python tools/emit_icon_xml.py` 会打印自身长宽比、缝的深度/缝口、自交检查、
-> 与环的间隙；`tools/svg_preview.py` 与 `tools/preview_launcher_png.py`
-> 则把结果栅格化成 ASCII，在终端里就能看构图。
-> `LauncherIconTest` 把其中可量化的部分（长宽比、evenOdd、安全区）固化成了回归测试。
+这条改动顺带把 `svg_preview.py` 从"只渲染填充"扩展成"也渲染描边"（点到线段
+距离判定），`make_icons.py` 的 PNG fallback 从"evenOdd 异或填多边形"改成
+"圆角线描点列"，`check_icon_composition.py` 从"羽片是否超出外环"改成
+"羽毛描边是否压到环内沿"。
 
 ### 生成与校验工具链
 
 ```bash
-python tools/emit_icon_xml.py          # 羽毛造型定稿 -> 生成 tools/icon.xml
+python tools/emit_icon_xml.py          # 从 HomePage.kt 抽羽毛 -> 生成 tools/icon.xml
 python tools/check_icon_svg.py         # SVG 安全区 + ASCII 预览
 python tools/gen_launcher_icon.py      # icon.xml -> 3 层 vector drawable
 python tools/make_icons.py             # 生成 API<26 的 5 档 PNG
 python tools/check_launcher_icons.py   # 校验矢量层 + 安全区
-python tools/check_icon_composition.py # 校验构图（羽毛是否压环、高光是否被遮）
+python tools/check_icon_composition.py # 校验构图（羽毛描边是否压到环内沿）
 python tools/check_launcher_png.py     # 校验 PNG
 python tools/preview_launcher_png.py mipmap-xxxhdpi   # ASCII 预览
 python tools/verify_icon_assertions.py # 复算 LauncherIconTest 的全部断言
 ```
 
-> `make_icons.py` 画位图时必须按 SVG 的 **evenodd 规则异或**各子路径。
-> 早先它逐个子路径填白，把负空间的羽轴槽也填成了白色 ——
-> 矢量层有 `fillType="evenOdd"` 兜着，所以只有 API 23~25 的 PNG fallback
-> 上悄悄没了羽轴，属于"检查全绿但图是错的"。
+> `make_icons.py` 画位图时按 SVG 的 **描边**路径采样成点列、用圆角线描出来，
+> 等价于 `stroke-linecap/linejoin="round"`。早先它是逐个子路径填白 + evenodd 异或，
+> 那套是给填充羽毛准备的，改成描边羽毛后不再适用。
 
 > 工具链里 `svg_preview.py` 是一个不依赖 cairo 的最小 SVG 光栅化器
-> （支持 circle / path / 贝塞尔 / 线性渐变 / `<g transform>` 与属性继承），
-> 因为本机装不上 cairo，而图标造型必须能"看见"才能调。
+> （支持 circle / path / 贝塞尔 / 线性渐变 / `<g transform>` 与属性继承，
+> 且**描边与填充都能渲染**），因为本机装不上 cairo，而图标造型必须能"看见"才能调。
 
 > API 23~25 不支持自适应图标，故保留 `mipmap-*/ic_launcher.png` 位图 fallback。
 
-### 主页 logo：与启动图标同一造型，但媒介不同
+### 主页 logo：启动图标的唯一事实来源
 
-主页头部那枚圆形 logo（`HomePage.kt` 里的内联 SVG）画的是同一只羽毛，走的是
-另一套媒介约束 —— 这个差别值得写清楚，否则很容易"照抄启动图标"把图标画糊：
+主页头部那枚圆形 logo（`HomePage.kt` 里的内联 SVG）画的正是启动图标里的那枚
+描边羽毛 —— 现在**两者是同一份造型**：`tools/emit_icon_xml.py` 直接从
+`HomePage.kt` 抽 SVG 路径、等比缩放后写进 `tools/icon.xml`，改主页 logo 会
+自动反映到启动图标上，不存在"两处各画一遍漂移"的问题。
+
+仍存在的媒介差异只是**画布与描边粗细**，造型本身一致：
 
 | | 启动图标 | 主页 logo |
 |---|---|---|
 | 画布 | 108dp 自适应图标（安全区 72dp） | 24×24 viewBox，显示 40px |
-| 媒介 | **填充**白色剪影 + `evenOdd` 负空间 | **描边**线画，`stroke-width` 1.6 |
-| 羽枝缝 | 在轮廓上挖细口（缝口 0.012~0.020） | 羽片内部画短线（画不出那么细的口） |
-| 羽片长宽比 | 3.5 | 2.35 |
+| 描边宽 | 9（256 画布，等比放大自主页的 1.6） | 1.6 |
+| 羽枝缝 | 3 道短线（与主页一致） | 3 道短线 |
 
-两条硬约束：
+主页 logo 本身仍守住它早先迭代出的两条硬约束：
 
 1. **羽片必须够宽，否则羽枝线会糊成一片。** 描边宽 1.6 时，羽轴与边缘之间
-   要留出 ≥ 描边宽度的空隙；实测羽片半宽 < 4 单位时三条线就并成一条白块
-   （早期版本试过 5.4 单位宽，凸侧羽枝直接和羽轴粘死）。旧 logo 能看，
-   正是因为它那条月牙有 ≈ 8 单位宽。
+   要留出 ≥ 描边宽度的空隙；实测羽片半宽 < 4 单位时三条线就并成一条白块。
 2. **羽片轮廓要用两条"开放"曲线，不能闭合成一个圈。** 闭合轮廓 + 羽轴 + 羽枝线
-   在 40px 下会读成一整块白色实心（enclose 出来的区域视觉上被填掉了），
-   旧 logo 的两条开放曲线才是对的画法。
-
-改版保留了旧 logo 的开放曲线骨架，只把造型换成启动图标的性格：根部露出裸羽柄
-（占全长 17%）、羽轴按 `t^2.4` 侧弯、羽片左右不对称（凸侧 4.7 / 平侧 3.2）、
-3 道羽枝缝一律朝根部斜切。
+   在 40px 下会读成一整块白色实心（enclose 出来的区域视觉上被填掉了）。
 
 ```bash
 python tools/preview_home_mark.py      # 当前造型 -> build/home-mark*.png（200px + 40px）
@@ -1077,7 +1059,7 @@ python tools/preview_home_mark.py old  # 改版前的造型，用于对照
 | `tools/verify_home_assertions.py` | 对着 `HomePage.kt` 复算 `isHomeUrl` 的全部断言，确认测试与实现一致 |
 | `tools/check_launcher_icons.py` | 校验生成的 3 层自适应图标矢量：pathData 可解析、前景是否落在 72dp 安全区内 |
 | `tools/check_launcher_png.py` | 校验 API<26 的 PNG 图标：圆形遮罩、渐变方向、白色元素占比 |
-| `tools/check_icon_composition.py` | 量化图标构图：羽毛是否压在环的笔画上、高光点是否被羽毛遮住 |
+| `tools/check_icon_composition.py` | 量化图标构图：羽毛描边是否压到环内沿（含描边半宽） |
 | `tools/check_dead_code.py` | 找出「定义了但没人调用」的动作型函数（见 §四.9，此坑踩过两次） |
 | `tools/check_download_bytes.py` | 比对 `formatBytes` 在 UI 层与测试层的两份实现，防止测试测的是旧逻辑 |
 | `tools/check_tabs_layer.py` | 校验标签面板的层级与动画约束（遮罩必须画在面板之后、拖拽手势不吞点击等） |

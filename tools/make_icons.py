@@ -2,7 +2,7 @@
 
 API 23~25（Android 6~7）不支持自适应图标，只能给位图。
 这里绘制与 tools/icon.xml 完全一致的造型：
-  渐变圆底 + 白色浏览器外环 + 羽毛 + 高光点
+  渐变圆底 + 白色浏览器外环 + 描边羽毛（与主页 logo 同一造型）
 
 传统图标没有遮罩裁切，所以整圆可以铺满画布（与自适应图标的背景层一致），
 但内容仍需留出内边距，否则贴边会显得拥挤。
@@ -11,7 +11,7 @@ import os
 import sys
 import math
 
-from PIL import Image, ImageDraw, ImageChops
+from PIL import Image, ImageDraw
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from svg_preview import parse_svg, parse_path, flatten, XML
@@ -75,8 +75,7 @@ def draw_icon(size):
     paths = [i for i in items if i["type"] == "path"]
 
     ring = next(c for c in circles if c["stroke"])
-    dot = next(c for c in circles if c["fill"].startswith("#") and not c["stroke"])
-    feather = paths[0]
+    feather = paths
 
     # ---- 白色浏览器外环 ----
     w = s(ring["sw"])
@@ -87,29 +86,23 @@ def draw_icon(size):
         width=max(1, int(round(w))),
     )
 
-    # ---- 羽毛（贝塞尔采样成多边形）----
-    # 必须按 SVG 的 evenodd 规则异或各子路径：羽轴是"负空间"挖出来的细槽，
-    # 直接逐个子路径填白会把槽也填成白色 —— 白压白等于没画，
-    # 位图 fallback 上的羽轴就此消失（矢量层用 fillType="evenOdd"，不受影响）。
-    mask = Image.new("1", (px, px), 0)
-    for pts, closed in flatten(parse_path(feather["d"]), steps=40):
-        poly = [(s(x), s(y)) for x, y in pts]
-        if len(poly) < 3:
-            continue
-        layer = Image.new("1", (px, px), 0)
-        ImageDraw.Draw(layer).polygon(poly, fill=1)
-        mask = ImageChops.logical_xor(mask, layer)
-    alpha = mask.convert("L").point(
-        lambda v: int(255 * feather["opacity"]) if v else 0
-    )
-    img.paste(Image.new("RGB", (px, px), (255, 255, 255)), (0, 0), alpha)
-
-    # ---- 高光点 ----
-    d.ellipse(
-        [s(dot["cx"] - dot["r"]), s(dot["cy"] - dot["r"]),
-         s(dot["cx"] + dot["r"]), s(dot["cy"] + dot["r"])],
-        fill=(0xE8, 0xFB, 0xFF, int(255 * dot["opacity"])),
-    )
+    # ---- 羽毛（描边路径，与主页 logo 一致）----
+    # 每条 path 采样成点列后用圆角线描出来，等价于 stroke-linecap/join="round"。
+    # 羽毛的 stroke-width 随 SVG 缩放等比换算成像素。
+    sw = max(s(p["sw"]) for p in feather)
+    sw_px = max(1, int(round(sw)))
+    for p in feather:
+        for poly, _ in flatten(parse_path(p["d"]), steps=48):
+            poly = [(s(x), s(y)) for x, y in poly]
+            if len(poly) < 2:
+                continue
+            for a, b in zip(poly, poly[1:]):
+                d.line([a, b], fill=(255, 255, 255, int(255 * p["opacity"])),
+                       width=sw_px)
+            r = sw_px / 2
+            for x, y in poly:                        # 圆角端点 / 拐角
+                d.ellipse([x - r, y - r, x + r, y + r],
+                          fill=(255, 255, 255, int(255 * p["opacity"])))
 
     return img.resize((size, size), Image.LANCZOS)
 

@@ -150,20 +150,19 @@ check("#1E88E5" in bg, "蓝色 #1E88E5")
 # ---- 7. 前景含环与羽毛 ----
 print("\n7. 前景层包含环与羽毛")
 check("android:strokeColor" in fg, "外环是描边")
-check('android:fillColor="#FFFFFF"' in fg, "羽毛是白色填充")
-check("#E8FBFF" in fg, "有高光点")
+check('android:strokeColor="#FFFFFF"' in fg, "羽毛是白色描边")
+check('android:fillColor="#00000000"' in fg, "羽毛 fill 为空（描边线画）")
+check('android:strokeLineCap="round"' in fg, "羽毛用圆角端帽")
+check('android:strokeLineJoin="round"' in fg, "羽毛用圆角拐角")
 
-# ---- 7b. 羽片 + 羽轴 ----
-print("\n7b. 羽毛含羽片与负空间羽轴")
+# ---- 7b. 羽毛是多条描边路径 ----
+print("\n7b. 羽毛是多条描边路径（羽片 + 羽轴 + 羽枝缝）")
 for label, xml in (("前景层", fg), ("单色层", mono)):
-    n_path = xml.count('android:fillColor="#FFFFFF"')
-    check(n_path >= 1, f"{label}有白色填充路径（{n_path} 条）")
-    # 羽轴改为"在同一路径内用 evenOdd 挖缝"，不再叠独立白线（白压白等于没画）。
-    # 注意 Android 的拼写是 fillType="evenOdd"（驼峰），不是 SVG 的 "evenodd"；
-    # 少了 fillType，负空间子路径会被填成实心，羽轴反而糊掉。
-    check('android:fillType="evenOdd"' in xml, f"{label}使用 fillType=evenOdd 挖出羽轴")
-    check(xml.count(" M") >= 1 or xml.count("M") >= 2,
-          f"{label}路径含多个子路径（羽片 + 羽轴缝）")
+    n_stroke = xml.count('android:strokeColor="#FFFFFF"')
+    check(n_stroke >= 3, f"{label}有白色描边路径（{n_stroke} 条）")
+    # 描边羽毛由 6 条 stroke 路径组成（3 条羽片/羽轴曲线 + 3 条羽枝缝线段），
+    # 至少要有多个 M 子路径；丢了羽枝缝羽毛就退化成一片叶子。
+    check(xml.count("M") >= 6, f"{label}含多个 M 子路径（{xml.count('M')} 个）")
 
 # ---- 7c. 细长比例 ----
 print("\n7c. 羽毛保持细长比例（不要退化成又短又胖的『豌豆荚』）")

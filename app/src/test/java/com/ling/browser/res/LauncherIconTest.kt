@@ -22,13 +22,9 @@ class LauncherIconTest {
 
     // 用普通字符串 + 转义引号，避免 raw string 结尾紧跟引号造成的可读性问题
     private val PATH_DATA_RE = Regex("android:pathData=\"([^\"]+)\"")
-    private val WHITE_FILL_RE = Regex("android:fillColor=\"#FFFFFF\"")
 
     private fun pathData(xml: String): List<String> =
         PATH_DATA_RE.findAll(xml).map { it.groupValues[1] }.toList()
-
-    /** 数一数白色填充路径有几条（羽片 + 羽轴 = 2）。 */
-    private fun whitePathCount(xml: String): Int = WHITE_FILL_RE.findAll(xml).count()
 
     /**
      * 解析 pathData，返回所有**端点**坐标。
@@ -163,31 +159,36 @@ class LauncherIconTest {
     fun `前景层包含环与羽毛`() {
         val xml = drawable("ic_launcher_foreground.xml").readText()
         assertTrue("外环应是描边而非填充", xml.contains("android:strokeColor"))
-        assertTrue("羽毛应是填充的白色路径", xml.contains("android:fillColor=\"#FFFFFF\""))
-        assertTrue("应有高光点", xml.contains("#E8FBFF"))
+        assertTrue("羽毛应是描边白色路径", xml.contains("android:strokeColor=\"#FFFFFF\""))
+        assertTrue("羽毛 fill 应为空（描边线画）", xml.contains("android:fillColor=\"#00000000\""))
+        assertTrue("羽毛用圆角端帽", xml.contains("android:strokeLineCap=\"round\""))
+        assertTrue("羽毛用圆角拐角", xml.contains("android:strokeLineJoin=\"round\""))
     }
 
     @Test
-    fun `前景层用负空间挖出羽轴`() {
-        // 羽轴不是叠一条独立白线 —— 白压白等于没画。
-        // 正确做法是在同一条路径内用 evenOdd 挖出细缝，所以这里校验
-        // fillType 与多子路径（羽片 + 羽轴缝）同时存在。
-        // 注意 Android 拼写是 fillType="evenOdd"（驼峰），不是 SVG 的 "evenodd"。
-        // 曾经的 bug：生成脚本只取第一条路径，羽轴丢失而检查仍全绿。
+    fun `前景层羽毛是多条描边路径`() {
+        // 描边羽毛（与主页 logo 一致）由多条 stroke 路径组成：
+        // 3 条羽片/羽轴曲线 + 3 条羽枝缝线段。只取一条会丢掉羽枝缝，
+        // 羽毛就退化成一片叶子。
         val xml = drawable("ic_launcher_foreground.xml").readText()
-        assertTrue("羽毛未使用 fillType=evenOdd 挖羽轴", xml.contains("android:fillType=\"evenOdd\""))
-        val subpaths = Regex("M").findAll(xml).count()
         assertTrue(
-            "路径只有 $subpaths 个子路径，应为『羽片 + 羽轴缝』至少 2 个",
-            subpaths >= 2,
+            "描边路径不足 3 条，羽片/羽轴/羽枝缝丢失",
+            Regex("android:strokeColor=\"#FFFFFF\"").findAll(xml).count() >= 3,
+        )
+        assertTrue(
+            "M 子路径不足 6 个，羽枝缝可能丢失",
+            Regex("M").findAll(xml).count() >= 6,
         )
     }
 
     @Test
-    fun `单色层也用负空间挖出羽轴`() {
+    fun `单色层也是描边羽毛`() {
         val xml = drawable("ic_launcher_monochrome.xml").readText()
-        assertTrue("单色层羽毛未使用 fillType=evenOdd", xml.contains("android:fillType=\"evenOdd\""))
-        assertTrue("单色层缺少羽轴缝", Regex("M").findAll(xml).count() >= 2)
+        assertTrue(
+            "单色层描边路径不足 3 条",
+            Regex("android:strokeColor=\"#FFFFFF\"").findAll(xml).count() >= 3,
+        )
+        assertTrue("单色层缺羽枝缝", Regex("M").findAll(xml).count() >= 6)
     }
 
     @Test

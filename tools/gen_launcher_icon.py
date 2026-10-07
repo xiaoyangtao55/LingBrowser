@@ -65,8 +65,10 @@ def path_to_androiddata(d, matrix=None, transform="fg"):
     out = []
     for sp in subs:
         # parse_path 在 Z 之后会留下一个单点子路径，转出来是没有任何作用的
-        # 孤立 "M" 指令（此前生成的前景层里就有两个），直接丢掉。
-        if len(sp["pts"]) < 3:
+        # 孤立 "M" 指令，直接丢掉。注意阈值是 <2 而不是 <3：
+        # 描边羽毛里有「羽枝缝」这种两点线段（M x y L x y），
+        # 2 点是一条合法线段，绝不能丢 —— 丢了羽枝缝就没了。
+        if len(sp["pts"]) < 2:
             continue
         chunks = []
         prev_abs = None
@@ -104,10 +106,8 @@ def main():
     circles = [i for i in items if i["type"] == "circle"]
     paths = [i for i in items if i["type"] == "path"]
 
-    bg_circle = circles[0]                                     # 渐变底
     ring = next(c for c in circles if c["stroke"])             # 白环
-    dot = next(c for c in circles if c["fill"] and c["fill"].startswith("#") and not c["stroke"])
-    feather = paths[0]
+    feather = paths                                            # 描边羽毛（全部 stroke 路径）
 
     # 白环外沿离画布中心的最远距离，决定前景缩放系数
     ring_far = (math.hypot(ring["cx"] - CENTER, ring["cy"] - CENTER)
@@ -144,39 +144,37 @@ def main():
 '''
 
     # ---------------- foreground ----------------
-    # 羽毛由多条白色路径组成（羽片 + 羽轴），必须全部输出 ——
-    # 只取第一条会丢掉羽轴，羽毛就退化成一片叶子。
-    feather_paths = [
-        (
-            path_to_androiddata(p["d"], matrix=p.get("matrix"), transform="fg"),
-            # SVG 的 fill-rule="evenodd" 必须转成 Android 的 fillType="evenOdd"，
-            # 否则羽轴的负空间子路径会变成**实心**填充，羽轴反而糊掉。
-            "evenOdd" if p.get("fill-rule") == "evenodd" else "nonZero",
-        )
-        for p in paths
+    # 羽毛是**描边**路径（与主页 logo 一致）：全部输出，fill=none + 白色描边
+    # + round cap/join。必须逐条输出 —— 只取第一条会丢掉羽轴和羽枝缝。
+    feather_d = [
+        path_to_androiddata(p["d"], matrix=p.get("matrix"), transform="fg")
+        for p in feather
     ]
-    feather_xml = "\n\n".join(
-        f'''    <path
-        android:fillColor="#FFFFFF"
-        android:fillAlpha="{paths[i]['opacity']}"
-        android:fillType="{fill_type}"
-        android:pathData="{d}" />'''
-        for i, (d, fill_type) in enumerate(feather_paths)
+    feather_sw = max(p["sw"] for p in feather)
+    feather_sw_dp = sr(feather_sw)
+
+    def feather_block(ds, alpha_attr=""):
+        return "\n\n".join(
+            f'''    <path
+        android:pathData="{d}"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="{fmt(feather_sw_dp)}"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"{alpha_attr}
+        android:fillColor="#00000000" />'''
+            for d in ds
+        )
+
+    # 前景层保留 0.96 描边透明度；单色层不带透明度（系统重新着色，半透明显脏）
+    feather_xml = feather_block(
+        feather_d, alpha_attr=f'\n        android:strokeAlpha="{feather[0]["opacity"]}"'
     )
-    # 单色层不带透明度：系统会重新着色，半透明反而会显得脏
-    mono_feather_xml = "\n\n".join(
-        f'''    <path
-        android:fillColor="#FFFFFF"
-        android:fillType="{fill_type}"
-        android:pathData="{d}" />'''
-        for d, fill_type in feather_paths
-    )
-    dot_cx, dot_cy, dot_r = sx(dot["cx"]), sy(dot["cy"]), sr(dot["r"])
+    mono_feather_xml = feather_block(feather_d)
 
     fg_xml = f'''<?xml version="1.0" encoding="utf-8"?>
 <!--
   「翎」启动图标 · 前景层
-  浏览器外环 + 羽毛 + 高光点。
+  浏览器外环 + 描边羽毛（与主页 logo 同一造型）。
   整体已缩放到中心 72dp 安全区内（缩放系数 {FG:.4f}），
   因此无论 launcher 用圆形、方形还是圆角遮罩都不会被裁切。
   由 tools/gen_launcher_icon.py 生成，请勿手改。
@@ -197,16 +195,8 @@ a{fmt(sr(ring['r']))},{fmt(sr(ring['r']))} 0 1,0 0,{fmt(-2 * sr(ring['r']))}z"
         android:strokeAlpha="{ring['opacity']}"
         android:fillColor="#00000000" />
 
-    <!-- 羽毛：羽片 + 羽轴 -->
+    <!-- 羽毛：描边路径（羽片 + 羽轴 + 羽枝缝） -->
 {feather_xml}
-
-    <!-- 高光点 -->
-    <path
-        android:pathData="M{fmt(dot_cx)},{fmt(dot_cy - dot_r)}
-a{fmt(dot_r)},{fmt(dot_r)} 0 1,0 0,{fmt(2 * dot_r)}
-a{fmt(dot_r)},{fmt(dot_r)} 0 1,0 0,{fmt(-2 * dot_r)}z"
-        android:fillColor="{dot['fill']}"
-        android:fillAlpha="{dot['opacity']}" />
 </vector>
 '''
 
@@ -232,7 +222,7 @@ a{fmt(sr(ring['r']))},{fmt(sr(ring['r']))} 0 1,0 0,{fmt(-2 * sr(ring['r']))}z"
         android:strokeWidth="{fmt(sr(ring['sw']))}"
         android:fillColor="#00000000" />
 
-    <!-- 羽毛：羽片 + 羽轴（与前景层一致） -->
+    <!-- 羽毛：描边路径（与前景层一致） -->
 {mono_feather_xml}
 </vector>
 '''
@@ -251,7 +241,7 @@ a{fmt(sr(ring['r']))},{fmt(sr(ring['r']))} 0 1,0 0,{fmt(-2 * sr(ring['r']))}z"
     print()
     print(f"前景缩放系数 = {FG:.4f}")
     print(f"白环: 圆心({fmt(sx(ring['cx']))},{fmt(sy(ring['cy']))}) r={fmt(sr(ring['r']))} sw={fmt(sr(ring['sw']))}")
-    print(f"高光: 圆心({fmt(dot_cx)},{fmt(dot_cy)}) r={fmt(dot_r)}")
+    print(f"羽毛: {len(feather)} 条描边路径，stroke-width={fmt(feather_sw_dp)}dp")
 
 
 if __name__ == "__main__":

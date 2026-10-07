@@ -1,7 +1,7 @@
-"""量化分析：羽毛与外环的几何关系是否协调。
+"""量化分析：描边羽毛与外环的几何关系是否协调。
 
-从 ASCII 预览看，羽毛右侧的弧线明显超出了外环。
-这里用数字确认，避免凭感觉判断。
+从 ASCII 预览看构图，这里用数字确认羽毛（描边）有没有压到外环、
+视觉占比是否合理，避免凭感觉判断。
 """
 import os
 import sys
@@ -15,8 +15,7 @@ circles = [i for i in items if i["type"] == "circle"]
 paths = [i for i in items if i["type"] == "path"]
 
 ring = next(c for c in circles if c["stroke"])
-dot = next(c for c in circles if c["fill"].startswith("#") and not c["stroke"])
-feather = paths[0]
+feather = paths
 
 rcx, rcy, rr, rsw = ring["cx"], ring["cy"], ring["r"], ring["sw"]
 outer = rr + rsw / 2
@@ -27,17 +26,18 @@ print(f"  圆心 ({rcx}, {rcy})  半径 {rr}  线宽 {rsw}")
 print(f"  环内沿半径 {inner:.1f}   环外沿半径 {outer:.1f}")
 print()
 
-print("=== 羽毛各点到环心的距离 ===")
+print("=== 羽毛各点到环心的距离（含描边半宽）===")
 pts = []
-# 注意：必须传入 matrix，否则 <g transform> 不会生效
-for sub, _ in flatten(parse_path(feather["d"]), steps=48,
-                      matrix=feather.get("matrix")):
-    pts.extend(sub)
+sw = max(p["sw"] for p in feather)
+for p in feather:
+    for sub, _ in flatten(parse_path(p["d"]), steps=48,
+                          matrix=p.get("matrix")):
+        pts.extend(sub)
 
 inside = outside = 0
 maxd = 0
 for x, y in pts:
-    d = math.hypot(x - rcx, y - rcy)
+    d = math.hypot(x - rcx, y - rcy) + sw / 2
     maxd = max(maxd, d)
     if d <= outer:
         inside += 1
@@ -45,27 +45,22 @@ for x, y in pts:
         outside += 1
 
 total = len(pts)
-print(f"  采样点 {total} 个")
-print(f"  在环内/环上: {inside}  ({inside/total*100:.1f}%)")
-print(f"  超出环外   : {outside} ({outside/total*100:.1f}%)")
-print(f"  离环心最远 : {maxd:.1f}  (环外沿 {outer:.1f})")
+print(f"  采样点 {total} 个，stroke-width {sw}")
+print(f"  描边外沿在环外沿内: {inside}  ({inside/total*100:.1f}%)")
+print(f"  描边外沿超出环外沿: {outside} ({outside/total*100:.1f}%)")
+print(f"  描边外沿离环心最远 : {maxd:.1f}  (环外沿 {outer:.1f}，内沿 {inner:.1f})")
 print()
 
-if outside:
+if maxd > outer:
     over = maxd - outer
-    print(f"  ! 羽毛有 {over:.1f} 单位超出外环 ({over/outer*100:.1f}% 的环半径)")
+    print(f"  ! 羽毛描边有 {over:.1f} 单位超出外环 ({over/outer*100:.1f}% 的环半径)")
     print(f"    超出部分会穿出环，破坏「浏览器」的视觉隐喻")
+    sys.exit(1)
+elif maxd > inner + 0.5:
+    print("  ! 羽毛描边压到了环内沿（间隙不足），低分辨率下会粘连")
+    sys.exit(1)
 else:
-    print("  OK 羽毛完全在外环内")
-print()
-
-# 高光点是否压住羽毛
-dcx, dcy, dr = dot["cx"], dot["cy"], dot["r"]
-mind = min(math.hypot(x - dcx, y - dcy) for x, y in pts)
-print("=== 高光点 ===")
-print(f"  圆心 ({dcx}, {dcy})  半径 {dr}")
-print(f"  离羽毛最近距离 {mind:.1f}")
-print("  " + ("OK 不与羽毛重叠" if mind > dr else "高光点压在羽毛上"))
+    print("  OK 羽毛描边完全落在环内沿以内")
 
 # 羽毛相对整圆的占比
 print()
