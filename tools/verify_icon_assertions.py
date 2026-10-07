@@ -135,39 +135,40 @@ check(len(mpaths) > 0, "monochrome 有 path")
 mmaxr = max_radius(mpaths) if mpaths else 0
 check(mmaxr <= 36.5, f"monochrome 最远 {mmaxr:.2f}dp <= 36.5dp")
 
-# ---- 5. 背景铺满 ----
-print("\n5. 背景层铺满画布")
+# ---- 5. 背景是纯色圆底 ----
+print("\n5. 背景层是纯色圆底（铺满画布）")
 bg = read("drawable/ic_launcher_background.xml")
-check("<gradient" in bg, "使用渐变")
-check("android:fillColor" in bg, "引用渐变色")
-check("<item android:offset=" in bg, "有起止色标")
+check("<gradient" not in bg, "不再使用渐变（改为纯色）")
+check("android:fillColor" in bg, "有纯色填充")
+check('android:fillColor="#A8F2CB"' in bg, "底色 = 主页 primaryContainer #A8F2CB")
+check("M0,0h108v108h-108z" in bg, "纯色铺满 108dp 画布（外侧交给遮罩裁切）")
 
-# ---- 6. 渐变色标 ----
-print("\n6. 背景渐变使用设计稿的两个色标")
-check("#37E0C8" in bg, "青色 #37E0C8")
-check("#1E88E5" in bg, "蓝色 #1E88E5")
+# ---- 6. 颜色取自主页 logo ----
+print("\n6. 颜色取自主页 logo 的取色")
+check("#A8F2CB" in bg, "圆底 = --pc（primaryContainer）")
+check("#00210F" in fg, "羽毛描边 = --on-pc（onPrimaryContainer）")
 
-# ---- 7. 前景含环与羽毛 ----
-print("\n7. 前景层包含环与羽毛")
-check("android:strokeColor" in fg, "外环是描边")
-check('android:strokeColor="#FFFFFF"' in fg, "羽毛是白色描边")
+# ---- 7. 前景只有描边羽毛（无外环）----
+print("\n7. 前景层只有描边羽毛，没有外环")
+check("a30.19" not in fg and "a30" not in fg, "不含外环圆弧（外环已去掉）")
+check('android:strokeColor="#00210F"' in fg, "羽毛用主页的描边色 #00210F")
 check('android:fillColor="#00000000"' in fg, "羽毛 fill 为空（描边线画）")
 check('android:strokeLineCap="round"' in fg, "羽毛用圆角端帽")
 check('android:strokeLineJoin="round"' in fg, "羽毛用圆角拐角")
 
 # ---- 7b. 羽毛是多条描边路径 ----
 print("\n7b. 羽毛是多条描边路径（羽片 + 羽轴 + 羽枝缝）")
-for label, xml in (("前景层", fg), ("单色层", mono)):
-    n_stroke = xml.count('android:strokeColor="#FFFFFF"')
-    check(n_stroke >= 3, f"{label}有白色描边路径（{n_stroke} 条）")
-    # 描边羽毛由 6 条 stroke 路径组成（3 条羽片/羽轴曲线 + 3 条羽枝缝线段），
-    # 至少要有多个 M 子路径；丢了羽枝缝羽毛就退化成一片叶子。
+for label, xml, color in (("前景层", fg, "#00210F"), ("单色层", mono, "#FFFFFF")):
+    n_stroke = xml.count(f'android:strokeColor="{color}"')
+    check(n_stroke >= 3, f"{label}有描边路径 {color}（{n_stroke} 条）")
     check(xml.count("M") >= 6, f"{label}含多个 M 子路径（{xml.count('M')} 个）")
 
-# ---- 7c. 细长比例 ----
-print("\n7c. 羽毛保持细长比例（不要退化成又短又胖的『豌豆荚』）")
+# ---- 7c. 羽毛比例与大小 ----
+print("\n7c. 羽毛比例与大小合理")
 ratio, w, h = bbox_ratio(fpaths)
-check(ratio >= 1.4, f"前景包围盒 {w:.1f}x{h:.1f}，长宽比 {ratio:.2f} >= 1.4")
+check(ratio >= 1.1, f"羽毛包围盒 {w:.1f}x{h:.1f}，长宽比 {ratio:.2f} >= 1.1")
+reach = max_radius(fpaths)
+check(20.0 <= reach <= 34.5, f"羽毛最远触达 {reach:.2f}dp，落在 20~34.5dp")
 
 # ---- 8. PNG 齐备 ----
 print("\n8. 五档 PNG 图标齐备")

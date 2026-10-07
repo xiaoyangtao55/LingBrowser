@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
   「翎」启动图标 · 前景层
-  浏览器外环 + 描边羽毛（与主页 logo 同一造型）。
-  整体已缩放到中心 72dp 安全区内（缩放系数 0.9176），
+  只有一枚描边羽毛（与主页 logo 同款），**无外环**。
+  整体已缩放到中心 72dp 安全区内（缩放系数 0.8723，留 8% 余量），
   因此无论 launcher 用圆形、方形还是圆角遮罩都不会被裁切。
   由 tools/gen_launcher_icon.py 生成，请勿手改。
 -->
@@ -12,68 +12,52 @@
     android:viewportWidth="108"
     android:viewportHeight="108">
 
-    <!-- 浏览器外环 -->
-    <path
-        android:pathData="M54,20.71
-a30.19,30.19 0 1,0 0,60.39
-a30.19,30.19 0 1,0 0,-60.39z"
-        android:strokeColor="#FFFFFF"
-        android:strokeWidth="5.42"
-        android:strokeAlpha="0.95"
-        android:fillColor="#00000000" />
-
     <!-- 羽毛：描边路径（羽片 + 羽轴 + 羽枝缝） -->
     <path
-        android:pathData="M72.15,35.5 C69.81,39.88 68.62,42.07 67.81,43.51 C67.03,44.94 66.19,46.39 65.37,47.79 C64.54,49.21 63.71,50.62 62.83,51.98 C61.96,53.34 61.09,54.72 60.15,56.02 C59.22,57.31 58.35,58.7 57.2,59.78 C56.05,60.87 54.65,61.84 53.25,62.5 C51.86,63.14 50.4,63.5 48.86,63.63 C47.31,63.74 44.83,63.22 44.04,63.16"
-        android:strokeColor="#FFFFFF"
-        android:strokeWidth="3.48"
+        android:pathData="M77.57,34 C74.53,39.68 72.98,42.53 71.93,44.41 C70.91,46.25 69.83,48.13 68.76,49.96 C67.68,51.81 66.6,53.63 65.47,55.39 C64.34,57.16 63.21,58.96 61.99,60.64 C60.78,62.32 59.65,64.12 58.15,65.53 C56.66,66.94 54.84,68.2 53.02,69.06 C51.23,69.89 49.32,70.36 47.33,70.52 C45.32,70.66 42.09,70 41.06,69.92"
+        android:strokeColor="#00210F"
+        android:strokeWidth="4.42"
         android:strokeLineCap="round"
         android:strokeLineJoin="round"
-        android:strokeAlpha="0.96"
         android:fillColor="#00000000" />
 
     <path
-        android:pathData="M72.15,35.5 C67.11,37.09 64.64,37.92 63.05,38.54 C61.43,39.15 59.86,39.79 58.33,40.47 C56.78,41.13 55.27,41.83 53.8,42.58 C52.33,43.34 50.86,44.09 49.5,44.96 C48.14,45.81 46.76,46.64 45.61,47.73 C44.44,48.81 43.4,50.19 42.59,51.43 C41.76,52.66 41.13,53.87 40.68,55.12 C40.23,56.36 40.04,58.25 39.89,58.87"
-        android:strokeColor="#FFFFFF"
-        android:strokeWidth="3.48"
+        android:pathData="M77.57,34 C71.02,36.07 67.82,37.14 65.75,37.94 C63.65,38.75 61.61,39.57 59.62,40.46 C57.6,41.31 55.64,42.22 53.74,43.19 C51.83,44.19 49.93,45.15 48.16,46.28 C46.39,47.39 44.6,48.47 43.11,49.87 C41.59,51.28 40.24,53.08 39.19,54.68 C38.11,56.28 37.28,57.85 36.7,59.48 C36.12,61.08 35.87,63.54 35.68,64.34"
+        android:strokeColor="#00210F"
+        android:strokeWidth="4.42"
         android:strokeLineCap="round"
         android:strokeLineJoin="round"
-        android:strokeAlpha="0.96"
         android:fillColor="#00000000" />
 
     <path
-        android:pathData="M72.15,35.5 C67.22,38.94 64.3,41.05 62.41,42.49 C60.52,43.96 58.65,45.45 56.82,46.98 C54.99,48.49 53.18,50.06 51.42,51.64 C49.63,53.21 47.76,54.93 46.14,56.44 C44.53,57.95 43.04,59.4 41.68,60.7 C40.3,62.01 38.53,63.74 37.91,64.33 L35.85,66.31"
-        android:strokeColor="#FFFFFF"
-        android:strokeWidth="3.48"
+        android:pathData="M77.57,34 C71.16,38.47 67.38,41.2 64.92,43.08 C62.46,44.98 60.03,46.92 57.66,48.91 C55.28,50.86 52.94,52.91 50.64,54.95 C48.33,57 45.9,59.23 43.8,61.19 C41.7,63.15 39.77,65.03 38,66.71 C36.2,68.43 33.91,70.66 33.11,71.44 L30.43,74"
+        android:strokeColor="#00210F"
+        android:strokeWidth="4.42"
         android:strokeLineCap="round"
         android:strokeLineJoin="round"
-        android:strokeAlpha="0.96"
         android:fillColor="#00000000" />
 
     <path
-        android:pathData="M59.2,57.31 L50.91,52.66"
-        android:strokeColor="#FFFFFF"
-        android:strokeWidth="3.48"
+        android:pathData="M60.75,62.32 L49.98,56.28"
+        android:strokeColor="#00210F"
+        android:strokeWidth="4.42"
         android:strokeLineCap="round"
         android:strokeLineJoin="round"
-        android:strokeAlpha="0.96"
         android:fillColor="#00000000" />
 
     <path
-        android:pathData="M63.05,51.64 L55.97,48.26"
-        android:strokeColor="#FFFFFF"
-        android:strokeWidth="3.48"
+        android:pathData="M65.75,54.95 L56.55,50.56"
+        android:strokeColor="#00210F"
+        android:strokeWidth="4.42"
         android:strokeLineCap="round"
         android:strokeLineJoin="round"
-        android:strokeAlpha="0.96"
         android:fillColor="#00000000" />
 
     <path
-        android:pathData="M66.6,45.66 L61.18,44"
-        android:strokeColor="#FFFFFF"
-        android:strokeWidth="3.48"
+        android:pathData="M70.36,47.2 L63.32,45.04"
+        android:strokeColor="#00210F"
+        android:strokeWidth="4.42"
         android:strokeLineCap="round"
         android:strokeLineJoin="round"
-        android:strokeAlpha="0.96"
         android:fillColor="#00000000" />
 </vector>

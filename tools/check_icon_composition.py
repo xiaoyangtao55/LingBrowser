@@ -1,7 +1,8 @@
-"""量化分析：描边羽毛与外环的几何关系是否协调。
+"""量化分析：纯色圆底 + 描边羽毛的构图是否协调。
 
-从 ASCII 预览看构图，这里用数字确认羽毛（描边）有没有压到外环、
-视觉占比是否合理，避免凭感觉判断。
+启动图标现在与主页 logo 同款：**纯色圆底（primaryContainer）+ 描边羽毛
+（onPrimaryContainer），没有外环**。这里用数字确认：底色圆确实是纯色、
+没有残留外环、羽毛没有越出圆底、占比也在合理区间 —— 避免"看着差不多"就提交。
 """
 import os
 import sys
@@ -14,58 +15,84 @@ view, grad, items = parse_svg(XML)
 circles = [i for i in items if i["type"] == "circle"]
 paths = [i for i in items if i["type"] == "path"]
 
-ring = next(c for c in circles if c["stroke"])
+problems = []
+
+
+def bad(m):
+    problems.append(m)
+    print("  FAIL " + m)
+
+
+def ok(m):
+    print("  OK   " + m)
+
+
+print("=== 造型：纯色圆底 + 描边羽毛（无外环）===")
+
+bg = [c for c in circles if c["fill"] and not c["stroke"]]
+rings = [c for c in circles if c["stroke"]]
+
+if len(bg) == 1:
+    # 必须是 #RRGGBB 纯色：写成 url(#g) 之类（渐变/引用）即使没定义渐变，
+    # 也会让"纯色圆底"这个设计前提失效，必须挡住。
+    fill = bg[0]["fill"]
+    if fill.startswith("#"):
+        ok(f"底色是 1 个纯色圆 {fill}")
+    else:
+        bad(f"底色不是纯色：{fill}（应为 #RRGGBB，不使用渐变/引用）")
+else:
+    bad(f"底色圆数量异常：{len(bg)} 个（应为 1）")
+if rings:
+    bad(f"仍有 {len(rings)} 个描边圆 —— 外环应已去掉")
+else:
+    ok("没有外环（无描边圆）")
+if grad:
+    bad(f"背景仍在使用渐变：{grad}")
+else:
+    ok("背景为纯色（无渐变）")
+
+if not bg:
+    print()
+    print("=" * 55)
+    print("没有底色圆，无法继续")
+    sys.exit(1)
+
+bgc = bg[0]
 feather = paths
 
-rcx, rcy, rr, rsw = ring["cx"], ring["cy"], ring["r"], ring["sw"]
-outer = rr + rsw / 2
-inner = rr - rsw / 2
-
-print("=== 外环参数 ===")
-print(f"  圆心 ({rcx}, {rcy})  半径 {rr}  线宽 {rsw}")
-print(f"  环内沿半径 {inner:.1f}   环外沿半径 {outer:.1f}")
 print()
-
-print("=== 羽毛各点到环心的距离（含描边半宽）===")
-pts = []
+print("=== 羽毛与底色圆的关系 ===")
 sw = max(p["sw"] for p in feather)
+pts = []
 for p in feather:
-    for sub, _ in flatten(parse_path(p["d"]), steps=48,
-                          matrix=p.get("matrix")):
+    for sub, _ in flatten(parse_path(p["d"]), steps=48, matrix=p.get("matrix")):
         pts.extend(sub)
 
-inside = outside = 0
-maxd = 0
-for x, y in pts:
-    d = math.hypot(x - rcx, y - rcy) + sw / 2
-    maxd = max(maxd, d)
-    if d <= outer:
-        inside += 1
-    else:
-        outside += 1
+rcx, rcy, rr = bgc["cx"], bgc["cy"], bgc["r"]
+maxd = max(math.hypot(x - rcx, y - rcy) for x, y in pts) + sw / 2
 
-total = len(pts)
-print(f"  采样点 {total} 个，stroke-width {sw}")
-print(f"  描边外沿在环外沿内: {inside}  ({inside/total*100:.1f}%)")
-print(f"  描边外沿超出环外沿: {outside} ({outside/total*100:.1f}%)")
-print(f"  描边外沿离环心最远 : {maxd:.1f}  (环外沿 {outer:.1f}，内沿 {inner:.1f})")
-print()
+print(f"  羽毛 {len(feather)} 条描边路径，采样点 {len(pts)} 个，stroke-width {sw}")
+print(f"  底色圆 圆心({rcx:.0f},{rcy:.0f}) r={rr:.0f}")
+print(f"  羽毛描边外沿离圆心最远 {maxd:.1f}  (占圆半径 {maxd / rr * 100:.0f}%)")
 
-if maxd > outer:
-    over = maxd - outer
-    print(f"  ! 羽毛描边有 {over:.1f} 单位超出外环 ({over/outer*100:.1f}% 的环半径)")
-    print(f"    超出部分会穿出环，破坏「浏览器」的视觉隐喻")
-    sys.exit(1)
-elif maxd > inner + 0.5:
-    print("  ! 羽毛描边压到了环内沿（间隙不足），低分辨率下会粘连")
-    sys.exit(1)
+if maxd > rr:
+    bad(f"羽毛描边越出底色圆 {maxd - rr:.1f} 单位")
 else:
-    print("  OK 羽毛描边完全落在环内沿以内")
+    ok("羽毛描边完全在底色圆内")
 
-# 羽毛相对整圆的占比
+ratio = maxd / rr
+if ratio < 0.5:
+    bad(f"羽毛只占圆半径 {ratio * 100:.0f}%，偏小（至少 50%）")
+elif ratio > 0.95:
+    bad(f"羽毛占圆半径 {ratio * 100:.0f}%，太贴边（应 <= 95%）")
+else:
+    ok(f"羽毛占比 {ratio * 100:.0f}%，落在 50%~95% 之间")
+
 print()
-print("=== 视觉占比 ===")
-fx = [p[0] for p in pts]; fy = [p[1] for p in pts]
-print(f"  羽毛包围盒 x[{min(fx):.0f},{max(fx):.0f}] y[{min(fy):.0f},{max(fy):.0f}]")
-print(f"  整圆直径 256，外环外沿直径 {outer*2:.0f}")
-print(f"  羽毛宽度 {max(fx)-min(fx):.0f}，占环直径 {(max(fx)-min(fx))/(outer*2)*100:.0f}%")
+print("=" * 55)
+if problems:
+    print(f"{len(problems)} 个问题：")
+    for p in problems:
+        print("  ! " + p)
+    sys.exit(1)
+print("图标构图校验通过")

@@ -954,11 +954,9 @@ webViews[tab.id]?.let { loadHome(tab.id, it) }   // WebView 不存在就静默�
 
 ## 五、启动图标
 
-图标源自 `tools/icon.xml`：**渐变圆底（青 #37E0C8 → 蓝 #1E88E5）+ 白色浏览器外环 +
-一枚描边羽毛**（与主页 logo 同一造型）。
-
-羽毛的造型目标是"在 48px 下也一眼认得出是羽毛"，而不是"渐变圆里有个白色叶片"：
-根部要露出裸羽柄、羽轴要弯、羽枝要一片片分开。
+图标源自 `tools/icon.xml`：**纯色圆底（主页 primaryContainer `#A8F2CB`）+ 一枚描边
+羽毛（主页 onPrimaryContainer `#00210F`）** —— 与主页 logo 完全同款，没有渐变、
+没有浏览器外环、没有高光点。
 
 Android 的自适应图标有一个容易踩的坑：**画布 108dp，但只有中心 72dp 直径的
 圆形区域对所有遮罩形状都可见**（圆形、方形、圆角、水滴…）。原图整圆半径占满
@@ -968,30 +966,38 @@ Android 的自适应图标有一个容易踩的坑：**画布 108dp，但只有�
 
 | 层 | 内容 | 为什么 |
 |---|---|---|
-| `ic_launcher_background` | 渐变方底（铺满 108dp） | 背景层被裁是**预期**的，铺满才不会露边 |
-| `ic_launcher_foreground` | 外环 + 描边羽毛（缩到 72dp 内） | 前景必须完整可见，任何遮罩都不能裁 |
-| `ic_launcher_monochrome` | 环 + 描边羽毛剪影 | Android 13+ 主题图标由系统重新着色，随壁纸动态取色 |
+| `ic_launcher_background` | 纯色方底（铺满 108dp） | 背景层被裁是**预期**的；"铺满 + 遮罩裁切"在各遮罩形状下都呈现为纯色圆/方/圆角底 |
+| `ic_launcher_foreground` | 描边羽毛（缩到 72dp 内） | 前景必须完整可见，任何遮罩都不能裁 |
+| `ic_launcher_monochrome` | 描边羽毛剪影 | Android 13+ 主题图标由系统按壁纸重新着色 —— 启动图标"跟随取色"的唯一路径 |
 
-前景缩放系数 **0.9176**（白环外沿恰好贴住安全区边界）。这个系数不再写死 ——
-`tools/gen_launcher_icon.py` 从 `icon.xml` 里实测的圆环参数算出来，环一改就自动重算。
+前景缩放系数 **0.8723**：让羽毛描边外沿落在安全区边界内并留 8% 余量。
+这个系数不写死 —— `tools/gen_launcher_icon.py` 按 `icon.xml` 里羽毛**实测的最远
+触达**算出来，羽毛的形状/大小一改就自动重算（旧版是按外环算的，外环去掉后
+改成了按羽毛算）。
 
-### 羽毛造型：与主页同一枚描边羽毛
+### 造型与取色：与主页 logo 对齐
 
-早期启动图标用**填充**羽毛（`emit_icon_xml.py` 参数化生成的羽片 + `evenOdd`
-挖羽轴），与主页 logo 的**描边**羽毛是两套造型。用户要求两者一致，于是让
-主页 `HomePage.kt` 里的描边羽毛成为**唯一事实来源**：
+早期启动图标是"**填充**羽毛 + 白色浏览器外环 + 青蓝渐变底 + 高光点"，与主页
+logo 的"**描边**羽毛 + 纯色圆底"是两套造型。现在让主页 `HomePage.kt` 成为
+**唯一事实来源**：
 
 - `tools/emit_icon_xml.py` 从 `HomePage.kt` 抽出内联 SVG 的 6 条 stroke 路径，
-  等比缩放 + 平移到 256×256 的外环内（描边宽随缩放等比放大 1.6 → 9），
-  写出 `tools/icon.xml` —— 不再是手工参数化的填充造型。
-- 描边外沿离环内沿留 **5 单位**间隙（缩放系数由"尖端 + 半描边 ≤ 环内沿 − 余量"
-  解出），低分辨率下羽毛描边不会和外环粘连。
-- 去掉旧版的高光点（主页没有）。
+  等比缩放（描边宽 1.6 → 12）并居中到 256×256 画布，配上纯色圆底写出
+  `tools/icon.xml`。改主页 logo 会自动反映到启动图标，不存在两处各画一遍的漂移。
+- **外环与高光点都去掉了** —— 主页 logo 没有这两样。
+- 颜色取主页 `HomeColors` 的默认配色：圆底 `#A8F2CB`（`--pc`）、
+  羽毛描边 `#00210F`（`--on-pc`）。
 
-这条改动顺带把 `svg_preview.py` 从"只渲染填充"扩展成"也渲染描边"（点到线段
-距离判定），`make_icons.py` 的 PNG fallback 从"evenOdd 异或填多边形"改成
-"圆角线描点列"，`check_icon_composition.py` 从"羽片是否超出外环"改成
-"羽毛描边是否压到环内沿"。
+关于"跟随取色"要说清楚：启动图标是**静态资源**，无法在运行时读到壁纸色，所以
+底色只能取"主页在浅色主题下的那一档 primaryContainer"作为固定值。真正会随壁纸
+变色的是 Android 13+ 的**主题化图标** —— 系统读 `ic_launcher_monochrome` 单色层
+并重新着色。这两件事要分开理解，否则会误以为图标本该自己变色。
+
+这条改动顺带把工具链对齐了：`svg_preview.py` 从"只渲染填充"扩展成"也渲染描边"
+（点到线段距离判定）；`make_icons.py` 的 PNG fallback 从"evenOdd 异或填多边形"
+改成"圆角线描点列"；`check_icon_composition.py` 从"羽片是否超出外环"改成
+"底色是否纯色、外环是否残留、羽毛占比是否合理"；`check_launcher_png.py`
+从"校验渐变方向"改成"校验纯色底 + 羽毛描边色 + 无白色残留"。
 
 ### 生成与校验工具链
 
@@ -1001,7 +1007,7 @@ python tools/check_icon_svg.py         # SVG 安全区 + ASCII 预览
 python tools/gen_launcher_icon.py      # icon.xml -> 3 层 vector drawable
 python tools/make_icons.py             # 生成 API<26 的 5 档 PNG
 python tools/check_launcher_icons.py   # 校验矢量层 + 安全区
-python tools/check_icon_composition.py # 校验构图（羽毛描边是否压到环内沿）
+python tools/check_icon_composition.py # 校验构图（纯色底、无外环、羽毛占比）
 python tools/check_launcher_png.py     # 校验 PNG
 python tools/preview_launcher_png.py mipmap-xxxhdpi   # ASCII 预览
 python tools/verify_icon_assertions.py # 复算 LauncherIconTest 的全部断言
@@ -1020,17 +1026,18 @@ python tools/verify_icon_assertions.py # 复算 LauncherIconTest 的全部断言
 ### 主页 logo：启动图标的唯一事实来源
 
 主页头部那枚圆形 logo（`HomePage.kt` 里的内联 SVG）画的正是启动图标里的那枚
-描边羽毛 —— 现在**两者是同一份造型**：`tools/emit_icon_xml.py` 直接从
-`HomePage.kt` 抽 SVG 路径、等比缩放后写进 `tools/icon.xml`，改主页 logo 会
-自动反映到启动图标上，不存在"两处各画一遍漂移"的问题。
+描边羽毛 —— 现在**两者是同一份造型、同一套取色**：`tools/emit_icon_xml.py` 直接从
+`HomePage.kt` 抽 SVG 路径、等比缩放后写进 `tools/icon.xml`，圆底与羽毛描边色也取
+`HomeColors` 的 `--pc` / `--on-pc`。改主页 logo 会自动反映到启动图标上，不存在
+"两处各画一遍漂移"的问题。
 
-仍存在的媒介差异只是**画布与描边粗细**，造型本身一致：
+仍存在的差异只是**画布与描边粗细**，造型与配色本身一致：
 
 | | 启动图标 | 主页 logo |
 |---|---|---|
 | 画布 | 108dp 自适应图标（安全区 72dp） | 24×24 viewBox，显示 40px |
-| 描边宽 | 9（256 画布，等比放大自主页的 1.6） | 1.6 |
-| 羽枝缝 | 3 道短线（与主页一致） | 3 道短线 |
+| 描边宽 | 12（256 画布，等比放大自主页的 1.6） | 1.6 |
+| 圆底 / 描边色 | `#A8F2CB` / `#00210F`（固定） | `--pc` / `--on-pc`（跟随动态取色） |
 
 主页 logo 本身仍守住它早先迭代出的两条硬约束：
 
@@ -1043,6 +1050,9 @@ python tools/verify_icon_assertions.py # 复算 LauncherIconTest 的全部断言
 python tools/preview_home_mark.py      # 当前造型 -> build/home-mark*.png（200px + 40px）
 python tools/preview_home_mark.py old  # 改版前的造型，用于对照
 ```
+
+> `preview_home_mark.py` 早先用品牌绿近似主页圆底、羽毛画成白色，颜色对不上；
+> 现已改成 `--pc` / `--on-pc` 的真实取色，可以直接和启动图标并排对照。
 
 ---
 
@@ -1058,8 +1068,8 @@ python tools/preview_home_mark.py old  # 改版前的造型，用于对照
 | `tools/check_home_html.py` | 从 `HomePage.kt` 抽出 HTML 模板实例化，检查标签配平、CSS 变量配对、SVG 里误用 `var()`、外部资源引用 |
 | `tools/verify_home_assertions.py` | 对着 `HomePage.kt` 复算 `isHomeUrl` 的全部断言，确认测试与实现一致 |
 | `tools/check_launcher_icons.py` | 校验生成的 3 层自适应图标矢量：pathData 可解析、前景是否落在 72dp 安全区内 |
-| `tools/check_launcher_png.py` | 校验 API<26 的 PNG 图标：圆形遮罩、渐变方向、白色元素占比 |
-| `tools/check_icon_composition.py` | 量化图标构图：羽毛描边是否压到环内沿（含描边半宽） |
+| `tools/check_launcher_png.py` | 校验 API<26 的 PNG 图标：圆形遮罩、纯色底占比、羽毛描边色、无白色外环残留 |
+| `tools/check_icon_composition.py` | 量化图标构图：底色是不是纯色（`#RRGGBB`）、有没有残留外环、羽毛是否越界/占比合理 |
 | `tools/check_dead_code.py` | 找出「定义了但没人调用」的动作型函数（见 §四.9，此坑踩过两次） |
 | `tools/check_download_bytes.py` | 比对 `formatBytes` 在 UI 层与测试层的两份实现，防止测试测的是旧逻辑 |
 | `tools/check_tabs_layer.py` | 校验标签面板的层级与动画约束（遮罩必须画在面板之后、拖拽手势不吞点击等） |

@@ -8,6 +8,10 @@ import java.io.File
 /**
  * 启动图标资源的回归测试。
  *
+ * 图标造型现在与主页 logo 完全一致：**纯色圆底（主页 primaryContainer）
+ * + 一笔描边羽毛（主页 onPrimaryContainer），没有外环、没有渐变**。
+ * 主题化图标（monochrome 单色层）由 Android 13+ 按壁纸重新着色。
+ *
  * 图标是"改一次就可能踩坑"的资源：自适应图标只保证中心 72/108 可见，
  * 前景一旦超出就会被 launcher 裁掉，而这个问题在预览图上不明显。
  * 这里把 `tools/check_launcher_icons.py` 的核心约束固化进单元测试。
@@ -140,26 +144,30 @@ class LauncherIconTest {
     }
 
     @Test
-    fun `背景层铺满画布`() {
-        // 背景必须铺满，否则遮罩裁切后会露出透明边
+    fun `背景层是纯色圆底并铺满画布`() {
+        // 背景必须铺满，否则遮罩裁切后会露出透明边。
+        // 已从"渐变"改为"纯色"（与主页 logo 的 primaryContainer 一致）。
         val xml = drawable("ic_launcher_background.xml").readText()
-        assertTrue("背景层应使用渐变", xml.contains("<gradient"))
-        assertTrue("背景层应引用渐变色", xml.contains("android:fillColor"))
-        assertTrue("渐变应有起止色标", xml.contains("<item android:offset="))
+        assertFalse("背景层不应再用渐变", xml.contains("<gradient"))
+        assertTrue("背景层应有纯色填充", xml.contains("android:fillColor"))
+        assertTrue("纯色应铺满 108dp 画布", xml.contains("M0,0h108v108h-108z"))
     }
 
     @Test
-    fun `背景渐变使用设计稿的两个色标`() {
+    fun `背景色取自主页 logo 的 primaryContainer`() {
+        // 与 HomePage.kt 的 --pc（HomeColors.primaryContainer 默认值）保持一致
         val xml = drawable("ic_launcher_background.xml").readText()
-        assertTrue("缺少青色色标 #37E0C8", xml.contains("#37E0C8"))
-        assertTrue("缺少蓝色色标 #1E88E5", xml.contains("#1E88E5"))
+        assertTrue("圆底应为 #A8F2CB（主页 primaryContainer）", xml.contains("#A8F2CB"))
     }
 
     @Test
-    fun `前景层包含环与羽毛`() {
+    fun `前景层只有描边羽毛且没有外环`() {
         val xml = drawable("ic_launcher_foreground.xml").readText()
-        assertTrue("外环应是描边而非填充", xml.contains("android:strokeColor"))
-        assertTrue("羽毛应是描边白色路径", xml.contains("android:strokeColor=\"#FFFFFF\""))
+        assertFalse("外环已去掉，不应再有圆弧", xml.contains("a30.19"))
+        assertTrue(
+            "羽毛应用主页的描边色 #00210F",
+            xml.contains("android:strokeColor=\"#00210F\""),
+        )
         assertTrue("羽毛 fill 应为空（描边线画）", xml.contains("android:fillColor=\"#00000000\""))
         assertTrue("羽毛用圆角端帽", xml.contains("android:strokeLineCap=\"round\""))
         assertTrue("羽毛用圆角拐角", xml.contains("android:strokeLineJoin=\"round\""))
@@ -173,7 +181,7 @@ class LauncherIconTest {
         val xml = drawable("ic_launcher_foreground.xml").readText()
         assertTrue(
             "描边路径不足 3 条，羽片/羽轴/羽枝缝丢失",
-            Regex("android:strokeColor=\"#FFFFFF\"").findAll(xml).count() >= 3,
+            Regex("android:strokeColor=\"#00210F\"").findAll(xml).count() >= 3,
         )
         assertTrue(
             "M 子路径不足 6 个，羽枝缝可能丢失",
@@ -192,8 +200,9 @@ class LauncherIconTest {
     }
 
     @Test
-    fun `羽毛保持细长比例`() {
-        // "豌豆荚"问题的量化守卫：长宽比低于 2.2 就会显得又短又胖。
+    fun `羽毛比例与大小合理`() {
+        // 羽毛是主页那枚描边羽毛（长宽比 1.18），这里守住两条底线：
+        // 不要退化成方方正正的一坨，也不要缩成一个小点或撑爆安全区。
         val xml = drawable("ic_launcher_foreground.xml").readText()
         val pts = pathData(xml).flatMap { endpoints(it) }
         assertTrue("前景层取不到路径点", pts.isNotEmpty())
@@ -203,9 +212,13 @@ class LauncherIconTest {
         val h = ys.max() - ys.min()
         val ratio = maxOf(w, h) / minOf(w, h)
         assertTrue(
-            "羽毛包围盒 ${"%.1f".format(w)}x${"%.1f".format(h)}，长宽比 $ratio 偏低（应 >= 1.4）",
-            ratio >= 1.4f,
+            "羽毛包围盒 ${"%.1f".format(w)}x${"%.1f".format(h)}，长宽比 $ratio 偏低（应 >= 1.1）",
+            ratio >= 1.1f,
         )
+
+        val reach = maxRadius(pathData(xml))
+        assertTrue("羽毛最远触达 $reach dp，偏小（应 >= 20dp）", reach >= 20f)
+        assertTrue("羽毛最远触达 $reach dp，超出安全余量（应 <= 34.5dp）", reach <= 34.5f)
     }
 
     @Test
@@ -221,11 +234,11 @@ class LauncherIconTest {
 
     @Test
     fun `不再引用已删除的纯色资源`() {
-        // 图标背景已改为渐变 drawable，旧的 @color/ic_launcher_background 应彻底移除，
+        // 图标背景是纯色 drawable，旧的 @color/ic_launcher_background 应彻底移除，
         // 否则要么编译报错，要么留下死资源。
         val colors = File(res, "values/colors.xml").readText()
         assertFalse(
-            "colors.xml 仍定义 ic_launcher_background（已改用渐变 drawable）",
+            "colors.xml 仍定义 ic_launcher_background（已改用 drawable）",
             colors.contains("name=\"ic_launcher_background\""),
         )
         for (f in listOf(

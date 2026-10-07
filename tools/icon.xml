@@ -1,37 +1,30 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
-  <defs>
-    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#37E0C8"/>
-      <stop offset="1" stop-color="#1E88E5"/>
-    </linearGradient>
-  </defs>
-
-  <!-- 圆形背景 -->
-  <circle cx="128" cy="128" r="128" fill="url(#g)"/>
-
-  <!-- 浏览器外环 -->
-  <circle cx="128" cy="120" r="78" fill="none" stroke="#ffffff" stroke-width="14" opacity="0.95"/>
+  <!--
+    与主页 logo 完全同款：纯色圆底（primaryContainer）+ 描边羽毛
+    （onPrimaryContainer）。由 tools/emit_icon_xml.py 从 HomePage.kt 生成，请勿手改。
+    颜色取主页浅色主题的默认配色；"跟随取色"由 Android 13+ 主题化图标承担。
+  -->
+  <circle cx="128" cy="128" r="128" fill="#A8F2CB"/>
 
   <!--
-    羽毛：与主页 logo 同一枚描边羽毛（由 HomePage.kt 的内联 SVG 等比放大）。
-    fill=none + 白色描边 + round cap/join，去掉旧版的高光点与 evenodd 羽轴。
-    缩放 5.4933，stroke-width 9.0，描边外沿离环内沿留 5.0 余量。
+    羽毛：与主页 logo 同一枚描边羽毛（6 条 stroke 路径，等比放大 7.5029 倍）。
+    fill=none + round cap/join，无外环、无高光点。
   -->
-  <path fill="none" stroke="#ffffff" stroke-width="9.0" stroke-linecap="round" stroke-linejoin="round" opacity="0.96"
-        d="M 174.89 80.2 C 168.84 91.52 165.77 97.18 163.68 100.91 C 161.65 104.59 159.5 108.33 157.36 111.95 C 155.22 115.63 153.08 119.26 150.82 122.77 C 148.57 126.29 146.32 129.86 143.9 133.21 C 141.49 136.56 139.23 140.13 136.27 142.93 C 133.3 145.74 129.68 148.26 126.05 149.97 C 122.48 151.61 118.69 152.55 114.73 152.88 C 110.72 153.15 104.3 151.83 102.26 151.67"/>
+  <path fill="none" stroke="#00210F" stroke-width="12.00" stroke-linecap="round" stroke-linejoin="round"
+        d="M 192.04 73.64 C 183.78 89.1 179.58 96.83 176.73 101.93 C 173.96 106.95 171.03 112.06 168.1 117.01 C 165.18 122.04 162.25 126.99 159.17 131.79 C 156.1 136.59 153.02 141.47 149.72 146.04 C 146.42 150.62 143.34 155.5 139.29 159.32 C 135.24 163.15 130.29 166.6 125.34 168.93 C 120.46 171.18 115.28 172.45 109.88 172.9 C 104.4 173.28 95.63 171.48 92.85 171.25"/>
 
-  <path fill="none" stroke="#ffffff" stroke-width="9.0" stroke-linecap="round" stroke-linejoin="round" opacity="0.96"
-        d="M 174.89 80.2 C 161.87 84.32 155.49 86.46 151.37 88.06 C 147.2 89.65 143.13 91.3 139.18 93.06 C 135.17 94.76 131.27 96.57 127.48 98.49 C 123.69 100.47 119.9 102.39 116.38 104.65 C 112.87 106.84 109.3 108.99 106.33 111.79 C 103.31 114.59 100.62 118.16 98.53 121.35 C 96.39 124.53 94.74 127.66 93.58 130.9 C 92.43 134.09 91.94 138.98 91.55 140.57"/>
+  <path fill="none" stroke="#00210F" stroke-width="12.00" stroke-linecap="round" stroke-linejoin="round"
+        d="M 192.04 73.64 C 174.26 79.27 165.55 82.19 159.92 84.37 C 154.22 86.55 148.67 88.8 143.27 91.2 C 137.79 93.52 132.46 96 127.29 98.63 C 122.11 101.33 116.93 103.95 112.13 107.03 C 107.33 110.03 102.45 112.96 98.4 116.78 C 94.27 120.61 90.6 125.49 87.75 129.84 C 84.82 134.19 82.57 138.47 80.99 142.89 C 79.42 147.24 78.74 153.92 78.22 156.1"/>
 
-  <path fill="none" stroke="#ffffff" stroke-width="9.0" stroke-linecap="round" stroke-linejoin="round" opacity="0.96"
-        d="M 174.89 80.2 C 162.14 89.1 154.62 94.54 149.73 98.27 C 144.84 102.06 140 105.91 135.28 109.86 C 130.55 113.77 125.89 117.83 121.33 121.9 C 116.71 125.96 111.88 130.41 107.7 134.31 C 103.53 138.21 99.68 141.95 96.17 145.3 C 92.6 148.7 88.04 153.15 86.44 154.69 L 81.11 159.8"/>
+  <path fill="none" stroke="#00210F" stroke-width="12.00" stroke-linecap="round" stroke-linejoin="round"
+        d="M 192.04 73.64 C 174.63 85.8 164.35 93.22 157.67 98.33 C 151 103.5 144.39 108.76 137.94 114.16 C 131.49 119.48 125.11 125.04 118.88 130.59 C 112.58 136.14 105.98 142.22 100.28 147.55 C 94.57 152.87 89.32 157.97 84.52 162.55 C 79.64 167.2 73.42 173.28 71.24 175.38 L 63.96 182.36"/>
 
-  <path fill="none" stroke="#ffffff" stroke-width="9.0" stroke-linecap="round" stroke-linejoin="round" opacity="0.96"
-        d="M 141.43 136.56 L 120.01 124.53"/>
+  <path fill="none" stroke="#00210F" stroke-width="12.00" stroke-linecap="round" stroke-linejoin="round"
+        d="M 146.34 150.62 L 117.08 134.19"/>
 
-  <path fill="none" stroke="#ffffff" stroke-width="9.0" stroke-linecap="round" stroke-linejoin="round" opacity="0.96"
-        d="M 151.37 121.9 L 133.08 113.16"/>
+  <path fill="none" stroke="#00210F" stroke-width="12.00" stroke-linecap="round" stroke-linejoin="round"
+        d="M 159.92 130.59 L 134.94 118.66"/>
 
-  <path fill="none" stroke="#ffffff" stroke-width="9.0" stroke-linecap="round" stroke-linejoin="round" opacity="0.96"
-        d="M 160.55 106.46 L 146.54 102.17"/>
+  <path fill="none" stroke="#00210F" stroke-width="12.00" stroke-linecap="round" stroke-linejoin="round"
+        d="M 172.45 109.51 L 153.32 103.65"/>
 </svg>

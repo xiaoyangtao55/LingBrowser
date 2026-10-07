@@ -2,14 +2,13 @@
 
 API 23~25（Android 6~7）不支持自适应图标，只能给位图。
 这里绘制与 tools/icon.xml 完全一致的造型：
-  渐变圆底 + 白色浏览器外环 + 描边羽毛（与主页 logo 同一造型）
+  纯色圆底（主页 primaryContainer）+ 描边羽毛（与主页 logo 同款），无外环。
 
 传统图标没有遮罩裁切，所以整圆可以铺满画布（与自适应图标的背景层一致），
 但内容仍需留出内边距，否则贴边会显得拥挤。
 """
 import os
 import sys
-import math
 
 from PIL import Image, ImageDraw
 
@@ -20,9 +19,6 @@ OUT = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "app", "src", "main", "res",
 )
-
-# tools/icon.xml 的渐变色标
-GRAD = [(0.0, (0x37, 0xE0, 0xC8)), (1.0, (0x1E, 0x88, 0xE5))]
 
 VIEW = 256          # 原 SVG viewBox
 SIZES = [
@@ -35,26 +31,10 @@ SIZES = [
 SS = 8              # 超采样倍数
 
 
-def grad_color(t):
-    """对角线性渐变的颜色采样。"""
-    t = max(0.0, min(1.0, t))
-    for k in range(len(GRAD) - 1):
-        a, b = GRAD[k], GRAD[k + 1]
-        if a[0] <= t <= b[0]:
-            span = (b[0] - a[0]) or 1.0
-            u = (t - a[0]) / span
-            return tuple(int(a[1][j] + (b[1][j] - a[1][j]) * u) for j in range(3))
-    return GRAD[-1][1]
-
-
-def make_gradient(size):
-    """生成对角渐变底图。"""
-    img = Image.new("RGB", (size, size))
-    px = img.load()
-    for y in range(size):
-        for x in range(size):
-            px[x, y] = grad_color((x / size + y / size) / 2.0)
-    return img
+def hex_rgb(h):
+    """#RRGGBB -> (r, g, b)。"""
+    h = h.lstrip("#")
+    return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
 
 
 def draw_icon(size):
@@ -62,47 +42,35 @@ def draw_icon(size):
     scale = px / VIEW
     s = lambda v: v * scale
 
-    # ---- 渐变圆底（圆形遮罩）----
-    grad = make_gradient(px)
-    mask = Image.new("L", (px, px), 0)
-    ImageDraw.Draw(mask).ellipse([0, 0, px - 1, px - 1], fill=255)
-    img = Image.new("RGBA", (px, px), (0, 0, 0, 0))
-    img.paste(grad, (0, 0), mask)
-    d = ImageDraw.Draw(img)
-
     view, _, items = parse_svg(XML)
     circles = [i for i in items if i["type"] == "circle"]
     paths = [i for i in items if i["type"] == "path"]
 
-    ring = next(c for c in circles if c["stroke"])
+    # ---- 纯色圆底（主页 primaryContainer，圆形遮罩）----
+    bg = next(c for c in circles if c["fill"] and not c["stroke"])
     feather = paths
 
-    # ---- 白色浏览器外环 ----
-    w = s(ring["sw"])
-    d.ellipse(
-        [s(ring["cx"] - ring["r"]), s(ring["cy"] - ring["r"]),
-         s(ring["cx"] + ring["r"]), s(ring["cy"] + ring["r"])],
-        outline=(255, 255, 255, int(255 * ring["opacity"])),
-        width=max(1, int(round(w))),
-    )
+    mask = Image.new("L", (px, px), 0)
+    ImageDraw.Draw(mask).ellipse([0, 0, px - 1, px - 1], fill=255)
+    img = Image.new("RGBA", (px, px), (0, 0, 0, 0))
+    img.paste(Image.new("RGB", (px, px), hex_rgb(bg["fill"])), (0, 0), mask)
+    d = ImageDraw.Draw(img)
 
     # ---- 羽毛（描边路径，与主页 logo 一致）----
     # 每条 path 采样成点列后用圆角线描出来，等价于 stroke-linecap/join="round"。
-    # 羽毛的 stroke-width 随 SVG 缩放等比换算成像素。
-    sw = max(s(p["sw"]) for p in feather)
-    sw_px = max(1, int(round(sw)))
+    # 描边色取自每条的 stroke（主页的 onPrimaryContainer）。
     for p in feather:
+        rgb = hex_rgb(p["stroke"])
+        sw_px = max(1, int(round(s(p["sw"]))))
         for poly, _ in flatten(parse_path(p["d"]), steps=48):
             poly = [(s(x), s(y)) for x, y in poly]
             if len(poly) < 2:
                 continue
             for a, b in zip(poly, poly[1:]):
-                d.line([a, b], fill=(255, 255, 255, int(255 * p["opacity"])),
-                       width=sw_px)
+                d.line([a, b], fill=rgb + (255,), width=sw_px)
             r = sw_px / 2
             for x, y in poly:                        # 圆角端点 / 拐角
-                d.ellipse([x - r, y - r, x + r, y + r],
-                          fill=(255, 255, 255, int(255 * p["opacity"])))
+                d.ellipse([x - r, y - r, x + r, y + r], fill=rgb + (255,))
 
     return img.resize((size, size), Image.LANCZOS)
 

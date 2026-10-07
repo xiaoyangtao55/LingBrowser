@@ -20,6 +20,9 @@ from PIL import Image, ImageDraw
 
 BOX = 24.0          # viewBox 边长
 STROKE = 1.6        # stroke-width
+# 主页 logo 的取色（HomeColors 默认值，浅色主题）：--pc 圆底 / --on-pc 羽毛描边
+PC_RGB = (0xA8, 0xF2, 0xCB)
+ON_PC_RGB = (0x00, 0x21, 0x0F)
 HERE = os.path.dirname(os.path.abspath(__file__))
 KOTLIN = os.path.join(
     os.path.dirname(HERE),
@@ -108,8 +111,10 @@ def draw(svg_text, path, size=200, ss=6):
     scale = w / BOX
     img = Image.new("RGB", (w, w), (18, 20, 26))
     d = ImageDraw.Draw(img)
-    # 主页上 logo 坐在一个 --pc 圆形底里，这里用品牌绿近似
-    d.ellipse([0, 0, w - 1, w - 1], fill=(0x1B, 0x6C, 0x4B))
+    # 主页 logo 坐在 --pc 圆底上、羽毛用 --on-pc 描边（见 HomePage.kt 的 CSS）。
+    # 这两个值取 HomeColors 的默认配色（浅色主题），与启动图标用的是同一对，
+    # 所以这张预览可以直接和启动图标对照。之前这里用品牌绿近似，颜色对不上。
+    d.ellipse([0, 0, w - 1, w - 1], fill=PC_RGB)
     sw = STROKE * scale
 
     for m in re.finditer(r'<path\s+d="([^"]+)"', svg_text):
@@ -118,10 +123,10 @@ def draw(svg_text, path, size=200, ss=6):
             if closed and len(poly) > 2:
                 poly = poly + [poly[0]]
             for a, b in zip(poly, poly[1:]):
-                d.line([a, b], fill=(255, 255, 255), width=int(round(sw)))
+                d.line([a, b], fill=ON_PC_RGB, width=int(round(sw)))
             r = sw / 2
             for x, y in poly:                      # 圆角端点 / 拐角
-                d.ellipse([x - r, y - r, x + r, y + r], fill=(255, 255, 255))
+                d.ellipse([x - r, y - r, x + r, y + r], fill=ON_PC_RGB)
 
     img = img.resize((size, size), Image.LANCZOS)
     img.save(path)
