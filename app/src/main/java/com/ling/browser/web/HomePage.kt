@@ -66,22 +66,7 @@ object HomePage {
         dark: Boolean,
         links: List<Pair<String, String>> = emptyList(),
     ): String {
-        val quickLinks = if (links.isEmpty()) {
-            ""
-        } else {
-            buildString {
-                append("""<div class="links">""")
-                links.take(8).forEach { (title, url) ->
-                    val label = title.ifBlank { url }
-                    append(
-                        """<a class="link" href="${escape(url)}">""" +
-                            """<span class="avatar">${escape(label.take(1).uppercase())}</span>""" +
-                            """<span class="link-label">${escape(label)}</span></a>"""
-                    )
-                }
-                append("</div>")
-            }
-        }
+        val quickLinks = linksHtml(links)
 
         return """
 <!DOCTYPE html>
@@ -204,4 +189,92 @@ object HomePage {
         .replace(">", "&gt;")
         .replace("\"", "&quot;")
         .replace("'", "&#39;")
+
+    /**
+     * 生成快捷入口的 `.links` HTML 片段（书签为空时返回空串）。
+     *
+     * 从 [html] 里抽出来，供"完整渲染"与"原地刷新（[themeUpdateJs]）"两处复用 ——
+     * 两处各写一份迟早会不同步，快捷入口就会在重绘时丢一半。
+     */
+    internal fun linksHtml(links: List<Pair<String, String>>): String {
+        if (links.isEmpty()) return ""
+        return buildString {
+            append("""<div class="links">""")
+            links.take(8).forEach { (title, url) ->
+                val label = title.ifBlank { url }
+                append(
+                    """<a class="link" href="${escape(url)}">""" +
+                        """<span class="avatar">${escape(label.take(1).uppercase())}</span>""" +
+                        """<span class="link-label">${escape(label)}</span></a>"""
+                )
+            }
+            append("</div>")
+        }
+    }
+
+    /**
+     * 生成"原地刷新主页主题与快捷入口"的 JS。
+     *
+     * 为什么需要这个：主页是用 `loadDataWithBaseURL` 渲染的，每次调用都会
+     * 往 WebView 历史里**压入一个新条目**。若主题切换时也走完整重渲染，
+     * 用户按返回键就会回到"切换前那个浅色主页"（历史里残留的旧条目）。
+     *
+     * 原地刷新直接改 `:root` 上的 CSS 变量和 `.links` 的内容，不触发导航、
+     * 不压历史，深浅色切换即时生效且返回键行为不变。
+     *
+     * @param linksHtml 快捷入口的 HTML（由 [linksHtml] 生成，可能为空）。
+     *   用 JSON 编码后注入，避免 HTML 里的引号破坏 JS 字符串。
+     */
+    internal fun themeUpdateJs(
+        background: String,
+        onBackground: String,
+        primary: String,
+        onPrimary: String,
+        primaryContainer: String,
+        onPrimaryContainer: String,
+        dark: Boolean,
+        linksHtml: String,
+    ): String {
+        val scheme = if (dark) "dark" else "light"
+        // JSON 编码：把 linksHtml 安全地塞进 JS 字符串字面量
+        val linksJson = jsonString(linksHtml)
+        return """
+(function () {
+  var r = document.documentElement;
+  if (!r) return;
+  r.style.setProperty('--bg', '$background');
+  r.style.setProperty('--fg', '$onBackground');
+  r.style.setProperty('--primary', '$primary');
+  r.style.setProperty('--on-primary', '$onPrimary');
+  r.style.setProperty('--pc', '$primaryContainer');
+  r.style.setProperty('--on-pc', '$onPrimaryContainer');
+  r.style.colorScheme = '$scheme';
+  var old = document.querySelector('.links');
+  if ($linksJson) {
+    var t = document.createElement('div');
+    t.innerHTML = $linksJson;
+    var node = t.firstChild;
+    if (old) old.parentNode.replaceChild(node, old);
+    else (document.body || r).appendChild(node);
+  } else if (old) {
+    old.parentNode.removeChild(old);
+  }
+})();
+        """.trimIndent()
+    }
+
+    /** 极简 JSON 字符串编码（只处理本场景需要的转义：反斜杠、引号、换行、回车）。 */
+    private fun jsonString(raw: String): String = buildString {
+        append('"')
+        raw.forEach { c ->
+            when (c) {
+                '\\' -> append("\\\\")
+                '"' -> append("\\\"")
+                '\n' -> append("\\n")
+                '\r' -> append("\\r")
+                else -> append(c)
+            }
+        }
+        append('"')
+    }
 }

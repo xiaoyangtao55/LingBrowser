@@ -586,6 +586,16 @@ if "ReaderPage.isReaderUrl" in ensure:
 else:
     bad("ensureHomeRendered 只重绘主页 —— 阅读模式在切换夜间模式后配色不会变")
 
+# (1b) 已渲染的主页要原地刷新（改 CSS 变量），不能重导航 ——
+# 重导航（loadDataWithBaseURL）会压入新历史条目，导致"切深色后按返回回到浅色主页"。
+# 判据绑定到"调用点"：evaluateJavascript(homeThemeJs() 必须真的出现在
+# ensureHomeRendered 里。只查 "homeThemeJs()" 会撞上函数定义（homeThemeJs():），
+# 定义在、调用没了也照样误报通过。
+if "evaluateJavascript(homeThemeJs()" in ensure:
+    ok("主题切换走原地刷新（不压历史，返回键行为不变）")
+else:
+    bad("主题切换仍走重导航 —— 切深色后按返回会回到浅色主页")
+
 # (2) 阅读视图不能被强制夜间模式的反色 CSS 二次处理
 # 判据是 injectDarkMode 位于 `if (!isInternal)` 块内 ——
 # 中间可能夹着注释，所以允许跨行但不允许出现右花括号。
@@ -601,14 +611,19 @@ else:
 
 # (3) 回调不能把逻辑地址改写成 baseUrl，也不能记下自定义协议
 #
-# 判据是"算出 keep 并用它决定是否写回 url"。变量名会随实现调整，
-# 所以不绑定具体写法，而是检查**行为**：url 的回写被一个判定变量挡住。
-# （踩过：一开始写死 `if (isInternal) it.url else url`，
-#  后来为了同时挡掉自定义协议改名为 keep，检查就误报了。）
-if mgr.count("url = if (keep) it.url else url") >= 2:
+# 判据是"url 回写被 keep 分支挡住"。变量名会随实现调整，
+# 所以不绑定具体写法，而是检查**行为**：两处回调（onPageStarted /
+# onPageFinished）都保留 `keep -> it.url` 分支，且主页显式回写逻辑地址。
+if mgr.count("keep -> it.url") >= 2:
     ok("onPageStarted/onPageFinished 都不会覆盖掉逻辑地址")
 else:
     bad("有回调会把阅读视图的逻辑地址改写掉，导致返回栈与识别错乱")
+
+# 回到主页（前进/后退触发）必须显式回写 HomePage.URL，否则旧网站 URL 残留在地址栏
+if mgr.count("isHome -> HomePage.URL") >= 2:
+    ok("回到主页时显式回写 ling://home（地址栏不残留旧网址）")
+else:
+    bad("回到主页未回写逻辑地址 —— 地址栏会残留上一个网页的 URL")
 
 if re.search(r"val keep = isInternal \|\| !isNavigable\(url\)", mgr):
     ok("自定义协议（zhihu:// 等）不写回 TabState.url")

@@ -295,4 +295,65 @@ class HomePageTest {
         assertTrue("背景色应注入 --bg", html.contains("--bg: #111412"))
         assertTrue("文字色应注入 --fg", html.contains("--fg: #E1E3DF"))
     }
+
+    // ---- 原地刷新（themeUpdateJs / linksHtml）----
+
+    @Test
+    fun `linksHtml 生成快捷入口且与 html 内联一致`() {
+        val links = listOf(
+            "示例" to "https://example.com",
+            "" to "https://blank-title.com",
+        )
+        val fragment = HomePage.linksHtml(links)
+        assertTrue("应含 class=links", fragment.contains("""<div class="links">"""))
+        assertTrue("应含第一个书签地址", fragment.contains("https://example.com"))
+        assertTrue("空标题退回 URL", fragment.contains("blank-title.com"))
+
+        // 内联进 html 与单独生成必须一致，否则"完整渲染"与"原地刷新"会不同步
+        val full = HomePage.html(
+            background = "#FFF", onBackground = "#000", primary = "#1B6C4B",
+            onPrimary = "#FFF", primaryContainer = "#A8F2CB",
+            onPrimaryContainer = "#00210F", dark = false, links = links,
+        )
+        assertTrue("html 应内联同样的快捷入口片段", full.contains(fragment))
+    }
+
+    @Test
+    fun `linksHtml 空书签返回空串`() {
+        assertEquals("", HomePage.linksHtml(emptyList()))
+    }
+
+    @Test
+    fun `themeUpdateJs 写入主题变量与 color-scheme`() {
+        val js = HomePage.themeUpdateJs(
+            background = "#111412", onBackground = "#E1E3DF",
+            primary = "#7EDBAE", onPrimary = "#00391F",
+            primaryContainer = "#005231", onPrimaryContainer = "#A8F2CB",
+            dark = true, linksHtml = "",
+        )
+        assertTrue("应设置 --bg", js.contains("--bg', '#111412'"))
+        assertTrue("应设置 --fg", js.contains("--fg', '#E1E3DF'"))
+        assertTrue("应设置 colorScheme", js.contains("colorScheme = 'dark'"))
+
+        val light = HomePage.themeUpdateJs(
+            background = "#FFF", onBackground = "#000", primary = "#1B6C4B",
+            onPrimary = "#FFF", primaryContainer = "#A8F2CB",
+            onPrimaryContainer = "#00210F", dark = false, linksHtml = "",
+        )
+        assertTrue("浅色 colorScheme", light.contains("colorScheme = 'light'"))
+    }
+
+    @Test
+    fun `themeUpdateJs 注入的 linksHtml 引号被正确转义`() {
+        // 书签标题可能含引号/尖括号，转义后不能破坏 JS 字符串
+        val fragment = HomePage.linksHtml(listOf("""a"b""" to "https://x.com"))
+        val js = HomePage.themeUpdateJs(
+            background = "#FFF", onBackground = "#000", primary = "#1B6C4B",
+            onPrimary = "#FFF", primaryContainer = "#A8F2CB",
+            onPrimaryContainer = "#00210F", dark = false, linksHtml = fragment,
+        )
+        // linksHtml 里的引号已转成 &quot;，注入 JS 时不会再含裸双引号打断字符串
+        assertTrue("linksHtml 的引号应已转义", fragment.contains("&quot;"))
+        assertTrue("JS 应包含 linksHtml 内容", js.contains("innerHTML ="))
+    }
 }

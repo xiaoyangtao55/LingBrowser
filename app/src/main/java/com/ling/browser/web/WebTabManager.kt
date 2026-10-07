@@ -629,24 +629,54 @@ class WebTabManager(private val context: Context) {
      */
     fun ensureHomeRendered() {
         _tabs.value.filter { HomePage.isHomeUrl(it.url) }.forEach { tab ->
-            loadHome(tab.id, obtainWebView(tab.id))
+            val existing = webViews[tab.id]
+            // 关键：只有当 WebView 已经**真的渲染出主页**（url 落到 BASE_URL）
+            // 才走原地刷新。冷启动时首帧前 WebView 还是 about:blank，此时
+            // evaluateJavascript 会打在空文档上、白注入一次 —— 必须走完整渲染。
+            if (existing != null && HomePage.isHomeUrl(existing.url)) {
+                // 已渲染的主页：原地刷新主题变量与快捷入口，**不重导航**。
+                // 重导航会压入新历史条目，导致"切深色后按返回回到浅色主页"。
+                existing.evaluateJavascript(homeThemeJs(), null)
+            } else {
+                // 冷启动 / 被 LRU 回收后重建：完整渲染。
+                // 此时 WebView 尚无内容，无所谓历史，loadDataWithBaseURL 只产生一个条目。
+                loadHome(tab.id, obtainWebView(tab.id))
+            }
         }
         // 阅读视图同样是原生渲染的自包含页面，也必须跟着重新配色 ——
-        // 否则在阅读模式里切换夜间模式时，页面会停在旧配色，
-        // 直到用户退出再重进才更新（很像是"夜间模式对阅读模式没用"）。
-        // 这里复用缓存的正文重排版，不需要重新提取。
+        // 否则在阅读模式里切换夜间模式时，页面会停在旧配色。
+        // 同样走原地刷新（只改 CSS 变量，不重排版、不压历史）。
         _tabs.value.filter { ReaderPage.isReaderUrl(it.url) }.forEach { tab ->
-            readerContent[tab.id]?.let { cached ->
-                webViews[tab.id]?.loadDataWithBaseURL(
-                    ReaderPage.BASE_URL,
-                    readerHtml(cached),
-                    "text/html",
-                    "utf-8",
-                    null,
-                )
+            val wv = webViews[tab.id]
+            if (wv != null && ReaderPage.isReaderUrl(wv.url)) {
+                wv.evaluateJavascript(readerThemeJs(), null)
             }
         }
     }
+
+    /** 主页原地刷新的 JS：主题变量 + 快捷入口，见 [HomePage.themeUpdateJs]。 */
+    private fun homeThemeJs(): String = HomePage.themeUpdateJs(
+        background = homeColors.background,
+        onBackground = homeColors.onBackground,
+        primary = homeColors.primary,
+        onPrimary = homeColors.onPrimary,
+        primaryContainer = homeColors.primaryContainer,
+        onPrimaryContainer = homeColors.onPrimaryContainer,
+        dark = homeColors.dark,
+        linksHtml = HomePage.linksHtml(homeColors.links),
+    )
+
+    /** 阅读视图原地刷新的 JS：只改主题变量（快捷入口传空）。 */
+    private fun readerThemeJs(): String = HomePage.themeUpdateJs(
+        background = homeColors.background,
+        onBackground = homeColors.onBackground,
+        primary = homeColors.primary,
+        onPrimary = homeColors.onPrimary,
+        primaryContainer = homeColors.primaryContainer,
+        onPrimaryContainer = homeColors.onPrimaryContainer,
+        dark = homeColors.dark,
+        linksHtml = "",
+    )
 
     fun reload(id: String = _activeId.value) {
         obtainWebView(id).reload()
@@ -769,10 +799,21 @@ class WebTabManager(private val context: Context) {
                     // 打不开的地址，退出阅读模式时还会被回填给 WebView，
                     // 直接触发 ERR_UNKNOWN_URL_SCHEME。
                     val isInternal = HomePage.isHomeUrl(url) || ReaderPage.isReaderUrl(url)
+                    val isHome = HomePage.isHomeUrl(url)
                     val keep = isInternal || !isNavigable(url)
                     updateTab(id) {
                         it.copy(
-                            url = if (keep) it.url else url,
+                            // 三种情况分开处理，不能简单"keep 就保留旧 url"：
+                            //  - 回到主页（历史前进/后退触发）：必须写成逻辑地址
+                            //    ling://home，否则旧网站 URL 残留在 TabState.url，
+                            //    地址栏就一直显示那个网址；
+                            //  - 阅读视图 / 自定义协议：保留既有逻辑地址；
+                            //  - 普通页面：写回真实 url。
+                            url = when {
+                                isHome -> HomePage.URL
+                                keep -> it.url
+                                else -> url
+                            },
                             isLoading = !isInternal,
                             errorText = null,
                             canGoBack = canGoBack(),
@@ -789,7 +830,11 @@ class WebTabManager(private val context: Context) {
                     val keep = isInternal || !isNavigable(url)
                     updateTab(id) {
                         it.copy(
-                            url = if (keep) it.url else url,
+                            url = when {
+                                isHome -> HomePage.URL
+                                keep -> it.url
+                                else -> url
+                            },
                             // 主页标题固定为「主页」，不用 WebView 的 <title>翎</title>；
                             // 阅读视图的标题已经是文章标题，保留即可。
                             title = if (isHome) it.title else title.ifBlank { it.title },
