@@ -39,6 +39,8 @@ class LingWebViewClient(
      * 里，每次都现读这个 lambda，因此改完设置立即生效，无需重建 WebView。
      */
     private val adBlockEnabled: () -> Boolean = { true },
+    /** 用户自定义的广告拦截域名规则（裸域名）。动态读，改完立即生效。 */
+    private val adBlockRules: () -> Set<String> = { emptySet() },
     /** 返回 true 表示已由外部接管（例如外部应用打开），WebView 不应继续加载。 */
     private val onExternalScheme: (Uri) -> Boolean,
 ) : WebViewClient() {
@@ -64,7 +66,7 @@ class LingWebViewClient(
         if (request == null) return null
         val url = request.url?.toString() ?: return null
         if (!adBlockEnabled()) return null
-        if (AdBlocker.shouldBlock(url, request.isForMainFrame)) {
+        if (AdBlocker.shouldBlock(url, request.isForMainFrame, adBlockRules())) {
             return WebResourceResponse("text/plain", "utf-8", EMPTY_STREAM)
         }
         return null

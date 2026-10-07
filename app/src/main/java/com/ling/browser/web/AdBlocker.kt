@@ -126,9 +126,16 @@ object AdBlocker {
      *
      * @param url 完整 URL。
      * @param isMainFrame 是否为主文档请求。主文档**永不拦截**。
+     * @param customDomains 用户自定义的域名规则（裸域名，如 `ad.example.com`）。
+     *   与内置 [BLOCKED_DOMAINS] 同等语义：命中即拦截，且任意深度子域名被兜住。
+     *   传空集合时只走内置规则。
      * @return true 表示拦截（返回空响应），false 放行。
      */
-    fun shouldBlock(url: String?, isMainFrame: Boolean): Boolean {
+    fun shouldBlock(
+        url: String?,
+        isMainFrame: Boolean,
+        customDomains: Set<String> = emptySet(),
+    ): Boolean {
         // 主文档保护：广告落地页本身要能打开，否则用户点广告结果整页白屏。
         if (isMainFrame) return false
         if (url.isNullOrBlank()) return false
@@ -138,28 +145,50 @@ object AdBlocker {
         if (scheme != "http" && scheme != "https") return false
 
         val host = hostOf(url) ?: return false
-        if (matchesDomain(host)) return true
+        if (matchesDomain(host, customDomains)) return true
 
         val path = pathOf(url)
         return PATH_MARKERS.any { path.contains(it) }
     }
 
     /**
-     * 域名命中：把 host 逐级缩短查表。
+     * 域名命中：把 host 逐级缩短查表（内置表 + 用户规则）。
      *
      * `a.b.doubleclick.net` → `b.doubleclick.net` → `doubleclick.net` → 命中。
      * 这样任意深度子域名都被 `doubleclick.net` 兜住。
      */
-    private fun matchesDomain(host: String): Boolean {
+    private fun matchesDomain(host: String, customDomains: Set<String>): Boolean {
         val parts = host.split('.')
         // 从最长的后缀开始收缩：先查完整 host，再去掉最左段，直到剩两段。
         for (i in parts.indices) {
             val candidate = parts.drop(i).joinToString(".")
-            if (candidate in BLOCKED_DOMAINS) return true
+            if (candidate in BLOCKED_DOMAINS || candidate in customDomains) return true
             // 只剩两段（如 "example.com"）后再缩就没意义了
             if (parts.size - i <= 2) break
         }
         return false
+    }
+
+    /**
+     * 归一化用户输入的域名规则：去空白、去协议前缀、去端口、去 path、转小写。
+     *
+     * 用户可能粘贴 `https://ad.example.com/path?x=1`，但我们只想要
+     * `ad.example.com`。抽成纯函数供 UI 在**保存前**校验/清洗，
+     * 也供单测覆盖各种脏输入。
+     *
+     * 返回 null 表示输入不构成合法域名（如空串、`这不是域名`）。
+     */
+    fun normalizeRule(input: String): String? {
+        val s = input.trim()
+        if (s.isEmpty()) return null
+        // 去掉协议前缀
+        val noScheme = s.substringAfter("://", s)
+        // 取 host 部分（去 path/query/fragment/端口/userinfo）
+        val host = hostOf(noScheme) ?: return null
+        // 域名至少要含一个点（www.example.com / example.com），
+        // 单段（localhost、纯数字 IP 的一部分）没有拦截意义且容易误伤。
+        if (!host.contains('.')) return null
+        return host
     }
 
     /** 从 URL 里取 host（小写、去端口）。失败返回 null。 */

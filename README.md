@@ -34,7 +34,7 @@
 | 网页强制夜间 | Android 10+ 用 `setForceDark`/`setAlgorithmicDarkeningAllowed`，页面加载完成后再注入兜底 CSS |
 | 电脑模式 | 切换为桌面版 Safari UA，触发站点桌面布局（有顶部提示条） |
 | 无图模式 | 关闭图片加载，省流量 |
-| 广告拦截 | 域名级拦截常见广告/跟踪域名与路径，`shouldInterceptRequest` 资源级拦截；主文档永不误杀；设置里可开关（默认开） |
+| 广告拦截 | 域名级拦截常见广告/跟踪域名与路径，`shouldInterceptRequest` 资源级拦截；主文档永不误杀；**支持自定义规则**（二级菜单增删域名），默认开 |
 | JavaScript 开关 | 可关闭以提速、去干扰 |
 | 自定义主页 | 填入任意网址；**留空则使用「翎」的内置主页** |
 | 标签页面板高度 | 全屏 / 一半 两档，默认一半；面板半透明，可透出后方网页 |
@@ -765,6 +765,25 @@ JS 是**字符串常量**嵌在 Kotlin 里，Kotlin 编译器完全不检查它 
 > WebView 时一次性构造的，传值会让"改完要重启才生效"——这和"用外部 App
 > 打开链接"开关是同一个坑。
 
+#### 自定义规则：二级菜单 + 保存前清洗
+
+设置里「广告拦截」开关下方是「自定义规则」入口，点进一个独立的二级页
+（`AdBlockRulesScreen`）：列出已有规则、可删除、右上角「添加」弹输入框。
+
+规则语义与内置黑名单完全一致——**裸域名**，命中即拦、任意深度子域名被兜住。
+所以用户只需输入 `ad.example.com` 就能拦掉 `static.ad.example.com`。
+
+三个设计点：
+
+1. **保存前必须清洗**（`AdBlocker.normalizeRule`）。用户可能直接粘贴整段
+   `https://ad.example.com/path?x=1`，我们只取 `ad.example.com`。这条规则
+   被抽成纯函数，既在 ViewModel 里调用，也被单测覆盖各种脏输入。
+2. **拒绝单段域名**（`localhost`、纯数字）：单段没有拦截意义，且极易误伤。
+3. **新增失败就地提示**（`onAdd` 返回错误原因），不关对话框——用户看到
+   "该规则已存在"或"无效的域名"和输入框在同一上下文，改起来最顺。
+
+自定义规则同样走 **lambda 现读**，改完立即生效。
+
 ### 4. 主页由 WebView 渲染，不用 Compose 覆盖层
 早期实现把主页做成 Compose 覆盖层（`HomeScreen`），有两个问题：主页不进入
 前进/后退历史；且切页时 `AndroidView` 会被销毁重建，打断正在加载的页面。
@@ -1018,7 +1037,7 @@ python tools/preview_launcher_png.py mipmap-xxxhdpi  # 预览启动图标
 | 项目 | 结果 |
 |---|---|
 | `:app:assembleDebug` | ✅ 通过（图标改版后重新验证） |
-| `:app:testDebugUnitTest` | ✅ **214 个用例全部通过**（`UrlUtilsTest` 20 / `FaviconFetcherTest` 12 / `ReaderPageTest` 20 / `ReaderResultTest` 15 / `UrlSchemeTest` 18 / `AdBlockerTest` 11 / `HomePageTest` 19 / `TabOrderTest` 15 / `BookmarkFolderTest` 14 / `LingSettingsTest` 17 / `LauncherIconTest` 12 / `LingIconsTest` 11 / `DownloadTest` 10 / `SessionSnapshotTest` 9 / `TabInitialTest` 6 / `PendingDownloadTest` 5） |
+| `:app:testDebugUnitTest` | ✅ **219 个用例全部通过**（`UrlUtilsTest` 20 / `FaviconFetcherTest` 12 / `ReaderPageTest` 20 / `ReaderResultTest` 15 / `UrlSchemeTest` 18 / `AdBlockerTest` 16 / `HomePageTest` 19 / `TabOrderTest` 15 / `BookmarkFolderTest` 14 / `LingSettingsTest` 17 / `LauncherIconTest` 12 / `LingIconsTest` 11 / `DownloadTest` 10 / `SessionSnapshotTest` 9 / `TabInitialTest` 6 / `PendingDownloadTest` 5） |
 | `:app:assembleRelease`（R8 压缩） | ✅ 通过，产物 1.4 MB（图标改版前） |
 | APK 签名校验 | ✅ v1 + v2 方案均通过 |
 | 真机安装（Xiaomi MI 8 / Android 14） | ✅ `adb install` 成功 |
@@ -1126,7 +1145,7 @@ hello world                -> 必应搜索（默认引擎）
 | 书签文件夹 | 单层文件夹；**不建表**，由书签归属派生（无幽灵文件夹） |
 | 书签网站图标 | 按 URL 自行抓取 `/favicon.ico`；存压缩字节而非 `Bitmap` |
 | 阅读模式 | 移植 Readability 打分算法（<11 KB）+ **中文阈值适配**；可调四档字号 |
-| 广告拦截 | `shouldInterceptRequest` 资源级拦截，域名黑名单 + 路径关键字；抽 `AdBlocker` 纯 Kotlin 可单测；主文档保护；默认开 |
+| 广告拦截 | `shouldInterceptRequest` 资源级拦截，域名黑名单 + 路径关键字；抽 `AdBlocker` 纯 Kotlin 可单测；主文档保护；默认开；**支持自定义域名规则（二级菜单增删）** |
 | 外部链接开关 | 非 http(s) 链接是否交给外部 App，**默认关**（本机没装该 App 时更稳定） |
 
 > 早先下载的 8 个未使用官方图标（`help` / `language` / `license` / `menu` 等）

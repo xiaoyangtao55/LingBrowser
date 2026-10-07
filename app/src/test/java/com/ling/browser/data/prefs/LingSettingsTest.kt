@@ -148,6 +148,8 @@ class LingSettingsTest {
         // 广告拦截是浏览器的基础能力，多数用户期望默认就拦。
         // 关掉是"某站点误拦时排查用"的临时手段，不该是默认态。
         assertTrue("默认必须开广告拦截", LingSettings().adBlockEnabled)
+        // 自定义规则默认空集合：新用户没有任何自定义拦截
+        assertTrue("自定义规则默认应为空", LingSettings().adBlockRules.isEmpty())
     }
 
     @Test

@@ -784,7 +784,7 @@ else:
     bad("AdBlocker 未保护主文档 —— 点广告落地页会白屏")
 
 # 判定委托给 AdBlocker.shouldBlock，而不是在 client 里内联规则
-if re.search(r"AdBlocker\.shouldBlock\(url, request\.isForMainFrame\)", client):
+if re.search(r"AdBlocker\.shouldBlock\(url, request\.isForMainFrame", client):
     ok("拦截判定委托给 AdBlocker.shouldBlock（可单测）")
 else:
     bad("shouldInterceptRequest 未委托 AdBlocker —— 规则无法单测")
@@ -818,6 +818,61 @@ if re.search(r"shouldInterceptRequest", client) and "WebResourceResponse(" in cl
     ok("shouldInterceptRequest 已实现，拦截时返回空响应")
 else:
     bad("shouldInterceptRequest 未实现或未返回拦截响应")
+
+# ---------- 10.1 广告拦截：自定义规则 ----------
+print("\n10.1 广告拦截自定义规则")
+
+rules_screen = read("ui/screens/AdBlockRulesScreen.kt")
+
+# 自定义规则必须真的传给判定（而不是加了 UI 却没用）
+if re.search(r"shouldBlock\(url, request\.isForMainFrame, adBlockRules\(\)\)", client):
+    ok("自定义规则传进了判定（否则加了规则也不生效）")
+else:
+    bad("自定义规则未传进 shouldBlock —— 加了规则等于没加")
+
+if re.search(r"adBlockRules = \{ this@WebTabManager\.settings\.adBlockRules \}", mgr):
+    ok("自定义规则用 lambda 传递（动态生效）")
+else:
+    bad("自定义规则按值传递 —— 改了规则不重启不生效")
+
+# 规则保存前必须清洗（normalizeRule），否则脏数据落库
+if re.search(r"normalizeRule\(raw\)", vm):
+    ok("新增规则前用 normalizeRule 清洗（去协议/端口/path、转小写）")
+else:
+    bad("新增规则未清洗 —— 用户粘贴整段 URL 会变成无效规则")
+
+# normalizeRule 本身要拒绝非法域名
+if re.search(r"if \(!host\.contains\('\.'\)\) return null", ab):
+    ok("normalizeRule 拒绝单段域名（避免误伤 localhost/纯 IP）")
+else:
+    bad("normalizeRule 未拒绝单段域名")
+
+# 设置三件套：字段 / 键 / 解码 / setter
+rf = "val adBlockRules: Set<String> = emptySet()" in settings_kt
+rk = 'val AD_BLOCK_RULES = stringSetPreferencesKey("ad_block_rules")' in settings_kt
+rd = "adBlockRules = p[Keys.AD_BLOCK_RULES] ?: emptySet()" in settings_kt
+rs = "suspend fun setAdBlockRules(rules: Set<String>)" in settings_kt
+if rf and rk and rd and rs:
+    ok("adBlockRules 设置四件套齐全（字段/键/解码/setter）")
+else:
+    miss = [n for n, b in (("字段", rf), ("键", rk), ("解码", rd), ("setter", rs)) if not b]
+    bad("adBlockRules 设置缺项：" + "、".join(miss))
+
+# 二级页接上：Route + 屏幕 + 入口
+if "AdBlockRules" in activity and "AdBlockRulesScreen(" in activity:
+    ok("AdBlockRules 二级页在 MainActivity 接上（Route + 屏幕）")
+else:
+    bad("AdBlockRules 二级页未接入导航")
+
+if "onOpenAdBlockRules" in settings_ui and "自定义规则" in settings_ui:
+    ok("设置页有「自定义规则」入口")
+else:
+    bad("设置页缺少自定义规则入口")
+
+if "fun AdBlockRulesScreen(" in rules_screen and "onAdd" in rules_screen and "onRemove" in rules_screen:
+    ok("AdBlockRulesScreen 提供增/删两个能力")
+else:
+    bad("AdBlockRulesScreen 能力不全（缺增或删）")
 
 print()
 print("=" * 55)

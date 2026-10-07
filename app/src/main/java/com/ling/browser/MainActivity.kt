@@ -25,6 +25,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.ling.browser.data.db.DownloadEntry
 import com.ling.browser.data.prefs.NightMode
 import com.ling.browser.ui.BrowserViewModel
+import com.ling.browser.ui.screens.AdBlockRulesScreen
 import com.ling.browser.ui.screens.BookmarksScreen
 import com.ling.browser.ui.screens.BrowserScreen
 import com.ling.browser.ui.screens.DownloadsScreen
@@ -245,11 +246,19 @@ private fun LingApp(viewModel: BrowserViewModel) {
                 onBlockImages = viewModel::setBlockImages,
                 onJavaScript = viewModel::setJavaScript,
                 onAdBlock = viewModel::setAdBlockEnabled,
+                onOpenAdBlockRules = { push(Route.AdBlockRules) },
                 onTabsHeight = viewModel::setTabsHeight,
                 onReaderFontSize = viewModel::setReaderFontSize,
                 onOpenLinksExternal = viewModel::setOpenLinksInExternalApp,
                 onRestoreSession = viewModel::setRestoreSession,
                 onClearData = viewModel::clearAllData,
+                onBack = pop,
+            )
+
+            Route.AdBlockRules -> AdBlockRulesScreen(
+                rules = settings.adBlockRules,
+                onAdd = viewModel::addAdBlockRule,
+                onRemove = viewModel::removeAdBlockRule,
                 onBack = pop,
             )
         }
@@ -263,6 +272,7 @@ private sealed interface Route {
     data object History : Route
     data object Downloads : Route
     data object Settings : Route
+    data object AdBlockRules : Route
 }
 
 /**

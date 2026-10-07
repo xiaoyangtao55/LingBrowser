@@ -58,6 +58,7 @@ fun SettingsScreen(
     onBlockImages: (Boolean) -> Unit,
     onJavaScript: (Boolean) -> Unit,
     onAdBlock: (Boolean) -> Unit,
+    onOpenAdBlockRules: () -> Unit,
     onTabsHeight: (TabsHeight) -> Unit,
     onReaderFontSize: (ReaderFontSize) -> Unit,
     onOpenLinksExternal: (Boolean) -> Unit,
@@ -203,6 +204,18 @@ fun SettingsScreen(
                     subtitle = "拦截常见广告与跟踪域名（域名级，不含元素级规则）",
                     checked = settings.adBlockEnabled,
                     onCheckedChange = onAdBlock,
+                )
+            }
+            item {
+                SettingRow(
+                    icon = LingIcons.Block,
+                    title = "自定义规则",
+                    subtitle = if (settings.adBlockRules.isEmpty()) {
+                        "添加要额外拦截的域名"
+                    } else {
+                        "${settings.adBlockRules.size} 条自定义域名规则"
+                    },
+                    onClick = onOpenAdBlockRules,
                 )
             }
             item {

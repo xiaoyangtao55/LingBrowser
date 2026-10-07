@@ -7,6 +7,7 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.ling.browser.web.HomePage
 import kotlinx.coroutines.flow.Flow
@@ -119,6 +120,17 @@ data class LingSettings(
      */
     val adBlockEnabled: Boolean = true,
     /**
+     * 用户自定义的广告拦截域名规则（裸域名，如 `ad.example.com`）。
+     *
+     * 与内置黑名单同等语义：命中即拦截，且任意深度子域名被兜住。
+     * 空集合表示只用内置规则。
+     *
+     * 存 `Set<String>` 而非逗号分隔字符串：规则本质是无序集合，
+     * 用集合能天然去重、避免"同一规则出现两次"；DataStore 的
+     * stringSetPreferencesKey 直接支持。
+     */
+    val adBlockRules: Set<String> = emptySet(),
+    /**
      * 阅读模式的字号档位。
      *
      * 存的是档位而不是像素值：字号需要在**阅读视图里**改，而那边是
@@ -160,6 +172,7 @@ class SettingsStore(private val context: Context) {
         val READER_FONT_SIZE = stringPreferencesKey("reader_font_size")
         val OPEN_LINKS_EXTERNAL = booleanPreferencesKey("open_links_external")
         val AD_BLOCK = booleanPreferencesKey("ad_block")
+        val AD_BLOCK_RULES = stringSetPreferencesKey("ad_block_rules")
     }
 
     val settings: Flow<LingSettings> = context.dataStore.data.map { p ->
@@ -185,6 +198,7 @@ class SettingsStore(private val context: Context) {
             restoreSession = p[Keys.RESTORE_SESSION] ?: true,
             openLinksInExternalApp = p[Keys.OPEN_LINKS_EXTERNAL] ?: false,
             adBlockEnabled = p[Keys.AD_BLOCK] ?: true,
+            adBlockRules = p[Keys.AD_BLOCK_RULES] ?: emptySet(),
             // 与 tabsHeight 同理：用 runCatching 兜底，
             // 万一将来删掉某个档位，老用户不会因为 valueOf 抛异常而闪退。
             readerFontSize = p[Keys.READER_FONT_SIZE]
@@ -231,6 +245,16 @@ class SettingsStore(private val context: Context) {
 
     suspend fun setAdBlockEnabled(enabled: Boolean) =
         context.dataStore.edit { it[Keys.AD_BLOCK] = enabled }
+
+    /**
+     * 保存自定义广告拦截规则。
+     *
+     * 规则在**进 UI 前**就该被 [com.ling.browser.web.AdBlocker.normalizeRule]
+     * 清洗过，这里只做存储。但为防万一（未来某个调用点漏清洗），
+     * 仍在这里兜底过滤一次空串/纯空白，避免脏数据落库。
+     */
+    suspend fun setAdBlockRules(rules: Set<String>) =
+        context.dataStore.edit { it[Keys.AD_BLOCK_RULES] = rules.filter { r -> r.isNotBlank() }.toSet() }
 
     suspend fun setTabCount(count: Int) =
         context.dataStore.edit { it[Keys.TAB_COUNT] = count }

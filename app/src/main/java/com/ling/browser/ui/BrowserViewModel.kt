@@ -539,6 +539,27 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
      * 里，每次都现读设置（lambda），改完立即生效，无需重建 WebView。
      */
     fun setAdBlockEnabled(on: Boolean) = io { container.settings.setAdBlockEnabled(on) }
+
+    /**
+     * 新增一条自定义广告拦截规则。
+     *
+     * 用 [com.ling.browser.web.AdBlocker.normalizeRule] 清洗后入库。
+     * 返回 null 表示成功；否则返回错误原因（供 UI 就地提示）。
+     */
+    fun addAdBlockRule(raw: String): String? {
+        val normalized = com.ling.browser.web.AdBlocker.normalizeRule(raw)
+            ?: return "无效的域名，请输入如 ad.example.com"
+        val current = settings.value.adBlockRules
+        if (normalized in current) return "该规则已存在"
+        io { container.settings.setAdBlockRules(current + normalized) }
+        return null
+    }
+
+    /** 删除一条自定义广告拦截规则。 */
+    fun removeAdBlockRule(rule: String) {
+        val current = settings.value.adBlockRules
+        io { container.settings.setAdBlockRules(current - rule) }
+    }
     fun setDynamicColor(on: Boolean) = io { container.settings.setDynamicColor(on) }
     fun setTabsHeight(height: TabsHeight) = io { container.settings.setTabsHeight(height) }
 

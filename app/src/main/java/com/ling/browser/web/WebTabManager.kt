@@ -779,6 +779,7 @@ class WebTabManager(private val context: Context) {
                 // 广告拦截开关：与 openExternal 同理用 lambda（动态读设置），
                 // 传值会让开关"改完要重启才生效"。默认开。
                 adBlockEnabled = { this@WebTabManager.settings.adBlockEnabled },
+                adBlockRules = { this@WebTabManager.settings.adBlockRules },
             )
             setDownloadListener { url, _, _, mimeType, _ ->
                 onDownloadRequested?.invoke(url, mimeType)

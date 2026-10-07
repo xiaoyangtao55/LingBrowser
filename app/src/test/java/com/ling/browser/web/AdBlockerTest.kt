@@ -2,6 +2,7 @@ package com.ling.browser.web
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -130,5 +131,58 @@ class AdBlockerTest {
     fun `pathOf 只取路径不含 query`() {
         assertEquals("/ads/x", AdBlocker.pathOf("https://example.com/ads/x?ref=1"))
         assertEquals("", AdBlocker.pathOf("https://example.com"))
+    }
+
+    // --------------------------------------------- 自定义规则
+
+    @Test
+    fun `自定义域名规则命中并兜住子域名`() {
+        val custom = setOf("ad.example.com")
+        assertTrue(
+            "自定义域名应命中：直接命中",
+            AdBlocker.shouldBlock("https://ad.example.com/banner.js", false, custom),
+        )
+        assertTrue(
+            "自定义域名应兜住子域名",
+            AdBlocker.shouldBlock("https://static.ad.example.com/x", false, custom),
+        )
+        // 不相关的域名不受影响
+        assertFalse(
+            "无关域名不应误伤",
+            AdBlocker.shouldBlock("https://example.com/x", false, custom),
+        )
+    }
+
+    @Test
+    fun `空自定义集合只走内置规则`() {
+        // 与无参数调用行为一致
+        assertTrue(AdBlocker.shouldBlock("https://doubleclick.net/x", false, emptySet()))
+        assertFalse(AdBlocker.shouldBlock("https://normal.com/x", false, emptySet()))
+    }
+
+    @Test
+    fun `主文档即使命中自定义规则也不拦`() {
+        assertFalse(
+            "主文档永不拦截，即便命中自定义规则",
+            AdBlocker.shouldBlock("https://ad.example.com/landing", true, setOf("ad.example.com")),
+        )
+    }
+
+    @Test
+    fun `normalizeRule 清洗各种脏输入`() {
+        assertEquals("ad.example.com", AdBlocker.normalizeRule("ad.example.com"))
+        assertEquals("ad.example.com", AdBlocker.normalizeRule("  AD.Example.COM  "))
+        assertEquals("ad.example.com", AdBlocker.normalizeRule("https://ad.example.com/path?x=1"))
+        assertEquals("ad.example.com", AdBlocker.normalizeRule("https://ad.example.com:8080/"))
+        assertEquals("ad.example.com", AdBlocker.normalizeRule("ad.example.com/path"))
+    }
+
+    @Test
+    fun `normalizeRule 拒绝非法输入`() {
+        assertNull("空串应拒绝", AdBlocker.normalizeRule(""))
+        assertNull("纯空白应拒绝", AdBlocker.normalizeRule("   "))
+        assertNull("无点单段应拒绝", AdBlocker.normalizeRule("localhost"))
+        assertNull("非域名应拒绝", AdBlocker.normalizeRule("这不是域名"))
+        assertNull("纯数字无点应拒绝", AdBlocker.normalizeRule("12345"))
     }
 }
