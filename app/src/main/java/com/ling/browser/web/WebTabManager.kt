@@ -776,6 +776,9 @@ class WebTabManager(private val context: Context) {
                 // `settings` 会解析成 WebView.settings（WebSettings），
                 // 那个对象没有 openLinksInExternalApp 字段。
                 openExternal = { this@WebTabManager.settings.openLinksInExternalApp },
+                // 广告拦截开关：与 openExternal 同理用 lambda（动态读设置），
+                // 传值会让开关"改完要重启才生效"。默认开。
+                adBlockEnabled = { this@WebTabManager.settings.adBlockEnabled },
             )
             setDownloadListener { url, _, _, mimeType, _ ->
                 onDownloadRequested?.invoke(url, mimeType)

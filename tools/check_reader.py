@@ -767,6 +767,58 @@ if re.search(r"dark = colorScheme\.background\.luminance\(\) < 0\.5f", screen):
 else:
     bad("dark 未按亮度推导，动态取色/跟随系统时可能判断错")
 
+# ---------- 10. 广告拦截 ----------
+#
+# 广告拦截的入口在 LingWebViewClient.shouldInterceptRequest，
+# 判定逻辑抽到 AdBlocker（纯 Kotlin 可单测）。这里静态校验三件事：
+# 主文档保护、开关动态生效、判定委托给 AdBlocker。
+print("\n10. 广告拦截")
+
+ab = read("web/AdBlocker.kt")
+client = read("web/LingWebViewClient.kt")
+
+# 主文档必须永不拦截：否则用户点广告落地页会整页白屏
+if re.search(r"if \(isMainFrame\) return false", ab):
+    ok("主文档永不拦截（否则广告落地页白屏）")
+else:
+    bad("AdBlocker 未保护主文档 —— 点广告落地页会白屏")
+
+# 判定委托给 AdBlocker.shouldBlock，而不是在 client 里内联规则
+if re.search(r"AdBlocker\.shouldBlock\(url, request\.isForMainFrame\)", client):
+    ok("拦截判定委托给 AdBlocker.shouldBlock（可单测）")
+else:
+    bad("shouldInterceptRequest 未委托 AdBlocker —— 规则无法单测")
+
+# 开关动态生效：必须用 lambda 现读设置，不能传值（改完要重启才生效）
+if re.search(r"adBlockEnabled = \{ this@WebTabManager\.settings\.adBlockEnabled \}", mgr):
+    ok("广告拦截开关用 lambda 传递（动态生效，无需重启）")
+else:
+    bad("广告拦截开关按值传递 —— 改完不重启不生效")
+
+# 设置三件套：字段 / 键 / 解码 / setter
+has_field = "val adBlockEnabled: Boolean = true" in settings_kt
+has_key = 'val AD_BLOCK = booleanPreferencesKey("ad_block")' in settings_kt
+has_decode = "adBlockEnabled = p[Keys.AD_BLOCK] ?: true" in settings_kt
+has_setter = "suspend fun setAdBlockEnabled(enabled: Boolean)" in settings_kt
+if has_field and has_key and has_decode and has_setter:
+    ok("adBlockEnabled 设置四件套齐全（字段/键/解码/setter）")
+else:
+    miss = [n for n, b in (("字段", has_field), ("键", has_key),
+                           ("解码", has_decode), ("setter", has_setter)) if not b]
+    bad("adBlockEnabled 设置缺项：" + "、".join(miss))
+
+# 设置界面与 MainActivity 接上
+if "onAdBlock" in settings_ui and "onAdBlock = viewModel::setAdBlockEnabled" in activity:
+    ok("广告拦截设置界面与 MainActivity 都接上了")
+else:
+    bad("广告拦截设置界面或 MainActivity 未接上")
+
+# 拦截响应必须是空响应（吞掉请求），不能返回一个"看似正常"的假资源
+if re.search(r"shouldInterceptRequest", client) and "WebResourceResponse(" in client:
+    ok("shouldInterceptRequest 已实现，拦截时返回空响应")
+else:
+    bad("shouldInterceptRequest 未实现或未返回拦截响应")
+
 print()
 print("=" * 55)
 if problems:

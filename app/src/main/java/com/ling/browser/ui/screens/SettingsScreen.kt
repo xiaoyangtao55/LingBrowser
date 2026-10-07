@@ -57,6 +57,7 @@ fun SettingsScreen(
     onForceDark: (Boolean) -> Unit,
     onBlockImages: (Boolean) -> Unit,
     onJavaScript: (Boolean) -> Unit,
+    onAdBlock: (Boolean) -> Unit,
     onTabsHeight: (TabsHeight) -> Unit,
     onReaderFontSize: (ReaderFontSize) -> Unit,
     onOpenLinksExternal: (Boolean) -> Unit,
@@ -196,6 +197,16 @@ fun SettingsScreen(
             }
             item {
                 SwitchRow(
+                    icon = LingIcons.Block,
+                    title = "广告拦截",
+                    // 说清是域名级，避免用户以为能挡所有广告
+                    subtitle = "拦截常见广告与跟踪域名（域名级，不含元素级规则）",
+                    checked = settings.adBlockEnabled,
+                    onCheckedChange = onAdBlock,
+                )
+            }
+            item {
+                SwitchRow(
                     icon = LingIcons.Public,
                     title = "用外部 App 打开链接",
                     // 默认关的原因要写清楚，否则用户会以为是漏做的功能
@@ -228,7 +239,7 @@ fun SettingsScreen(
                     )
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        text = "版本 1.0.0 · com.ling.browser",
+                        text = "版本 1.1.0 · com.ling.browser",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )

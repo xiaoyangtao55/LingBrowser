@@ -7,6 +7,7 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import java.io.ByteArrayInputStream
 
 /**
  * 页面导航回调。
@@ -31,9 +32,43 @@ class LingWebViewClient(
      * 关掉等于绕开整条转发路径。
      */
     private val openExternal: () -> Boolean = { false },
+    /**
+     * 是否启用广告拦截。
+     *
+     * 默认开。开关动态生效：拦截发生在每次请求的 `shouldInterceptRequest`
+     * 里，每次都现读这个 lambda，因此改完设置立即生效，无需重建 WebView。
+     */
+    private val adBlockEnabled: () -> Boolean = { true },
     /** 返回 true 表示已由外部接管（例如外部应用打开），WebView 不应继续加载。 */
     private val onExternalScheme: (Uri) -> Boolean,
 ) : WebViewClient() {
+
+    /**
+     * 拦截资源请求 —— 广告拦截的唯一入口。
+     *
+     * 返回非 null 的 [WebResourceResponse] 即表示"用这个响应替换原本要发的请求"。
+     * 拦截广告时返回一个**空响应**（204/空体），既不加载广告资源，也把
+     * 广告脚本/跟踪像素的请求整个吞掉，比加载后再隐藏更干净、更省流量。
+     *
+     * 两个不能碰的边界：
+     *  1. **主文档永不拦截**（见 [AdBlocker.shouldBlock] 的说明），
+     *     否则广告落地页会整页白屏。
+     *  2. **内置页不拦**：主页 ling://home、阅读视图 ling://reader 是
+     *     loadDataWithBaseURL 渲染的自包含内容，本就没有广告子请求，
+     *     但为了绝对安全，非 http(s) 一律走 AdBlocker 内部的 scheme 判断放行。
+     */
+    override fun shouldInterceptRequest(
+        view: WebView?,
+        request: WebResourceRequest?,
+    ): WebResourceResponse? {
+        if (request == null) return null
+        val url = request.url?.toString() ?: return null
+        if (!adBlockEnabled()) return null
+        if (AdBlocker.shouldBlock(url, request.isForMainFrame)) {
+            return WebResourceResponse("text/plain", "utf-8", EMPTY_STREAM)
+        }
+        return null
+    }
 
     override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
         super.onPageStarted(view, url, favicon)
@@ -143,5 +178,10 @@ class LingWebViewClient(
             onExternalScheme(uri)
         }
         return true
+    }
+
+    companion object {
+        /** 拦截广告时返回的空输入流（空响应体）。 */
+        private val EMPTY_STREAM = ByteArrayInputStream(ByteArray(0))
     }
 }

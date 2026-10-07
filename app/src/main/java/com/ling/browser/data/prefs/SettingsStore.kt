@@ -108,6 +108,17 @@ data class LingSettings(
      */
     val openLinksInExternalApp: Boolean = false,
     /**
+     * 是否启用广告拦截（域名级）。
+     *
+     * 默认**开**：这是浏览器的基础能力，多数用户期望默认就拦广告。
+     * 关掉后全部放行，供"某站点因误拦而异常"时临时排查用。
+     *
+     * 目前只做域名级拦截（拦广告/跟踪域名与路径），不做元素级
+     * （EasyList + 隐藏选择器）—— 见 [com.ling.browser.web.AdBlocker]
+     * 关于体积与更新成本的取舍。
+     */
+    val adBlockEnabled: Boolean = true,
+    /**
      * 阅读模式的字号档位。
      *
      * 存的是档位而不是像素值：字号需要在**阅读视图里**改，而那边是
@@ -148,6 +159,7 @@ class SettingsStore(private val context: Context) {
         val RESTORE_SESSION = booleanPreferencesKey("restore_session")
         val READER_FONT_SIZE = stringPreferencesKey("reader_font_size")
         val OPEN_LINKS_EXTERNAL = booleanPreferencesKey("open_links_external")
+        val AD_BLOCK = booleanPreferencesKey("ad_block")
     }
 
     val settings: Flow<LingSettings> = context.dataStore.data.map { p ->
@@ -172,6 +184,7 @@ class SettingsStore(private val context: Context) {
                 ?: TabsHeight.HALF,
             restoreSession = p[Keys.RESTORE_SESSION] ?: true,
             openLinksInExternalApp = p[Keys.OPEN_LINKS_EXTERNAL] ?: false,
+            adBlockEnabled = p[Keys.AD_BLOCK] ?: true,
             // 与 tabsHeight 同理：用 runCatching 兜底，
             // 万一将来删掉某个档位，老用户不会因为 valueOf 抛异常而闪退。
             readerFontSize = p[Keys.READER_FONT_SIZE]
@@ -215,6 +228,9 @@ class SettingsStore(private val context: Context) {
 
     suspend fun setOpenLinksInExternalApp(enabled: Boolean) =
         context.dataStore.edit { it[Keys.OPEN_LINKS_EXTERNAL] = enabled }
+
+    suspend fun setAdBlockEnabled(enabled: Boolean) =
+        context.dataStore.edit { it[Keys.AD_BLOCK] = enabled }
 
     suspend fun setTabCount(count: Int) =
         context.dataStore.edit { it[Keys.TAB_COUNT] = count }

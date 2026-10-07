@@ -34,6 +34,7 @@
 | 网页强制夜间 | Android 10+ 用 `setForceDark`/`setAlgorithmicDarkeningAllowed`，页面加载完成后再注入兜底 CSS |
 | 电脑模式 | 切换为桌面版 Safari UA，触发站点桌面布局（有顶部提示条） |
 | 无图模式 | 关闭图片加载，省流量 |
+| 广告拦截 | 域名级拦截常见广告/跟踪域名与路径，`shouldInterceptRequest` 资源级拦截；主文档永不误杀；设置里可开关（默认开） |
 | JavaScript 开关 | 可关闭以提速、去干扰 |
 | 自定义主页 | 填入任意网址；**留空则使用「翎」的内置主页** |
 | 标签页面板高度 | 全屏 / 一半 两档，默认一半；面板半透明，可透出后方网页 |
@@ -730,6 +731,40 @@ JS 是**字符串常量**嵌在 Kotlin 里，Kotlin 编译器完全不检查它 
 > 以及**脚本自带 IIFE 却又被套了一层**导致返回值恒为 `undefined`。
 > 这三个都表现为"算法没输出"，很容易误判成算法本身有问题。
 
+### 3.8 广告拦截：域名级，先不做元素级
+
+广告拦截发生在 `LingWebViewClient.shouldInterceptRequest`，拦截时返回一个
+**空响应**（204/空体）—— 把广告脚本/跟踪像素的请求整个吞掉，比"加载完再
+隐藏"更干净、更省流量。
+
+**为什么先做域名级、不做元素级（EasyList）**：
+
+| 方案 | 代价 |
+|---|---|
+| 域名黑名单（本方案） | 内嵌几十 KB 源码，随 APK 发布，离线可用 |
+| EasyList 元素级 | 规则文本几百 KB + 解析结构，接近 APK 体积；还依赖在线订阅源 |
+
+域名级已经能去掉绝大多数广告子请求（banner、脚本、跟踪像素），元素级只是
+再补上"页面里残留的空位"——对「翎」的极简定位不划算。
+
+**判定算法**（[AdBlocker.kt](<app/src/main/java/com/ling/browser/web/AdBlocker.kt>)，纯 Kotlin 可单测）：
+
+1. **域名命中**：host 逐级缩短查表（`a.b.doubleclick.net` → `doubleclick.net`），
+   任意深度子域名都被兜住。
+2. **路径命中**：域名没拦、但 path 含 `/ads/`、`/adserver/` 等片段也拦，
+   因为很多站点把广告放在自家域名的 `/ads/` 目录。
+3. **主文档保护**：以上只作用于**子资源**。`shouldInterceptRequest` 对主文档
+   也会回调，若不加 `isForMainFrame` 判断，用户点开广告落地页会整页白屏。
+
+**抽成纯 Kotlin 的理由**：判定逻辑是"这条 URL 该不该拦"的字符串规则，
+跟 WebView 无关。留在 `WebViewClient` 里就得构造 `WebResourceRequest` 才能测，
+等于测不了。抽出来之后 host/path 解析、大小写、端口、userinfo、主文档保护
+这些边界一次覆盖干净（`AdBlockerTest` 11 个用例）。
+
+> 开关（默认开）用 **lambda** 现读设置，不是传值：`WebViewClient` 是建
+> WebView 时一次性构造的，传值会让"改完要重启才生效"——这和"用外部 App
+> 打开链接"开关是同一个坑。
+
 ### 4. 主页由 WebView 渲染，不用 Compose 覆盖层
 早期实现把主页做成 Compose 覆盖层（`HomeScreen`），有两个问题：主页不进入
 前进/后退历史；且切页时 `AndroidView` 会被销毁重建，打断正在加载的页面。
@@ -983,7 +1018,7 @@ python tools/preview_launcher_png.py mipmap-xxxhdpi  # 预览启动图标
 | 项目 | 结果 |
 |---|---|
 | `:app:assembleDebug` | ✅ 通过（图标改版后重新验证） |
-| `:app:testDebugUnitTest` | ✅ **202 个用例全部通过**（`UrlUtilsTest` 20 / `FaviconFetcherTest` 12 / `ReaderPageTest` 20 / `ReaderResultTest` 15 / `UrlSchemeTest` 18 / `HomePageTest` 19 / `TabOrderTest` 15 / `BookmarkFolderTest` 14 / `LingSettingsTest` 16 / `LauncherIconTest` 12 / `LingIconsTest` 11 / `DownloadTest` 10 / `SessionSnapshotTest` 9 / `TabInitialTest` 6 / `PendingDownloadTest` 5） |
+| `:app:testDebugUnitTest` | ✅ **214 个用例全部通过**（`UrlUtilsTest` 20 / `FaviconFetcherTest` 12 / `ReaderPageTest` 20 / `ReaderResultTest` 15 / `UrlSchemeTest` 18 / `AdBlockerTest` 11 / `HomePageTest` 19 / `TabOrderTest` 15 / `BookmarkFolderTest` 14 / `LingSettingsTest` 17 / `LauncherIconTest` 12 / `LingIconsTest` 11 / `DownloadTest` 10 / `SessionSnapshotTest` 9 / `TabInitialTest` 6 / `PendingDownloadTest` 5） |
 | `:app:assembleRelease`（R8 压缩） | ✅ 通过，产物 1.4 MB（图标改版前） |
 | APK 签名校验 | ✅ v1 + v2 方案均通过 |
 | 真机安装（Xiaomi MI 8 / Android 14） | ✅ `adb install` 成功 |
@@ -1078,9 +1113,8 @@ hello world                -> 必应搜索（默认引擎）
 
 参照 Via 的完整能力，以下功能尚未实现，按优先级排列：
 
-1. **广告拦截** —— 通过 `shouldInterceptRequest` 做资源级拦截，内置规则 + 自定义规则
-2. **资源嗅探** —— 注入 JS 扫描页面媒体链接，抓取视频/音频/图片
-3. **插件脚本扩展** —— 用户脚本注入机制
+1. **资源嗅探** —— 注入 JS 扫描页面媒体链接，抓取视频/音频/图片
+2. **插件脚本扩展** —— 用户脚本注入机制
 
 ### 已完成的清单（原「后续方向」）
 
@@ -1092,6 +1126,7 @@ hello world                -> 必应搜索（默认引擎）
 | 书签文件夹 | 单层文件夹；**不建表**，由书签归属派生（无幽灵文件夹） |
 | 书签网站图标 | 按 URL 自行抓取 `/favicon.ico`；存压缩字节而非 `Bitmap` |
 | 阅读模式 | 移植 Readability 打分算法（<11 KB）+ **中文阈值适配**；可调四档字号 |
+| 广告拦截 | `shouldInterceptRequest` 资源级拦截，域名黑名单 + 路径关键字；抽 `AdBlocker` 纯 Kotlin 可单测；主文档保护；默认开 |
 | 外部链接开关 | 非 http(s) 链接是否交给外部 App，**默认关**（本机没装该 App 时更稳定） |
 
 > 早先下载的 8 个未使用官方图标（`help` / `language` / `license` / `menu` 等）

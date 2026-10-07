@@ -62,8 +62,12 @@ object UrlScheme {
      *
      * 必须小写归一：`Uri.parse` 与浏览器地址栏都保留用户输入的大小写，
      * `HTTPS://` 是合法的，直接按原样比较会误判成"不可加载"。
+     *
+     * internal（而非 private）：[AdBlocker] 需要复用同一套 RFC 3986 解析，
+     * 不能各写一份 —— 两处对"什么是 scheme"的理解一旦分歧，
+     * 就会出现"这边当 https、那边当自定义协议"的错位。
      */
-    private fun schemeOf(url: String): String? {
+    internal fun schemeOf(url: String): String? {
         val trimmed = url.trim()
         val colon = trimmed.indexOf(':')
         // 没有冒号，或冒号在首字符（如 `://`），都视为无 scheme

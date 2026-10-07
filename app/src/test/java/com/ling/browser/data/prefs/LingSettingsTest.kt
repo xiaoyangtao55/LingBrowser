@@ -144,6 +144,13 @@ class LingSettingsTest {
     }
 
     @Test
+    fun `默认开启广告拦截`() {
+        // 广告拦截是浏览器的基础能力，多数用户期望默认就拦。
+        // 关掉是"某站点误拦时排查用"的临时手段，不该是默认态。
+        assertTrue("默认必须开广告拦截", LingSettings().adBlockEnabled)
+    }
+
+    @Test
     fun `默认不把链接交给外部 App`() {
         // 回归用例：真机上这个开关默认开时，知乎回答页会遇到
         // zhihu:// 导航 —— 本机没装知乎 App，交给系统必然失败，

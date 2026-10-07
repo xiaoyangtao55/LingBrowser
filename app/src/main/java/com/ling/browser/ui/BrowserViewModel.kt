@@ -531,6 +531,14 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
     fun setForceDark(on: Boolean) = io { container.settings.setForceDarkWebPages(on) }
     fun setBlockImages(on: Boolean) = io { container.settings.setBlockImages(on) }
     fun setJavaScript(on: Boolean) = io { container.settings.setJavaScriptEnabled(on) }
+
+    /**
+     * 切换广告拦截。
+     *
+     * 与"用外部 App 打开链接"同理：判定发生在 `shouldInterceptRequest`
+     * 里，每次都现读设置（lambda），改完立即生效，无需重建 WebView。
+     */
+    fun setAdBlockEnabled(on: Boolean) = io { container.settings.setAdBlockEnabled(on) }
     fun setDynamicColor(on: Boolean) = io { container.settings.setDynamicColor(on) }
     fun setTabsHeight(height: TabsHeight) = io { container.settings.setTabsHeight(height) }
 

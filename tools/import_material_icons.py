@@ -89,6 +89,7 @@ MAPPING = [
     ("DesktopWindows", "desktop_windows"),
     ("Settings", "settings"),
     ("Article", "article"),
+    ("Block", "block"),
 ]
 
 # 这 4 个在用户下载的 30 个文件里不存在，需要单独补齐。

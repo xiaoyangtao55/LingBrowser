@@ -244,6 +244,7 @@ private fun LingApp(viewModel: BrowserViewModel) {
                 onForceDark = viewModel::setForceDark,
                 onBlockImages = viewModel::setBlockImages,
                 onJavaScript = viewModel::setJavaScript,
+                onAdBlock = viewModel::setAdBlockEnabled,
                 onTabsHeight = viewModel::setTabsHeight,
                 onReaderFontSize = viewModel::setReaderFontSize,
                 onOpenLinksExternal = viewModel::setOpenLinksInExternalApp,

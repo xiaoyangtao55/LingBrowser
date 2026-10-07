@@ -54,6 +54,7 @@ MAPPING = [
     ("PrivacyTip", "privacy_tip"), ("DesktopWindows", "desktop_windows"),
     ("Settings", "settings"),
     ("Article", "article"),
+    ("Block", "block"),
 ]
 
 NUM = re.compile(r"-?\d+(?:\.\d+)?")
