@@ -11,6 +11,7 @@ import android.webkit.WebView
 import android.widget.FrameLayout
 import com.ling.browser.data.db.TabSnapshot
 import com.ling.browser.data.prefs.LingSettings
+import com.ling.browser.data.prefs.NightMode
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -136,11 +137,39 @@ class WebTabManager(private val context: Context) {
     /** 应用设置；已存在的 WebView 立即生效。 */
     fun applySettings(newSettings: LingSettings) {
         settings = newSettings
+        val darkTheme = resolvedDark()
         webViews.forEach { (id, wv) ->
             val incognito = _tabs.value.firstOrNull { it.id == id }?.isIncognito ?: false
-            wv.applySettings(newSettings, incognito)
+            wv.applySettings(newSettings, incognito, darkTheme)
         }
     }
+
+    /**
+     * 夜间模式是否已解析为深色。
+     *
+     * 这是"界面 + 网页内容"共用的唯一真相源：跟随系统时读系统 uiMode，
+     * 强制开/关直接返回。Web 层用它来决定是否暗化网页，与 Compose 侧
+     * `isSystemInDarkTheme()` 语义一致，保证两边同时切换。
+     */
+    private fun resolvedDark(): Boolean = when (settings.nightMode) {
+        NightMode.FOLLOW_SYSTEM -> isSystemDark()
+        NightMode.ALWAYS_ON -> true
+        NightMode.ALWAYS_OFF -> false
+    }
+
+    /** 系统当前是否处于深色模式（读资源配置，与 Compose isSystemInDarkTheme 同源）。 */
+    private fun isSystemDark(): Boolean {
+        val mask = context.resources.configuration.uiMode and
+            android.content.res.Configuration.UI_MODE_NIGHT_MASK
+        return mask == android.content.res.Configuration.UI_MODE_NIGHT_YES
+    }
+
+    /**
+     * 网页内容是否应暗化：`forceDarkWebPages`（意图开关）与夜间模式
+     * 是否已解析为深色，两者同时成立。
+     */
+    private fun shouldDarkenPages(): Boolean =
+        settings.forceDarkWebPages && resolvedDark()
 
     // ---------------------------------------------------------------- 标签页操作
 
@@ -701,7 +730,7 @@ class WebTabManager(private val context: Context) {
             }
             // 注意：在 LingWebView 的 apply 作用域里，裸写 `settings` 会解析成
             // WebView.settings（WebSettings），必须显式限定到本类的字段。
-            applySettings(this@WebTabManager.settings, incognito)
+            applySettings(this@WebTabManager.settings, incognito, this@WebTabManager.shouldDarkenPages())
             webChromeClient = object : WebChromeClient() {
                 override fun onProgressChanged(view: WebView?, newProgress: Int) {
                     updateTab(id) { it.copy(progress = newProgress) }
@@ -778,10 +807,10 @@ class WebTabManager(private val context: Context) {
                     // 会把这套配色整个反过来 —— 深色模式下反而变成亮底白字，
                     // 正好与预期相反。
                     if (!isInternal) {
-                        // 必须写 this@WebTabManager.settings：在 apply 作用域里
-                        // 裸写 `settings` 会解析成 WebView.settings（WebSettings），
-                        // 那个对象没有 forceDarkWebPages 字段。
-                        wv.injectDarkMode(this@WebTabManager.settings.forceDarkWebPages)
+                        // 用 shouldDarkenPages() 而非直接读 forceDarkWebPages：
+                        // 暗化还要看夜间模式是否已解析为深色。两者一起算，
+                        // 才是"网页内容是否该暗"的最终答案。
+                        wv.injectDarkMode(this@WebTabManager.shouldDarkenPages())
 
                         // 历史记录只记真实网址。阅读视图的 url 是合成的
                         // ling://reader，主页是 ling://home —— 两者都没有记录价值，

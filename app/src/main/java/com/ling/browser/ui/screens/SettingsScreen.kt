@@ -69,6 +69,7 @@ fun SettingsScreen(
 ) {
     var showEngineDialog by remember { mutableStateOf(false) }
     var showHomepageDialog by remember { mutableStateOf(false) }
+    var showNightModeDialog by remember { mutableStateOf(false) }
     var showTabsHeightDialog by remember { mutableStateOf(false) }
     var showReaderFontDialog by remember { mutableStateOf(false) }
     var confirmClear by remember { mutableStateOf(false) }
@@ -117,7 +118,7 @@ fun SettingsScreen(
             // ---------------- 外观 ----------------
             item { SectionHeader("外观") }
             item {
-                SwitchRow(
+                SettingRow(
                     icon = LingIcons.Nightlight,
                     title = "夜间模式",
                     subtitle = when (settings.nightMode) {
@@ -125,10 +126,7 @@ fun SettingsScreen(
                         NightMode.ALWAYS_ON -> "始终开启"
                         NightMode.ALWAYS_OFF -> "始终关闭"
                     },
-                    checked = settings.nightMode == NightMode.ALWAYS_ON,
-                    onCheckedChange = { on ->
-                        onNightMode(if (on) NightMode.ALWAYS_ON else NightMode.ALWAYS_OFF)
-                    },
+                    onClick = { showNightModeDialog = true },
                 )
             }
             item {
@@ -172,8 +170,8 @@ fun SettingsScreen(
             item {
                 SwitchRow(
                     icon = LingIcons.Nightlight,
-                    title = "强制网页夜间模式",
-                    subtitle = "对网页内容反色，适合夜间阅读",
+                    title = "网页跟随夜间模式",
+                    subtitle = "夜间模式开启时，网页内容也反色暗化",
                     checked = settings.forceDarkWebPages,
                     onCheckedChange = onForceDark,
                 )
@@ -258,7 +256,7 @@ fun SettingsScreen(
                     )
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        text = "轻巧、干净、无推送。基于 Android WebView。",
+                        text = "轻巧、干净、无推送",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -300,6 +298,50 @@ fun SettingsScreen(
             },
             confirmButton = {
                 TextButton(onClick = { showEngineDialog = false }) { Text("完成") }
+            },
+        )
+    }
+
+    // ---- 夜间模式选择 ----
+    if (showNightModeDialog) {
+        AlertDialog(
+            onDismissRequest = { showNightModeDialog = false },
+            title = { Text("夜间模式") },
+            text = {
+                Column {
+                    NightMode.entries.forEach { mode ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    onNightMode(mode)
+                                    showNightModeDialog = false
+                                }
+                                .padding(vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RadioButton(
+                                selected = settings.nightMode == mode,
+                                onClick = {
+                                    onNightMode(mode)
+                                    showNightModeDialog = false
+                                },
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                when (mode) {
+                                    NightMode.FOLLOW_SYSTEM -> "跟随系统"
+                                    NightMode.ALWAYS_ON -> "始终开启"
+                                    NightMode.ALWAYS_OFF -> "始终关闭"
+                                },
+                                style = MaterialTheme.typography.bodyLarge,
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showNightModeDialog = false }) { Text("完成") }
             },
         )
     }

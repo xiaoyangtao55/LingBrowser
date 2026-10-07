@@ -140,7 +140,7 @@ class LingSettingsTest {
         assertTrue(s.javaScriptEnabled)
         assertTrue(s.dynamicColor)
         assertFalse("默认不开启无图模式", s.blockImages)
-        assertFalse("默认不强制网页夜间", s.forceDarkWebPages)
+        assertTrue("默认网页跟随夜间模式暗化", s.forceDarkWebPages)
     }
 
     @Test

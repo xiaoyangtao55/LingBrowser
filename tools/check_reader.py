@@ -473,6 +473,7 @@ settings_kt = read("data/prefs/SettingsStore.kt")
 activity = read("MainActivity.kt")
 settings_ui = read("ui/screens/SettingsScreen.kt")
 page = read("web/ReaderPage.kt")
+lwv = read("web/LingWebView.kt")
 
 if "ReaderExtractorJs.SCRIPT" in mgr and "evaluateJavascript" in mgr:
     ok("WebTabManager 真的执行了提取脚本")
@@ -1050,6 +1051,41 @@ console.log('__SNIFF__' + RESULT);
                         ok("媒体扩展名链接已识别为资源")
                     else:
                         bad("媒体扩展名链接未识别")
+
+# ---------- 11. 夜间模式跟随 ----------
+#
+# 三个体验点：设置里能选三态（跟随系统/开/关）、网页暗化跟随夜间模式、
+# 切换时组件同步。这里静态校验接线是否到位。
+print("\n11. 夜间模式跟随")
+
+# (1) 设置页的夜间模式必须是三态选择，而不是二态开关（二态丢"跟随系统"）
+if 'showNightModeDialog = true' in settings_ui and \
+        'NightMode.entries.forEach' in settings_ui:
+    ok("设置页夜间模式是三态选择（跟随系统/始终开/始终关）")
+else:
+    bad("设置页夜间模式不是三态 —— 用户无法在设置里选「跟随系统」")
+
+# (2) 网页暗化必须跟随夜间模式：shouldDarkenPages = forceDarkWebPages && resolvedDark
+if "fun shouldDarkenPages()" in mgr and "resolvedDark()" in mgr:
+    ok("网页暗化由 shouldDarkenPages 驱动（意图开关 × 夜间模式解析）")
+else:
+    bad("网页暗化未跟随夜间模式 —— 关掉夜间模式网页仍会暗")
+
+# (3) 暗化结果传入 applySettings（系统级）且立即注入 CSS（兜底层）
+if "darkTheme: Boolean" in lwv and "injectDarkMode(darkTheme)" in lwv:
+    ok("applySettings 接收解析后的 darkTheme 并立即注入/移除 CSS")
+else:
+    bad("applySettings 未接收 darkTheme，或未立即同步 CSS —— 切换会不同步")
+
+# (4) 移除路径必须存在：关掉夜间模式要能摘掉已注入的样式。
+# 判据用"常量定义 + 该常量被引用"：只查 removeChild 会误判（它在 DARK_CSS_JS
+# 的守卫里没有，但可能在别处出现），必须确认"移除脚本真的被挂进了
+# injectDarkMode 的分支"。
+if re.search(r"REMOVE_DARK_CSS_JS\s*=", lwv) and \
+        re.search(r"evaluateJavascript\(if \(enabled\) DARK_CSS_JS else REMOVE_DARK_CSS_JS", lwv):
+    ok("关夜间模式能移除已注入的反色样式（否则网页残留暗色）")
+else:
+    bad("缺少反色样式的移除路径 —— 切回浅色模式网页仍是暗的")
 
 print()
 print("=" * 55)

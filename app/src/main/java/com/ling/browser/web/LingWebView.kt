@@ -34,9 +34,15 @@ class LingWebView @JvmOverloads constructor(
         overScrollMode = OVER_SCROLL_NEVER
     }
 
-    /** 依据设置应用 WebSettings。切设置后需重新调用。 */
+    /**
+     * 依据设置应用 WebSettings。切设置后需重新调用。
+     *
+     * @param darkTheme 是否把网页内容暗化。由调用方在运行时算出
+     *   `forceDarkWebPages && 夜间模式已解析为深色`，传进来的是**最终结果**
+     *   而非中间开关 —— 这样"夜间模式关掉时网页立刻变亮"能在这里统一处理。
+     */
     @Suppress("DEPRECATION")
-    fun applySettings(settings: LingSettings, incognito: Boolean) {
+    fun applySettings(settings: LingSettings, incognito: Boolean, darkTheme: Boolean) {
         this.settings.apply {
             javaScriptEnabled = settings.javaScriptEnabled
             domStorageEnabled = !incognito
@@ -63,19 +69,23 @@ class LingWebView @JvmOverloads constructor(
             mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
         }
 
-        // 强制网页夜间模式。
-        // setForceDark 在 API 29 引入、API 33 起废弃（改用 setAlgorithmicDarkeningAllowed），
-        // 这里按版本分别调用，避免在新系统上触发废弃告警或失效。
+        // 网页夜间模式。setForceDark 在 API 29 引入、API 33 起废弃
+        // （改用 setAlgorithmicDarkeningAllowed），按版本分别调用。
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            this.settings.isAlgorithmicDarkeningAllowed = settings.forceDarkWebPages
+            this.settings.isAlgorithmicDarkeningAllowed = darkTheme
         } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             @Suppress("DEPRECATION")
-            this.settings.forceDark = if (settings.forceDarkWebPages) {
+            this.settings.forceDark = if (darkTheme) {
                 WebSettings.FORCE_DARK_ON
             } else {
                 WebSettings.FORCE_DARK_OFF
             }
         }
+
+        // 立即把暗化 CSS 注入/移除到**当前已加载的页面**：
+        // 上面两行系统级暗化对已经渲染出来的内容往往要等下次加载才生效，
+        // 若只靠它，"切夜间模式网页不变"就会显得慢半拍（组件切换不同步）。
+        injectDarkMode(darkTheme)
 
         if (incognito) {
             // 无痕：不保留任何持久化痕迹
@@ -93,7 +103,7 @@ class LingWebView @JvmOverloads constructor(
         get() = WebSettings.getDefaultUserAgent(context)
 
     /**
-     * 注入强制夜间模式的 CSS。
+     * 注入 / 移除强制夜间模式的 CSS。
      *
      * 为什么在 `setForceDark` / `isAlgorithmicDarkeningAllowed` 之外还要这一层：
      * 系统级的算法变暗只处理「有明确定义浅色背景」的元素，对
@@ -105,12 +115,12 @@ class LingWebView @JvmOverloads constructor(
      * 兜底做法是整体 invert + hue-rotate(180deg)（色相转一圈回到原位，
      * 因此彩色不会变成反色负片），再对 img/video/canvas 反色一次还原。
      *
-     * 调用时机很关键：必须在**页面加载完成后**注入。早期版本这个方法
-     * 定义了却从未被调用，等于强制夜间只有系统那一层，漏网页面就没救。
+     * [enabled] 为 false 时**移除**已注入的样式，而不是只"不注入"：
+     * 早期版本只注入不移除，导致关掉夜间模式后页面残留 `__ling_dark__`
+     * 样式，切回浅色模式网页还是暗的 —— 组件切换不同步的又一根因。
      */
     fun injectDarkMode(enabled: Boolean) {
-        if (!enabled) return
-        evaluateJavascript(DARK_CSS_JS, null)
+        evaluateJavascript(if (enabled) DARK_CSS_JS else REMOVE_DARK_CSS_JS, null)
     }
 
     companion object {
@@ -124,6 +134,14 @@ class LingWebView @JvmOverloads constructor(
               s.id = '__ling_dark__';
               s.textContent = css;
               (document.head || document.documentElement).appendChild(s);
+            })();
+        """.trimIndent()
+
+        /** 移除已注入的夜间模式样式（关掉夜间模式时调用）。 */
+        private val REMOVE_DARK_CSS_JS = """
+            (function() {
+              var s = document.getElementById('__ling_dark__');
+              if (s && s.parentNode) s.parentNode.removeChild(s);
             })();
         """.trimIndent()
 

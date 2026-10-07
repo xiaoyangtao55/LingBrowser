@@ -74,8 +74,17 @@ data class LingSettings(
     val desktopMode: Boolean = false,
     val dynamicColor: Boolean = true,
     val incognito: Boolean = false,
-    /** 网页夜间模式：对页面注入反色/暗化 CSS。 */
-    val forceDarkWebPages: Boolean = false,
+    /**
+     * 网页内容是否跟随夜间模式暗化。
+     *
+     * 默认**开**：夜间模式是"整套变暗"（界面 + 网页内容一起），
+     * 而不是只暗界面、网页还白底闪眼。关掉它表示"我只要深色界面，
+     * 网页内容保持原样"（比如想读原色的图文排版）。
+     *
+     * 真正的暗化条件是 `forceDarkWebPages && 夜间模式已解析为深色`，
+     * 由 Web 层在运行时求值，本字段只存用户的意图开关。
+     */
+    val forceDarkWebPages: Boolean = true,
     /** 无图模式：省流。 */
     val blockImages: Boolean = false,
     /** 是否启用 JavaScript。 */
@@ -186,7 +195,7 @@ class SettingsStore(private val context: Context) {
                 ?: NightMode.FOLLOW_SYSTEM,
             desktopMode = p[Keys.DESKTOP_MODE] ?: false,
             dynamicColor = p[Keys.DYNAMIC_COLOR] ?: true,
-            forceDarkWebPages = p[Keys.FORCE_DARK] ?: false,
+            forceDarkWebPages = p[Keys.FORCE_DARK] ?: true,
             blockImages = p[Keys.BLOCK_IMAGES] ?: false,
             javaScriptEnabled = p[Keys.JS_ENABLED] ?: true,
             // valueOf 用 runCatching 兜底：老版本存过 "QUARTER"，
