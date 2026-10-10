@@ -1094,6 +1094,16 @@ BrowserViewModel.kt:278:29 Argument type mismatch: actual type is 'String?', but
 > 推送后用 GitHub API 读 `repos/…/commits/<sha>/check-runs` 就能确认结论 ——
 > 本地没有 Android SDK 时，这是最省事的编译验证路径。
 
+本批（`907157d`）推送后的 CI 结论：**success** —— `:app:testDebugUnitTest`
+（254 个用例）与 `:app:assembleRelease` 全部通过，
+run: https://github.com/xiaoyangtao55/LingBrowser/actions/runs/38042019419
+
+> 该 run 的 7 条 annotation 都是工作流环境警告，与代码无关：
+> Node.js 20 / `actions/setup-java@v4` 的弃用提醒、`ubuntu-latest` 迁移公告，
+> 以及 `platforms;android-36.1`、`build-tools;36.0.0`、`platform-tools` 这几个
+> SDK 包 "仓库里没有这个包名" —— 装不上但不影响构建（runner 镜像自带）。
+> 有空时值得顺手清一下 `release.yml` 里的包名列表，否则 runner 镜像一变就会真失败。
+
 ---
 
 ## 五、启动图标
