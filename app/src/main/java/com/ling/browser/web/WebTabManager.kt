@@ -318,6 +318,23 @@ class WebTabManager(private val context: Context) {
             h.addView(wv)
         }
         syncNavState(id)
+        // CookieManager 是**进程级**单例：切标签后必须把全局策略对齐到新的激活标签，
+        // 否则会把上一个标签（尤其是无痕）的策略留在全局 —— 见 LingWebView.applyCookiePolicy。
+        syncCookiePolicy(id)
+    }
+
+    /**
+     * 让全局 Cookie 策略跟着当前激活标签走。
+     *
+     * CookieManager 没有"按 WebView 隔离"这回事，因此只能维护"当前可见的标签
+     * 决定全局策略"这一条不变量。两个调用时机：
+     *   - 创建 WebView 时（且该标签就是激活标签，见 [obtainWebView]）；
+     *   - 切换标签时（见 [switchTo]）。
+     */
+    private fun syncCookiePolicy(id: String) {
+        val wv = webViews[id] ?: return
+        val incognito = _tabs.value.firstOrNull { it.id == id }?.isIncognito ?: false
+        wv.applyCookiePolicy(incognito)
     }
 
     /**
@@ -513,29 +530,24 @@ class WebTabManager(private val context: Context) {
     )
 
     /**
-     * 用缓存的正文重排版阅读视图。
+     * 原地调整阅读视图的正文大小。
      *
-     * 必须用**缓存下来的正文**，而不是重新跑一次提取 ——
-     * 那时页面已经被替换成阅读视图了，原始 DOM 早就没了，
-     * 重新提取只会得到"没有正文"。也没有必要再下一次网络。
+     * 为什么不再重渲染：阅读视图的排版以 `:root` 上的 `--font-size` 为唯一来源，
+     * 直接改这个变量就能重排（见 [ReaderPage.fontSizeJs]）。而重渲染的代价是实打实的 ——
+     * `loadDataWithBaseURL` 每次调用都会往历史里压入一个条目（阅读视图和主页同理），
+     * 于是反复调字号会让返回键在"同一篇文章的不同字号"之间来回；重渲染还会把
+     * **滚动位置拉回顶部** —— 用户读到一半调字号，位置全丢。
      *
-     * [fontSize] 显式传入而不是读 `settings.readerFontSize`：
-     * 设置是异步落盘的，调用方刚 `setReaderFontSize` 完就重绘时，
-     * `settings` 里很可能还是旧值 —— 表现为"改了字号没反应，
-     * 要再点一次才生效"。
+     * [fontSize] 显式传入而不是读 `settings.readerFontSize`：设置是异步落盘的，
+     * 调用方刚 `setReaderFontSize` 完就重绘时，`settings` 里很可能还是旧值 ——
+     * 表现为"改了字号没反应，要再点一次才生效"。
      */
     fun refreshReaderFontSize(fontSize: ReaderPage.FontSize) {
         val id = _activeId.value
-        val cached = readerContent[id] ?: return
         val wv = webViews[id] ?: return
+        // 不在阅读视图（例如刚切走）：什么都不用做，下次进入阅读模式会用新字号渲染
         if (!ReaderPage.isReaderUrl(wv.url)) return
-        wv.loadDataWithBaseURL(
-            ReaderPage.BASE_URL,
-            readerHtml(cached, fontSize),
-            "text/html",
-            "utf-8",
-            null,
-        )
+        wv.evaluateJavascript(ReaderPage.fontSizeJs(fontSize.px), null)
     }
 
     /** 退出阅读模式：回到原文。 */
@@ -808,6 +820,8 @@ class WebTabManager(private val context: Context) {
             // 注意：在 LingWebView 的 apply 作用域里，裸写 `settings` 会解析成
             // WebView.settings（WebSettings），必须显式限定到本类的字段。
             applySettings(this@WebTabManager.settings, incognito, this@WebTabManager.shouldDarkenPages())
+            // 无痕的清理只做**一次**（放在 applySettings 里会在每次设置变化时清空它的历史）
+            if (incognito) resetForIncognito()
             webChromeClient = object : WebChromeClient() {
                 override fun onProgressChanged(view: WebView?, newProgress: Int) {
                     updateTab(id) { it.copy(progress = newProgress) }
@@ -957,6 +971,9 @@ class WebTabManager(private val context: Context) {
         }
 
         webViews[id] = wv
+        // Cookie 策略是进程级的：新建的 WebView 只有正好是当前激活标签时才动全局策略，
+        // 后台标签（例如 ensureHomeRendered 给非激活标签补建实例）等切过去时再对齐。
+        if (id == _activeId.value) syncCookiePolicy(id)
         enforceCacheLimit()
         return wv
     }

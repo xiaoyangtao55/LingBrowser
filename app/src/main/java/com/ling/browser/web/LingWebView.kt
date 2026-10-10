@@ -88,15 +88,43 @@ class LingWebView @JvmOverloads constructor(
         // 若只靠它，"切夜间模式网页不变"就会显得慢半拍（组件切换不同步）。
         injectDarkMode(darkTheme)
 
-        if (incognito) {
-            // 无痕：不保留任何持久化痕迹
-            CookieManager.getInstance().setAcceptCookie(false)
-            clearHistory()
-            clearCache(true)
-            clearFormData()
-        } else {
-            CookieManager.getInstance().setAcceptCookie(true)
-        }
+        // ⚠️ 这里**刻意不碰** Cookie 策略与无痕清理：
+        //   - CookieManager 是进程级单例，在"遍历所有 WebView"的调用里各设一次，
+        //     结果由最后一次调用决定（策略会随创建顺序漂移）→ 见 [applyCookiePolicy]；
+        //   - 无痕的 clearHistory/clearCache/clearFormData 放在这里，会让用户在无痕
+        //     标签页里**改任何设置**都清空它的前进/后退历史 → 见 [resetForIncognito]。
+        // 两者都由 WebTabManager 在"创建 WebView / 切换标签"这两个正确的时机调用。
+    }
+
+    /**
+     * 无痕标签的**一次性**清理：不保留任何持久化痕迹。
+     *
+     * 只在创建 WebView 时调用（见 `WebTabManager.obtainWebView`）。
+     *
+     * ⚠️ 早先这段清理写在 [applySettings] 里，而 applySettings 会在**每次设置变化**时
+     * 遍历所有 WebView 跑一遍 —— 于是用户在无痕标签里切一下夜间模式、换个搜索引擎，
+     * 它的前进/后退历史就被清空（返回键失效）、缓存被清空（整页重新下载）。
+     */
+    fun resetForIncognito() {
+        clearHistory()
+        clearCache(true)
+        clearFormData()
+    }
+
+    /**
+     * 应用 Cookie 策略：无痕不接受 Cookie，普通标签恢复接受。
+     *
+     * ⚠️ `CookieManager` 是**进程级**单例，没有"按 WebView 隔离"这回事。
+     * 早先它在 [applySettings] 的遍历里按每个 WebView 各设一次，等于"最后一个
+     * WebView 决定全局"，于是创建顺序一变策略就跑偏：
+     *   - 普通标签丢登录态（全局 Cookie 被关掉）；
+     *   - 或者无痕标签又接受了 Cookie，隐私承诺静默失效。
+     * 现在改为**策略跟着当前激活的那个标签走**：创建 WebView 时设一次
+     * （只在该标签就是激活标签时），每次切换标签再对齐一次
+     * （见 `WebTabManager.syncCookiePolicy`）。
+     */
+    fun applyCookiePolicy(incognito: Boolean) {
+        CookieManager.getInstance().setAcceptCookie(!incognito)
     }
 
     /** 获取 WebView 默认 UA，用于在「跟随系统」时还原。 */

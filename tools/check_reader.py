@@ -778,7 +778,13 @@ if re.search(r"private fun readerHtml[\s\S]{0,900}?dark = homeColors\.dark", mgr
 else:
     bad("阅读视图未接入主题明暗")
 
-if re.search(r"dark = colorScheme\.background\.luminance\(\) < 0\.5f", screen):
+# 判据认两种写法：内联在 applyHomeTheme 的实参上，或先算成 uiDark 再用
+# （后者同时喂给"网页重算暗化"的 LaunchedEffect）。不能放宽成"文件里出现过
+# luminance" —— 那样 dark 从别处来、或算完不用，也照样通过。
+if re.search(r"val uiDark = colorScheme\.background\.luminance\(\) < 0\.5f", screen) and \
+        re.search(r"dark = uiDark", screen):
+    ok("dark 由实际背景亮度推导（先算成 uiDark，同时驱动主页配色与网页重算）")
+elif re.search(r"dark = colorScheme\.background\.luminance\(\) < 0\.5f", screen):
     ok("dark 由实际背景亮度推导，而不是只读设置项")
 else:
     bad("dark 未按亮度推导，动态取色/跟随系统时可能判断错")
@@ -1159,6 +1165,70 @@ if re.search(
     ok("syncNavState 把 baseUrl 归一化回逻辑地址（TabState 里只有一种 url）")
 else:
     bad("syncNavState 原样写回 wv.url —— 主页/阅读视图的 baseUrl 会污染 TabState 与会话快照")
+
+# ------------------------------------------------------- 进程级状态与文档重建
+# 这一组是"进程级 / 文档级"的坑：单测覆盖不到（要构造 WebView 和系统配置变化），
+# 只能盯调用点。
+
+# (10) 无痕的清理只能做**一次**。
+# 早先它写在 LingWebView.applySettings 里，而 applySettings 会在每次设置变化时
+# 遍历所有 WebView —— 于是无痕标签里切一下夜间模式，前进/后退历史就被清空、
+# 缓存被清空（整页重新下载）。判据用"三个清理各自只出现一次，且都在
+# resetForIncognito 里"，比开窗口找字符串可靠（窗口开小了会假通过）。
+reset_body = body_of(lwv, r"fun resetForIncognito\(\)", span=400)
+if (
+    lwv.count("clearHistory()") == 1
+    and lwv.count("clearFormData()") == 1
+    and lwv.count("clearCache(") == 1
+    and "clearHistory()" in reset_body
+):
+    ok("无痕清理只在 resetForIncognito 里做一次（改设置不会清掉无痕标签的历史）")
+else:
+    bad("无痕清理又回到 applySettings 或出现多份 —— 无痕标签改一次设置就丢前进后退")
+
+if re.search(r"fun obtainWebView[\s\S]{0,2500}?if \(incognito\) resetForIncognito\(\)", mgr):
+    ok("清理落在创建 WebView 的时机上")
+else:
+    bad("无痕清理没有在创建 WebView 时执行 —— 新建的无痕标签会留下痕迹")
+
+# (11) Cookie 策略必须跟着**激活标签**走。
+# CookieManager 是进程级单例，早先它在 applySettings 的遍历里被逐个 WebView 反设，
+# 等于"最后一个 WebView 决定全局"：普通标签丢登录态，或者无痕标签又被接受 Cookie。
+if lwv.count("setAcceptCookie") == 1 and re.search(
+    r"fun applyCookiePolicy\(incognito: Boolean\)[\s\S]{0,200}?setAcceptCookie", lwv
+):
+    ok("Cookie 策略只有一个设置点（applyCookiePolicy）")
+else:
+    bad("Cookie 策略有多个设置点 —— 全局策略会随调用顺序漂移")
+
+if (
+    re.search(r"fun switchTo\(id: String\)[\s\S]{0,600}?syncCookiePolicy\(id\)", mgr)
+    and "if (id == _activeId.value) syncCookiePolicy(id)" in mgr
+):
+    ok("切标签 / 创建实例时都把 Cookie 策略对齐到激活标签")
+else:
+    bad("切标签未对齐 Cookie 策略 —— 无痕的全局策略会留在普通标签上（反之亦然）")
+
+# (12) 跟随系统时，运行中切换系统明暗要重算网页暗化。
+# settings 流不会因系统明暗变化而发射，而界面会跟着系统变 —— 少了这条就会出现
+# "界面已经变深、网页还是亮的"（README §四.3 记的那条遗留）。
+if re.search(
+    r"fun refreshWebDarkMode\(\)[\s\S]{0,300}?applySettings\(settings\.value\)", vm
+) and re.search(r"LaunchedEffect\(uiDark\)[\s\S]{0,200}?refreshWebDarkMode\(\)", screen):
+    ok("跟随系统时运行中切换明暗会重算网页暗化（界面与网页同步）")
+else:
+    bad("系统明暗运行中变化时网页不重算 —— 界面变深、网页还是亮的")
+
+# (13) 调字号必须原地改 CSS 变量，不能重渲染。
+# loadDataWithBaseURL 每次调用都压历史条目（返回键在同一篇文章的不同字号之间
+# 来回），重渲染还会把滚动位置拉回顶部。
+font_body = body_of(
+    mgr, r"fun refreshReaderFontSize\(fontSize: ReaderPage\.FontSize\)", span=400
+)
+if "ReaderPage.fontSizeJs" in font_body and "loadDataWithBaseURL" not in font_body:
+    ok("调字号走原地改变量（不压历史、不丢滚动位置）")
+else:
+    bad("调字号又走重渲染 —— 会压入历史条目并把滚动位置拉回顶部")
 
 print()
 print("=" * 55)

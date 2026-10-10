@@ -735,6 +735,21 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
         tabManager.ensureHomeRendered()
     }
 
+    /**
+     * 重新计算「网页是否暗化」并应用到所有 WebView。
+     *
+     * 为什么需要单独一个入口：「跟随系统」时，**运行中**切换系统明暗不经过设置流
+     * （`settings.collect` 不会触发），但界面会跟着系统变（`isSystemInDarkTheme`）。
+     * 只靠设置变化驱动就会出现"界面已经变深、网页还是亮的" —— 这正是 README §四.3
+     * 记的那条遗留。由 UI 在解析出的明暗变化时调用（见 BrowserScreen 的 LaunchedEffect）。
+     *
+     * 只传 `settings.value` 就够：`shouldDarkenPages()` 会现读系统 uiMode，
+     * 不必把明暗值再穿一层（两处各算一次正是漂移的来源）。
+     */
+    fun refreshWebDarkMode() {
+        tabManager.applySettings(settings.value)
+    }
+
     // ------------------------------------------------------------ 其它
 
     fun consumeMessage() {

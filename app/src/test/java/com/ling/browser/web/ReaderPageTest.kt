@@ -106,6 +106,28 @@ class ReaderPageTest {
     }
 
     @Test
+    fun `原地调字号只改 CSS 变量、不重导航`() {
+        // 调字号若走"重渲染"，loadDataWithBaseURL 会压入历史条目（返回键在
+        // 同一篇文章的不同字号之间来回），还会把滚动位置拉回顶部。
+        val js = ReaderPage.fontSizeJs(21)
+        assertTrue("应把新字号写到 :root", js.contains("setProperty('--font-size', '21px')"))
+        assertFalse("不能触发导航", js.contains("location"))
+        assertFalse("不能重写文档", js.contains("document.write"))
+        assertFalse("不能重新载入", js.contains("reload"))
+    }
+
+    @Test
+    fun `原地调字号用到的变量与 HTML 模板一致`() {
+        // 两处变量名一旦漂移，调字号就会静默失效（页面毫无反应）
+        val html = render(fontPx = 16)
+        assertTrue("模板应定义 --font-size", html.contains("--font-size: 16px"))
+        assertTrue(
+            "脚本应改同一个变量",
+            ReaderPage.fontSizeJs(16).contains("'--font-size'"),
+        )
+    }
+
+    @Test
     fun `四档字号依次递增且都在合理区间`() {
         val sizes = ReaderPage.FontSize.entries.map { it.px }
         assertEquals("档位数量变了就要同步更新测试", 4, sizes.size)

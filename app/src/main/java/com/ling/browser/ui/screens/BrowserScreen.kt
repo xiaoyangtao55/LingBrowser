@@ -162,6 +162,8 @@ fun BrowserScreen(
     // 把 Material You 配色与书签快捷入口同步给内置主页，并重绘正在显示的主页。
     // 这样切换深浅色或增删书签后，主页会立即跟着变。
     val colorScheme = MaterialTheme.colorScheme
+    // 界面当前的明暗：既喂给主页配色，也当作"网页要不要重算暗化"的触发器。
+    val uiDark = colorScheme.background.luminance() < 0.5f
     LaunchedEffect(colorScheme, bookmarks) {
         viewModel.applyHomeTheme(
             background = colorScheme.background,
@@ -170,9 +172,16 @@ fun BrowserScreen(
             onPrimary = colorScheme.onPrimary,
             primaryContainer = colorScheme.primaryContainer,
             onPrimaryContainer = colorScheme.onPrimaryContainer,
-            dark = colorScheme.background.luminance() < 0.5f,
+            dark = uiDark,
             links = bookmarks.map { it.title.ifBlank { it.url } to it.url },
         )
+    }
+
+    // 「跟随系统」时，运行中切换系统明暗**不经过设置流**（settings.collect 不触发），
+    // 但界面会跟着系统变 —— 网页侧的暗化必须在这里补算一次，否则会出现
+    // "界面已经变深、网页还是亮的"。主页/阅读视图由上面的配色同步覆盖。
+    LaunchedEffect(uiDark) {
+        viewModel.refreshWebDarkMode()
     }
 
     // 后退：优先收起地址栏编辑态，其次走网页历史，最后才是退出确认。
