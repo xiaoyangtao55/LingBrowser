@@ -7,6 +7,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -77,6 +78,8 @@ fun AddressBar(
     val focusRequester = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
+    // 地址栏整体的"点一下进编辑态"，不留水波纹（保持干净的观感）
+    val tapInteraction = remember { MutableInteractionSource() }
 
     // 编辑态内部维护 TextFieldValue，以便聚焦时把光标全选
     var field by remember { mutableStateOf(TextFieldValue(text)) }
@@ -131,7 +134,21 @@ fun AddressBar(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(48.dp)
-                        .padding(start = 12.dp, end = 4.dp),
+                        .padding(start = 12.dp, end = 4.dp)
+                        // 非编辑态：整条地址栏都可点（不只是文字那一小块），
+                        // 点一下进编辑态并全选 URL。
+                        // 编辑态不加这个点击 —— 否则点哪儿都会被当成"重新进编辑态"，
+                        // 输入框自己的光标定位就没了。
+                        .then(
+                            if (isEditing) {
+                                Modifier
+                            } else {
+                                Modifier.clickable(
+                                    interactionSource = tapInteraction,
+                                    indication = null,
+                                ) { onFocusChange(true) }
+                            }
+                        ),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     // 左侧：安全标识 / 搜索图标
@@ -144,40 +161,53 @@ fun AddressBar(
                     Spacer(Modifier.width(8.dp))
 
                     Box(modifier = Modifier.weight(1f)) {
-                        if (field.text.isEmpty() && !isEditing) {
+                        // ⚠️ 编辑态才挂输入框，非编辑态是**只读文本**。
+                        //
+                        // 以前这里常驻一个 BasicTextField，非编辑态把"网页标题"喂给它显示，
+                        // 于是"点到文字"会被输入框自己吃掉：它把点击当成**移动光标**，
+                        // 回调 onValueChange 带出来的是标题，把刚切过来的 URL 又覆盖回去 ——
+                        // 表现为"点文字编辑的是标题，点旁边空白才编辑 URL"。
+                        // 只读文本没有这个问题，也正好符合本组件的设计（失焦时是只读外观）。
+                        if (isEditing) {
+                            BasicTextField(
+                                value = field,
+                                onValueChange = {
+                                    field = it
+                                    onTextChange(it.text)
+                                },
+                                singleLine = true,
+                                textStyle = MaterialTheme.typography.bodyMedium.copy(
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                ),
+                                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
+                                keyboardActions = KeyboardActions(
+                                    onGo = {
+                                        onSubmit(field.text)
+                                        releaseFocus()
+                                    }
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .focusRequester(focusRequester)
+                                    // 让 ViewModel 的编辑态跟随**真实的**焦点，
+                                    // 而不是只在手动调用时同步。没有这个观察者时，
+                                    // onFocusChange 参数其实从未被调用过。
+                                    .onFocusChanged { onFocusChange(it.isFocused) },
+                            )
+                        } else {
                             Text(
-                                text = "搜索或输入网址",
+                                text = text.ifEmpty { "搜索或输入网址" },
                                 style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                color = if (text.isEmpty()) {
+                                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                                } else {
+                                    MaterialTheme.colorScheme.onSurface
+                                },
                                 maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
                             )
                         }
-                        BasicTextField(
-                            value = field,
-                            onValueChange = {
-                                field = it
-                                onTextChange(it.text)
-                            },
-                            singleLine = true,
-                            textStyle = MaterialTheme.typography.bodyMedium.copy(
-                                color = MaterialTheme.colorScheme.onSurface,
-                            ),
-                            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
-                            keyboardActions = KeyboardActions(
-                                onGo = {
-                                    onSubmit(field.text)
-                                    releaseFocus()
-                                }
-                            ),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .focusRequester(focusRequester)
-                                // 让 ViewModel 的编辑态跟随**真实的**焦点，
-                                // 而不是只在手动调用时同步。没有这个观察者时，
-                                // onFocusChange 参数其实从未被调用过。
-                                .onFocusChanged { onFocusChange(it.isFocused) },
-                        )
                     }
 
                     // 右侧：刷新/停止（常驻）

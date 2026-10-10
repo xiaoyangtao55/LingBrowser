@@ -309,6 +309,34 @@ else:
 print("\n6. 地址栏：加载完成后显示网页标题")
 tab_state = read(f"{SRC}/web/TabState.kt")
 
+# 非编辑态**不能**挂输入框：挂着时"点文字"会被输入框当成移动光标，
+# onValueChange 带出来的是标题并覆盖刚切过来的 URL ——
+# 真机表现为"点文字编辑的是标题，点旁边空白才编辑 URL"。
+if addr.count("BasicTextField(") == 1 and re.search(r"if \(isEditing\) \{\s*\n\s*BasicTextField", addr):
+    ok("地址栏只在编辑态挂输入框（非编辑态是只读文本）")
+else:
+    bad("非编辑态挂着输入框 —— 点文字会被当成编辑标题，而不是编辑 URL")
+
+# 上报文字变化的只有两处，且都在编辑态：输入框本身、编辑态才显示的清除按钮。
+# 判据写具体调用而不是数 onTextChange( —— 后者会把参数声明也算进去。
+if addr.count("onTextChange(it.text)") == 1 and addr.count('onTextChange("")') == 1 and \
+        "AnimatedVisibility(visible = isEditing)" in addr:
+    ok("文字变化只来自编辑态的输入框与清除按钮")
+else:
+    bad("有非编辑态的路径会上报文字变化 —— 显示文案会覆盖真实地址")
+
+if re.search(r"fun onAddressChanged[\s\S]{0,500}?if \(!_addressEditing\.value\) return", vm) and \
+        re.search(r"fun onAddressChanged[\s\S]{0,600}?_addressText\.value = text", vm):
+    ok("ViewModel 兜底：非编辑态的上报一律忽略")
+else:
+    bad("ViewModel 未兜底非编辑态上报 —— 显示文案可能覆盖真实地址")
+
+# 整条地址栏可点（不只文字那一小块），行为才一致
+if re.search(r"if \(isEditing\) \{\s*\n\s*Modifier\s*\n\s*\} else \{\s*\n\s*Modifier\.clickable\(", addr):
+    ok("非编辑态整条地址栏可点，点了进编辑态")
+else:
+    bad("只有文字那一小块能点进编辑态 —— 点空白与点文字行为不一致")
+
 # 规则必须只有一份，并且把三个退化场景都堵住（加载中 / 无标题 / 主页）
 if re.search(r"val addressBarText[\s\S]{0,600}?if \(isLoading\) return url", tab_state) and \
         re.search(r"val addressBarText[\s\S]{0,800}?title\.trim\(\)\.ifEmpty \{ url \}", tab_state):

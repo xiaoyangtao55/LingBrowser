@@ -139,6 +139,11 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
     // ------------------------------------------------------------ 地址栏
 
     fun onAddressChanged(text: String) {
+        // 非编辑态不该有输入：地址栏显示的文案是从 TabState 派生的（标题 / 网址），
+        // 任何"回写"都不是用户输入，而是显示文案把真实地址覆盖掉 ——
+        // 真机上表现为"点标题进去编辑的是标题"（见 AddressBar 里为什么非编辑态
+        // 不再挂输入框）。这里再兜一道，避免以后有人把输入框加回非编辑态。
+        if (!_addressEditing.value) return
         _addressText.value = text
         viewModelScope.launch {
             if (text.isBlank()) {
