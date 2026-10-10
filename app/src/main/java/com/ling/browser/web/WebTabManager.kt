@@ -577,6 +577,15 @@ class WebTabManager(private val context: Context) {
     fun isReaderActive(): Boolean = ReaderPage.isReaderUrl(activeTab?.url)
 
     /**
+     * 阅读视图对应的**原文地址**（不在阅读模式时为 null）。
+     *
+     * 地址栏需要它：阅读视图的逻辑地址是合成的 `ling://reader`，
+     * 既不能复制也没法改，拿去提交还会让 WebView 报 ERR_UNKNOWN_URL_SCHEME；
+     * 进入编辑态时应该给出能用的真实地址（来源就是提取时缓存下来的 canonical）。
+     */
+    fun readerOriginalUrl(id: String = _activeId.value): String? = readerContent[id]?.url
+
+    /**
      * 进入主页：**已经在主页上就原地刷新**，否则才完整渲染。
      *
      * 为什么不能一律 [loadHome]：`loadDataWithBaseURL` 每次调用都会往 WebView

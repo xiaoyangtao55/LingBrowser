@@ -1,6 +1,8 @@
 package com.ling.browser
 
+import android.content.Intent
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -54,6 +56,9 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
 
+        // 冷启动：从其它应用「用翎打开链接 / 分享文本」进来
+        handleExternalIntent(intent)
+
         setContent {
             val viewModel: BrowserViewModel = viewModel()
             val settings by viewModel.settings.collectAsStateWithLifecycle()
@@ -90,6 +95,45 @@ class MainActivity : ComponentActivity() {
                     LingApp(viewModel = viewModel)
                 }
             }
+        }
+    }
+
+    /**
+     * App 已在后台时又收到外部 Intent。
+     *
+     * manifest 里是 `launchMode="singleTask"`：系统会把 Intent 交给**已存在的**
+     * 实例（走这里），而不是另起一个 —— 否则会出现两个「翎」、标签页还各自独立。
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleExternalIntent(intent)
+    }
+
+    /**
+     * 处理"从外部进来的 Intent"，与 manifest 里声明的两个 filter 一一对应：
+     *   - `ACTION_VIEW` + http/https：其它应用「用浏览器打开」；
+     *   - `ACTION_SEND` + text/plain：分享过来的文本，按搜索词处理。
+     *
+     * ⚠️ 这一段是**必须**有的：manifest 声明 intent-filter 只代表"系统愿意把
+     * Intent 发给我们"，Activity 不读 `intent.data` 的话，用户看到的就是
+     * "在别的应用选了用翎打开，翎是起来了，网页却没打开" —— 正是之前的症状。
+     *
+     * 冷启动（onCreate）与热启动（onNewIntent）走同一个入口：前者更早，
+     * 那时 ViewModel 里可能还没有标签页，由 openExternalUrl 内部排队等 init 完成。
+     */
+    private fun handleExternalIntent(intent: Intent?) {
+        val incoming = intent ?: return
+        when (incoming.action) {
+            Intent.ACTION_VIEW -> {
+                val url = incoming.dataString?.trim().orEmpty()
+                if (url.isNotEmpty()) browserViewModel.openExternalUrl(url)
+            }
+            Intent.ACTION_SEND -> if (incoming.type?.startsWith("text/") == true) {
+                val text = incoming.getStringExtra(Intent.EXTRA_TEXT)?.trim().orEmpty()
+                if (text.isNotEmpty()) browserViewModel.openSharedText(text)
+            }
+            else -> Unit
         }
     }
 
@@ -150,6 +194,28 @@ private fun LingApp(viewModel: BrowserViewModel) {
     val history by viewModel.history.collectAsStateWithLifecycle()
     val downloads by viewModel.downloads.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
+
+    // 一次性提示（书签增删、阅读模式失败原因、不支持的链接…）。
+    // ⚠️ 这里以前是**缺的**：ViewModel 里所有 `_message.value = …` 都没有消费方，
+    // 提示被静默丢弃，用户只看到"点了没反应"。修外部链接时要靠它给出反馈，
+    // 顺手把这条通路补上（`consumeMessage()` 本来就为此准备着）。
+    val message by viewModel.message.collectAsStateWithLifecycle()
+    LaunchedEffect(message) {
+        val text = message ?: return@LaunchedEffect
+        Toast.makeText(context, text, Toast.LENGTH_SHORT).show()
+        viewModel.consumeMessage()
+    }
+
+    // 从其它应用「用翎打开链接」进来时把界面拉回浏览页：
+    // 用户可能正停在设置/书签页，链接虽然在后台标签里打开了，
+    // 屏幕上却还是二级页面 —— 看起来依旧像"点了没反应"。
+    val showBrowser by viewModel.showBrowser.collectAsStateWithLifecycle()
+    LaunchedEffect(showBrowser) {
+        if (showBrowser > 0) {
+            backStack.clear()
+            backStack.add(Route.Browser)
+        }
+    }
 
     // 标签页面板是**叠加层**而非独立页面：BrowserScreen 必须一直挂载着，
     // 否则 when 一切换它就被卸载，DisposableEffect 会 detachHost 把 WebView

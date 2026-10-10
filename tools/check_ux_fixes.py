@@ -305,6 +305,83 @@ if re.search(r"fun fetchMissingFavicons\(", vm):
 else:
     bad("缺少 fetchMissingFavicons")
 
+# ---------- 6. 地址栏显示网页标题 ----------
+print("\n6. 地址栏：加载完成后显示网页标题")
+tab_state = read(f"{SRC}/web/TabState.kt")
+
+# 规则必须只有一份，并且把三个退化场景都堵住（加载中 / 无标题 / 主页）
+if re.search(r"val addressBarText[\s\S]{0,600}?if \(isLoading\) return url", tab_state) and \
+        re.search(r"val addressBarText[\s\S]{0,800}?title\.trim\(\)\.ifEmpty \{ url \}", tab_state):
+    ok("addressBarText：加载中与无标题退回网址，其余显示标题")
+else:
+    bad("地址栏缺'加载完成显示标题'的规则，或没处理加载中/无标题的退化")
+
+if re.search(r"_addressText\.value = activeTab\(\)\?\.addressBarText", vm):
+    ok("ViewModel 用 addressBarText 同步（文案规则只有一份）")
+else:
+    bad("ViewModel 自己拼地址栏文案 —— 规则会出现两份")
+
+# 聚焦进入编辑态必须换成能用的真实地址，否则用户改不了地址；
+# 阅读视图尤其关键：合成地址 ling://reader 提交上去会让 WebView 白屏。
+if re.search(r"fun onAddressFocusChanged[\s\S]{0,400}?_addressText\.value = editableAddress\(\)", vm) and \
+        re.search(r"private fun editableAddress\(\)[\s\S]{0,400}?readerOriginalUrl\(\)", vm):
+    ok("聚焦时切回真实地址（阅读视图用原文地址）")
+else:
+    bad("编辑态没有切回真实地址 —— 阅读视图会拿到不可提交的 ling://reader")
+
+if re.search(r"fun readerOriginalUrl\(id: String = _activeId\.value\): String\?", mgr):
+    ok("阅读视图能取回原文地址")
+else:
+    bad("缺少 readerOriginalUrl —— 阅读视图的编辑态只能显示合成地址")
+
+# ---------- 7. 其它应用「用翎打开链接 / 分享文本」 ----------
+print("\n7. 其它应用「用翎打开链接」")
+manifest = read("app/src/main/AndroidManifest.xml")
+
+if "android.intent.action.VIEW" in manifest and 'android:launchMode="singleTask"' in manifest:
+    ok("manifest 声明了 VIEW filter 且是 singleTask（复用实例，不会开出第二个翎）")
+else:
+    bad("manifest 缺 VIEW filter 或 launchMode 不是 singleTask —— 打开链接会另起实例")
+
+# 声明 filter 只代表"系统愿意发给我们"，Activity 不读 intent 就等于没接住
+if re.search(r"override fun onNewIntent\(intent: Intent\)", main) and \
+        re.search(r"Intent\.ACTION_VIEW ->[\s\S]{0,220}?incoming\.dataString", main):
+    ok("MainActivity 真的读了 intent.data（点链接会打开网页）")
+else:
+    bad("Activity 从未读 intent.data —— 选了用翎打开，App 起来了却什么都不打开")
+
+if re.search(r"private fun handleExternalIntent[\s\S]{0,1000}?Intent\.ACTION_SEND", main) and \
+        "openSharedText" in main:
+    ok("分享过来的纯文本也有入口（按搜索词处理）")
+else:
+    bad("manifest 声明了 SEND filter，但 Activity 不处理 —— 分享过来会静默失败")
+
+if re.search(r"private var pendingExternalUrl: String\?", vm) and \
+        re.search(r"fun openExternalUrl\(raw: String\)[\s\S]{0,1400}?pendingExternalUrl = url", vm) and \
+        re.search(r"val pending = pendingExternalUrl[\s\S]{0,220}?openExternalUrl\(pending\)", vm):
+    ok("冷启动的链接会排队到 init 决定完标签页（否则被恢复/新建主页覆盖）")
+else:
+    bad("冷启动打开链接没有排队 —— 会被 restore/newTab 覆盖，表现为'点了没反应'")
+
+if re.search(r"fun openExternalUrl\(raw: String\)[\s\S]{0,700}?if \(UrlUtils\.isHome\(activeTab\(\)\?\.url\)\)", vm):
+    ok("当前标签还停在主页就复用它，否则新开标签")
+else:
+    bad("外部链接落在哪个标签没有约定 —— 会凭空多一个空标签")
+
+# 提示必须真的显示：这是"点了没反应"的最后一道观感防线
+if re.search(r"viewModel\.message\.collectAsStateWithLifecycle\(\)", main) and \
+        re.search(r"Toast\.makeText[\s\S]{0,220}?viewModel\.consumeMessage\(\)", main):
+    ok("一次性提示真的会弹出来（书签增删、不支持的链接…）")
+else:
+    bad("ViewModel 的 _message 没有消费方 —— 所有提示被静默丢弃，用户只看到'点了没反应'")
+
+# 用户可能正停在设置/书签页：光在后台打开网页还不够
+if "val showBrowser: StateFlow<Int>" in vm and \
+        re.search(r"LaunchedEffect\(showBrowser\)[\s\S]{0,320}?backStack\.add\(Route\.Browser\)", main):
+    ok("外部链接进来时把界面拉回浏览页（不会停在设置页）")
+else:
+    bad("外部链接进来时界面可能停在二级页 —— 网页开了，屏幕上却还是设置页")
+
 print()
 print("=" * 55)
 if problems:
@@ -312,4 +389,4 @@ if problems:
     for p in problems:
         print("  ! " + p)
     sys.exit(1)
-print("地址栏焦点 / 书签编辑 / 网站图标校验通过")
+print("地址栏焦点 / 书签编辑 / 网站图标 / 地址栏文案 / 外部链接校验通过")

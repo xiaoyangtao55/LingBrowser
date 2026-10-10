@@ -20,6 +20,7 @@ import com.ling.browser.web.ReaderPage
 import com.ling.browser.web.ReaderResult
 import com.ling.browser.web.SniffResult
 import com.ling.browser.web.TabState
+import com.ling.browser.web.UrlScheme
 import com.ling.browser.web.WebTabManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -123,6 +124,12 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
             if (!ok) {
                 tabManager.newTab(url = UrlUtils.HOME_URL)
             }
+            // 冷启动时从其它应用进来的链接，到这里才补得上（见 pendingExternalUrl）
+            val pending = pendingExternalUrl
+            if (pending != null) {
+                pendingExternalUrl = null
+                openExternalUrl(pending)
+            }
             // 快照只用于本次恢复。读完立刻清掉，避免用户"清除数据"后
             // 又被遗留的快照复活 —— 每次真正保存时会重新写入。
             container.session.clear()
@@ -153,11 +160,23 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
         _addressEditing.value = focused
         if (focused) {
             // 聚焦时全选真实 URL，便于直接改写
-            _addressText.value = activeTab()?.url?.takeIf { !UrlUtils.isHome(it) } ?: ""
+            _addressText.value = editableAddress()
         } else {
             _suggestions.value = emptyList()
             syncAddressFromActiveTab()
         }
+    }
+
+    /**
+     * 进入编辑态时地址栏里放什么地址。
+     *
+     * 阅读视图要特殊处理：它的逻辑地址是合成的 `ling://reader`，既不能复制也没法改，
+     * 拿它去提交还会让 WebView 报 ERR_UNKNOWN_URL_SCHEME 直接白屏 ——
+     * 这里换成缓存下来的**原文地址**（canonical）。
+     */
+    private fun editableAddress(): String {
+        tabManager.readerOriginalUrl()?.let { return it }
+        return activeTab()?.url?.takeIf { !UrlUtils.isHome(it) } ?: ""
     }
 
     /**
@@ -206,11 +225,74 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun syncAddressFromActiveTab() {
         if (_addressEditing.value) return
-        _addressText.value = activeTab()?.url?.takeIf { !UrlUtils.isHome(it) } ?: ""
+        // 非编辑态显示的是"网页标题（加载中则退回网址）"，规则收敛在
+        // TabState.addressBarText —— 那里有单测覆盖，这里只负责取值。
+        _addressText.value = activeTab()?.addressBarText ?: ""
         refreshBookmarkState()
     }
 
     fun activeTab(): TabState? = tabManager.activeTab
+
+    // -------------------------------------------- 外部入口（打开链接 / 分享文本）
+
+    /**
+     * 冷启动时从外部进来的链接先排在这里。
+     *
+     * 为什么需要：init 里"恢复会话还是开主页"是**异步**的（要读数据库），
+     * 而冷启动时那条「用翎打开链接」的 Intent 一定早于这个决定 —— 那时直接
+     * navigate 会被随后的 restore/newTab 覆盖掉，用户看到的就是
+     * "点了链接，翎起来了，网页却没打开"。
+     */
+    private var pendingExternalUrl: String? = null
+
+    /**
+     * 「把界面拉回浏览页」的信号，值只增不减。
+     *
+     * 外部链接进来时用户可能正停在设置/书签页 —— 链接虽然在标签里打开了，
+     * 屏幕上还是二级页面，看起来依旧像"点了没反应"。用递增计数而不是 Boolean：
+     * 连续两次外部链接都要各触发一次（Boolean 第二次变化不了）。
+     */
+    private val _showBrowser = MutableStateFlow(0)
+    val showBrowser: StateFlow<Int> = _showBrowser.asStateFlow()
+
+    /**
+     * 其它应用「用浏览器打开」进来的地址（ACTION_VIEW）。
+     *
+     * 落在哪个标签：当前标签还停在主页就复用它 —— 用户是从别处点进来的，
+     * 不该先留一个空标签再新开一个；否则新开一个（与主流浏览器一致）。
+     */
+    fun openExternalUrl(raw: String) {
+        val url = UrlUtils.toUrl(raw, settings.value.searchEngine)
+        if (!UrlScheme.isNavigable(url)) {
+            // 例如 content:// / intent:// —— 交给 WebView 只会白屏，明确说一声
+            _message.value = "不支持打开这个链接"
+            return
+        }
+        if (tabManager.tabs.value.isEmpty()) {
+            // 标签页还没建出来（冷启动的 init 尚未跑完），先排队
+            pendingExternalUrl = url
+            return
+        }
+        // 把界面拉回浏览页（用户可能正停在二级页面）
+        _showBrowser.update { it + 1 }
+        if (UrlUtils.isHome(activeTab()?.url)) {
+            navigate(url)
+        } else {
+            openInNewTab(url)
+        }
+    }
+
+    /**
+     * 其它应用分享过来的纯文本（ACTION_SEND + text/plain）：按**搜索词**处理。
+     *
+     * 分享过来的往往是一句话或一个标题，直接当网址打开十有八九是错的，
+     * 走搜索引擎才符合预期（manifest 里那条 filter 的注释也是这个语义）。
+     */
+    fun openSharedText(text: String) {
+        val query = text.trim()
+        if (query.isEmpty()) return
+        openExternalUrl(UrlUtils.toUrl(query, settings.value.searchEngine))
+    }
 
     // ------------------------------------------------------------ 标签页
 

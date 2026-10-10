@@ -51,6 +51,26 @@ data class TabState(
         get() = if (UrlUtils.isHome(url)) "" else UrlUtils.prettify(url)
 
     /**
+     * 地址栏在**非编辑态**显示什么。
+     *
+     * 加载完成后显示**网页标题**（一眼看出这是什么页面），而不是一长串网址；
+     * 但两种情况必须退回网址：
+     *  1. **正在加载**：此时 `title` 还是**上一个页面**的（WebView 要等解析到
+     *     `<title>` 才更新），显示它就像"点了没反应"；
+     *  2. **没有标题**：少数页面不给 `<title>`（或解析失败）。
+     *
+     * 主页返回空串 —— 地址栏在主页上就该是空的，方便直接输入。
+     * 聚焦进入编辑态时会切成真实网址（见 BrowserViewModel.onAddressFocusChanged），
+     * 所以显示标题不影响改地址。
+     */
+    val addressBarText: String
+        get() {
+            if (UrlUtils.isHome(url)) return ""
+            if (isLoading) return url
+            return title.trim().ifEmpty { url }
+        }
+
+    /**
      * 站点首字母，用作没有 favicon 时的占位符。
      *
      * 为什么需要占位：大量站点不提供 favicon，或图标要等页面加载完才到。
