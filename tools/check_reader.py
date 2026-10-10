@@ -1102,6 +1102,64 @@ if re.search(r"REMOVE_DARK_CSS_JS\s*=", lwv) and \
 else:
     bad("缺少反色样式的移除路径 —— 切回浅色模式网页仍是暗的")
 
+# ---------------------------------------------------------------- 内部页静默失效
+# 这一组守的是"主页/阅读视图明明有专人调好的配色，却被网页那一套逻辑误伤"。
+# 几处成因都在**调用点**上，单测覆盖不到（要构造 WebView），所以在这里盯住。
+
+# (5) applySettings 必须用 shouldDarkenPages()（意图开关 × 夜间模式解析）。
+# 只用 resolvedDark() 会让"网页跟随夜间模式暗化"这个开关**自我失效**：
+# 关开关本身就是一次设置变化，会立刻把网页重新暗化一遍。
+if re.search(
+    r"fun applySettings\(newSettings: LingSettings\)[\s\S]{0,700}?"
+    r"val darkTheme = shouldDarkenPages\(\)",
+    mgr,
+):
+    ok("applySettings 用 shouldDarkenPages() 决定网页暗化（关掉开关不会又变暗）")
+else:
+    bad("applySettings 用了 resolvedDark() —— 关掉「网页跟随夜间模式暗化」后网页仍会变暗")
+
+# (6) 兜底反色 CSS 必须在**唯一入口**处拦掉内部页。
+# applySettings 会遍历所有 WebView（每个实例当前停在哪一页只有它自己知道），
+# 只在 onPageFinished 里判 isInternal 挡不住这条路 —— 深色主页会被 invert
+# 反成亮底，正好与预期相反。
+if "val enabled = darken && !InternalPage.isInternal(url)" in lwv:
+    ok("injectDarkMode 在入口处拦掉内部页（applySettings 那条路也挡住了）")
+else:
+    bad("内部页仍会被兜底反色 CSS 命中 —— 深色主页会被反成亮底")
+
+# (7) 已经在主页上再点「主页」不能重新导航：loadDataWithBaseURL 每次调用都会
+# 压入一个历史条目，重复回主页会让返回键攒下一串一模一样的主页历史
+# （亮着、按一下"没反应"、要连按好几次才能退出主页）。
+if re.search(
+    r"fun loadUrl\(id: String, url: String\)[\s\S]{0,450}?loadHomeOrRefresh\(id, wv\)",
+    mgr,
+) and re.search(
+    r"fun loadHomeOrRefresh\(id: String, wv: LingWebView\)[\s\S]{0,600}?isHomeRendered\(wv\)",
+    mgr,
+):
+    ok("已在主页时点「主页」走原地刷新，不重复压历史条目")
+else:
+    bad("重复回主页仍会重新导航 —— 返回键会攒下一串同样的主页历史")
+
+# (8) 内部页的配色是"烘"进 HTML 字符串里的：文档一旦被重建（刷新按钮重放同一份
+# data URL、渲染进程被系统回收后重建、历史回退到旧条目），页面就会停在烘死时的
+# 旧配色。必须在 onPageFinished 里按当前配色补一次原地刷新。
+fin_block = body_of(mgr, r"onPageFinished = \{ url, title ->", span=3100)
+if "if (isHome) homeThemeJs() else readerThemeJs()" in fin_block:
+    ok("内部页在文档就绪后按当前配色重新着色（刷新/进程重建不会掉回旧配色）")
+else:
+    bad("内部页文档重建后不会重新着色 —— 刷新主页会退回旧配色")
+
+# (9) 实时地址写回状态前必须归一化：内部页的 wv.url 是 baseUrl，原样写回会让
+# 同一个页面出现两种 url 值，还会把解析不了的假 https 地址写进会话快照。
+if re.search(
+    r"fun syncNavState\(id: String\)[\s\S]{0,900}?InternalPage\.logicalUrl\(live\)",
+    mgr,
+):
+    ok("syncNavState 把 baseUrl 归一化回逻辑地址（TabState 里只有一种 url）")
+else:
+    bad("syncNavState 原样写回 wv.url —— 主页/阅读视图的 baseUrl 会污染 TabState 与会话快照")
+
 print()
 print("=" * 55)
 if problems:

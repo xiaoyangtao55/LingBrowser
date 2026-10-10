@@ -26,7 +26,7 @@ SAMPLE = {
     "onPrimaryContainer": "#00210F",
     "dark": "false",
     "quickLinks": (
-        '<div class="links">'
+        '<div class="links" id="ling-quick-links">'
         '<a class="link" href="https://www.baidu.com">'
         '<span class="avatar">百</span>'
         '<span class="link-label">百度</span></a>'
@@ -143,6 +143,28 @@ def main():
     ]:
         if need not in body:
             problems.append(f"缺少{desc}（{need}）")
+
+    # 6) 布局：内容高于视口时顶部不能被裁掉。
+    #    body 固定 height:100% + flex 的 justify-content:center 时，溢出的内容会被
+    #    顶到滚动区**上方**，滚不上去 —— logo 与「翎」直接看不见（横屏 / 分屏 /
+    #    小屏 + 8 个快捷入口都会触发）。必须用 min-height 让 body 随内容长高。
+    if re.search(r"body\s*\{[^}]*?(?<!min-)height:\s*100%", body):
+        problems.append("body 固定了 height:100% —— 内容高于视口时顶部会被裁掉且滚不上去")
+    if "min-height: 100%" not in body:
+        problems.append("body 缺少 min-height:100% —— 内容高于视口时布局会出问题")
+
+    # 7) 快捷入口只能靠 **id** 定位。
+    #    主题刷新脚本（themeUpdateJs）也会跑在阅读视图上，而阅读视图的正文来自
+    #    第三方网页，里面完全可能有 class="links" 的元素（"相关链接"这类）——
+    #    用 class 选择器会把正文里那个元素当成快捷入口删掉，直接损坏文章内容。
+    if 'const val QUICK_LINKS_ID = "ling-quick-links"' not in src:
+        problems.append("快捷入口缺少固定的 DOM id 常量（QUICK_LINKS_ID）")
+    if 'id="$QUICK_LINKS_ID"' not in src:
+        problems.append("快捷入口区块没有带上 QUICK_LINKS_ID")
+    if "getElementById('$QUICK_LINKS_ID')" not in src:
+        problems.append("主题刷新脚本没有用 id 定位快捷入口")
+    if "querySelector('.links')" in src:
+        problems.append("主题刷新脚本用了 class 选择器 —— 会误删阅读视图正文里的 class=links 元素")
 
     print(f"模板 {len(tpl)} 字符，实例化后 {len(body)} 字符")
     print(f"标签总数 {len(c.tags)}：{', '.join(sorted(set(c.tags)))}")

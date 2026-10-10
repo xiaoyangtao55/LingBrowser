@@ -38,6 +38,16 @@ object HomePage {
     /** 兼容旧值：早期版本用的是 about:home。 */
     private const val LEGACY_URL = "about:home"
 
+    /**
+     * 快捷入口区块的 DOM id。
+     *
+     * 主题刷新脚本必须用它（而不是 `class="links"` 选择器）来定位**自己**的快捷入口：
+     * 同一份脚本也会跑在阅读视图上，而那边的正文来自第三方网页，
+     * 里面完全可能有 `class="links"` 的元素（"相关链接"这类），
+     * 用 class 选择器会把正文里那个元素当成快捷入口删掉。
+     */
+    const val QUICK_LINKS_ID = "ling-quick-links"
+
     /** 该 URL 是否指向内置主页。 */
     fun isHomeUrl(url: String?): Boolean {
         val u = url?.trim().orEmpty()
@@ -90,13 +100,20 @@ object HomePage {
     --on-pc: $onPrimaryContainer;
   }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  /* html 占满视口，body 只给 min-height、**不**固定 height：
+     内容比视口高时（横屏 / 分屏 / 小屏 + 8 个快捷入口），height:100% 会把
+     body 固死在视口高度，flex 的 justify-content:center 就把溢出的那部分
+     顶到滚动区**上方** —— 滚不上去，logo 和「翎」直接被裁掉看不到。
+     用 min-height 让 body 随内容长高：装得下才居中，装不下就从头排、正常滚动。 */
+  html { height: 100%; }
   html, body {
-    margin: 0; padding: 0; height: 100%;
+    margin: 0; padding: 0;
     background: var(--bg); color: var(--fg);
     font-family: -apple-system, "Noto Sans SC", "PingFang SC",
                  "Microsoft YaHei", Roboto, sans-serif;
   }
   body {
+    min-height: 100%;
     display: flex; flex-direction: column;
     align-items: center; justify-content: center;
     padding: 32px 24px calc(32px + env(safe-area-inset-bottom));
@@ -199,17 +216,32 @@ object HomePage {
     internal fun linksHtml(links: List<Pair<String, String>>): String {
         if (links.isEmpty()) return ""
         return buildString {
-            append("""<div class="links">""")
+            append("""<div class="links" id="$QUICK_LINKS_ID">""")
             links.take(8).forEach { (title, url) ->
                 val label = title.ifBlank { url }
                 append(
                     """<a class="link" href="${escape(url)}">""" +
-                        """<span class="avatar">${escape(label.take(1).uppercase())}</span>""" +
+                        """<span class="avatar">${escape(avatarInitial(title, url))}</span>""" +
                         """<span class="link-label">${escape(label)}</span></a>"""
                 )
             }
             append("</div>")
         }
+    }
+
+    /**
+     * 快捷入口头像里的那个字。
+     *
+     * 标题为空时取**主机名**首字母，而不是整串 URL 的首字母 —— 后者对每个
+     * 空标题书签都是 "H"（https 的 h），既没有区分度也没信息量。
+     * 口径与标签页列表的 [TabState.initial] 保持一致（跳 www.，无站点时用中性符号）。
+     */
+    internal fun avatarInitial(title: String, url: String): String {
+        val label = title.trim()
+        if (label.isNotEmpty()) return label.take(1).uppercase()
+        val host = runCatching { java.net.URI(url).host }.getOrNull().orEmpty()
+        return host.removePrefix("www.").firstOrNull()?.uppercase()
+            ?: TabState.NEUTRAL_INITIAL
     }
 
     /**
@@ -219,8 +251,14 @@ object HomePage {
      * 往 WebView 历史里**压入一个新条目**。若主题切换时也走完整重渲染，
      * 用户按返回键就会回到"切换前那个浅色主页"（历史里残留的旧条目）。
      *
-     * 原地刷新直接改 `:root` 上的 CSS 变量和 `.links` 的内容，不触发导航、
+     * 原地刷新直接改 `:root` 上的 CSS 变量和快捷入口区块的内容，不触发导航、
      * 不压历史，深浅色切换即时生效且返回键行为不变。
+     *
+     * 快捷入口用 **id**（[QUICK_LINKS_ID]）而不是 class 选择器定位：
+     * 这段脚本也会跑在**阅读视图**上（[WebTabManager.readerThemeJs] 传空的
+     * `linksHtml` 复用同一份脚本），而阅读视图的正文来自第三方网页，里面完全
+     * 可能有 `class="links"` 的元素（"相关链接"这类）。用 class 选择器会把
+     * 正文里的那个元素当成快捷入口**删掉** —— 直接损坏文章内容。
      *
      * @param linksHtml 快捷入口的 HTML（由 [linksHtml] 生成，可能为空）。
      *   用 JSON 编码后注入，避免 HTML 里的引号破坏 JS 字符串。
@@ -249,7 +287,7 @@ object HomePage {
   r.style.setProperty('--pc', '$primaryContainer');
   r.style.setProperty('--on-pc', '$onPrimaryContainer');
   r.style.colorScheme = '$scheme';
-  var old = document.querySelector('.links');
+  var old = document.getElementById('$QUICK_LINKS_ID');
   if ($linksJson) {
     var t = document.createElement('div');
     t.innerHTML = $linksJson;

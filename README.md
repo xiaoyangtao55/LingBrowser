@@ -73,11 +73,13 @@ LingBrowser/
 │       │   │   └── web/
 │       │   │       ├── WebTabManager.kt      # 标签页 + WebView 实例池
 │       │   │       ├── LingWebView.kt        # WebView 子类（设置/UA/夜间）
+│       │   │       ├── InternalPage.kt       # 内部页判定 + baseUrl 归一化
 │       │   │       └── HomePage.kt           # 内置主页 HTML（离线自包含）
 │       │   └── res/                          # 图标、主题、字符串
 │       └── test/java/com/ling/browser/
 │           ├── util/UrlUtilsTest.kt          # 地址栏解析
 │           ├── web/HomePageTest.kt           # 内置主页
+│           ├── web/InternalPageTest.kt       # 内部页判定与地址归一化
 │           ├── data/prefs/LingSettingsTest.kt# 设置项默认值与枚举
 │           └── ui/theme/LingIconsTest.kt     # 图标几何回归
 ├── keystore/
@@ -947,8 +949,51 @@ webViews[tab.id]?.let { loadHome(tab.id, it) }   // WebView 不存在就静默�
 - **只有"已渲染"才原地刷新**：用 `HomePage.isHomeUrl(wv.url)` 判断 WebView
   是否真的落在了 `BASE_URL`（冷启动首帧前还是 `about:blank`，注入会打在空
   文档上白注入一次），否则仍走完整渲染。
+  判据收敛成 `isHomeRendered(wv)`：**额外要求地址非空** —— `isHomeUrl` 按
+  地址栏语义把 `null` 也算主页，而刚建出来的 WebView `url` 正是 `null`，
+  混用会让冷启动"以为已经在主页上"而跳过渲染（主页空白）。
 - **`linksHtml()` 必须两处复用**：完整渲染（`html()`）与原地刷新
   （`themeUpdateJs`）共用同一份快捷入口 HTML，各写一份迟早不同步。
+
+---
+
+### 12. 内部页被"网页那一套逻辑"误伤的三条路
+
+主页与阅读视图的配色是**原生算好、写进 HTML / CSS 变量**的，本不该参与网页侧的
+夜间模式、标题与 URL 处理。但它们和普通网页共用同一个 WebView、同一批回调，
+下面三条路都会绕过"这是内部页"这个前提，症状都是**静默失效**
+（用户看到的是"主页又坏了"，而单测全绿）：
+
+| # | 路径 | 症状 | 修法 |
+|---|---|---|---|
+| 1 | `applySettings` 用 `resolvedDark()`（只看夜间模式）而不是 `shouldDarkenPages()`（还要 `&& forceDarkWebPages`） | 关掉「网页跟随夜间模式暗化」后，**任何一次设置变化**都会把网页重新暗化一遍 —— 开关看上去"关了没用" | 判据改成 `shouldDarkenPages()`（与 `LingWebView.applySettings` 的 `@param` 约定一致） |
+| 2 | `LingWebView.applySettings` 无条件 `injectDarkMode()`，而"内部页不注入"的保护只写在 `onPageFinished` 里 | `applySettings` 会遍历**所有** WebView：主页文档一旦已加载，兜底 `invert(1) hue-rotate(180deg)` 就注进主页 —— 深色 `--bg:#111412` 被反成亮底 `#EEEBED`，"主页不跟随夜间模式"的旧症状换条路复现 | 判据下沉到唯一入口：`val enabled = darken && !InternalPage.isInternal(url)` |
+| 3 | 内部页配色"烘"在 HTML 字符串里，重新着色只由 `applyHomeTheme` 触发 | 任何**不经过 UI** 的文档重建都会掉回旧配色：地址栏刷新（reload 重放同一份 data URL）、渲染进程被系统回收后重建、历史回退到旧条目 | `onPageFinished` 里补一个 `if (isInternal)` 分支做原地刷新 |
+
+同一类"状态被带偏"还有两处：
+
+- **重复回主页会攒历史**：`loadDataWithBaseURL` 每次调用都压一个历史条目，
+  而「主页」是常驻按钮。现在 `loadUrl` 走 `loadHomeOrRefresh`：已经在主页就只
+  原地刷新，返回键不会再"亮着却按了没反应"、要连按好几次才能退出主页。
+- **`syncNavState` 把 baseUrl 写进 `TabState`**：切换标签后主页标签的 `url`
+  会变成 `https://home.ling.invalid/`，标题被页面自己的 `<title>翎</title>`
+  盖成「翎」。现在统一过 `InternalPage.logicalUrl()` 归一化，内部页标题保持不变。
+
+判定收敛在 `InternalPage`（`isInternal` / `logicalUrl`）一处，日后新增内部页只改它；
+`check_reader.py` 新增 5 条判据盯住上面这些**调用点**（要构造 WebView，单测覆盖不到），
+`check_home_html.py` 新增布局判据，`HomePageTest` / `InternalPageTest` 覆盖纯逻辑。
+
+**顺带修掉的布局问题**：主页 `body` 原来固定 `height:100%` + flex 居中，内容比
+视口高时（横屏 / 分屏 / 小屏 + 8 个快捷入口）溢出的部分会被顶到滚动区**上方**，
+滚不上去 —— logo 和「翎」直接看不见。现在改成 `html{height:100%}` +
+`body{min-height:100%}`：装得下才居中，装不下就从头排、正常滚动。
+
+**顺带修掉的一处正文损坏**：主题刷新脚本用 `document.querySelector('.links')`
+定位快捷入口，可同一份脚本（`readerThemeJs`，`linksHtml` 传空）**也跑在阅读视图上**，
+而阅读视图的正文来自第三方网页 —— 文章里只要有 `class="links"` 的元素
+（"相关链接"这类很常见），就会被当成快捷入口**从正文里删掉**。现在快捷入口
+带固定 id（`HomePage.QUICK_LINKS_ID = "ling-quick-links"`），脚本改用它定位，
+`.links` 这个 class 只留作样式。
 
 ---
 
@@ -1129,6 +1174,22 @@ python tools/preview_launcher_png.py mipmap-xxxhdpi  # 预览启动图标
 > 图标已全部替换为官方 Material Symbols（28 个，见 §四.2），
 > 并通过 `check_icon_fidelity.py` 与源文件逐点核对，
 > 真机观感已确认。
+
+> ⚠️ **§四.12「内部页静默失效」这一轮改动尚未编译、尚未真机验证**：
+> 改动的环境里没有 Android SDK（`ANDROID_HOME` 为空、无 gradle），
+> 只能跑不依赖编译的静态自检 —— 17 个脚本全部通过
+> （`check_icon_fidelity` / `check_launcher_png` 因缺官方图标源文件与 PIL 未跑）。
+> 合入前需要：`./gradlew :app:testDebugUnitTest` + 下面 6 项真机回归。
+> （上表的 231 用例 / `HomePageTest` 19 是更早一轮的记录；本轮新增
+> `InternalPageTest` 6 条与主页用例 5 条，预期总数 246。）
+>
+> 待真机确认：
+> 1. 主页 → 更多 → 切夜间模式：主页配色正常，不出现反色 / 亮底；
+> 2. 关掉「网页跟随夜间模式暗化」：网页立刻变亮，之后改其它设置也不再变暗；
+> 3. 在主页连点「主页」多次：返回键不应攒下一串同样的主页历史；
+> 4. 切到深色 → 点地址栏的刷新按钮：主页配色保持深色，不回退浅色；
+> 5. 切标签页：主页标签标题仍是「主页」，地址栏不出现 `home.ling.invalid`；
+> 6. 横屏 / 分屏：主页 logo 与「翎」不被裁掉，内容可正常滚动。
 
 ### 真机逐项验证记录
 

@@ -305,7 +305,7 @@ class HomePageTest {
             "" to "https://blank-title.com",
         )
         val fragment = HomePage.linksHtml(links)
-        assertTrue("应含 class=links", fragment.contains("""<div class="links">"""))
+        assertTrue("应含 class=links", fragment.contains("""<div class="links" id="${HomePage.QUICK_LINKS_ID}">"""))
         assertTrue("应含第一个书签地址", fragment.contains("https://example.com"))
         assertTrue("空标题退回 URL", fragment.contains("blank-title.com"))
 
@@ -355,5 +355,81 @@ class HomePageTest {
         // linksHtml 里的引号已转成 &quot;，注入 JS 时不会再含裸双引号打断字符串
         assertTrue("linksHtml 的引号应已转义", fragment.contains("&quot;"))
         assertTrue("JS 应包含 linksHtml 内容", js.contains("innerHTML ="))
+    }
+
+    // ---- 快捷入口头像 ----
+
+    @Test
+    fun `快捷入口头像取标题首字`() {
+        assertEquals("中文标题取首字", "百", HomePage.avatarInitial("百度", "https://www.baidu.com"))
+        assertEquals("英文标题取首字母并大写", "G", HomePage.avatarInitial("github", "https://github.com"))
+    }
+
+    @Test
+    fun `空标题时头像取主机名首字母而不是 URL 首字母`() {
+        // 取整串 URL 的首字母会让**每个**空标题书签都是 "H"（https 的 h），
+        // 既没有区分度、也和标签页列表（TabState.initial）的口径不一致。
+        assertEquals(
+            "空标题应取主机名首字母",
+            "E",
+            HomePage.avatarInitial("", "https://www.example.com/a/b"),
+        )
+        assertEquals(
+            "纯空白标题同样视为空",
+            "E",
+            HomePage.avatarInitial("   ", "https://example.com"),
+        )
+        assertEquals(
+            "没有站点名时用中性占位符（与标签页列表一致）",
+            "•",
+            HomePage.avatarInitial("", "about:blank"),
+        )
+    }
+
+    @Test
+    fun `linksHtml 的头像也走同一套首字母规则`() {
+        val fragment = HomePage.linksHtml(listOf("" to "https://www.example.com/x"))
+        // 渲染在 HTML 里的头像必须与 avatarInitial 一致，否则"改了一处漏一处"
+        assertTrue(
+            "空标题书签的头像应是主机名首字母",
+            fragment.contains("""<span class="avatar">E</span>"""),
+        )
+        assertFalse("不应出现 URL 首字母 H", fragment.contains("""<span class="avatar">H</span>"""))
+    }
+
+    @Test
+    fun `主题脚本用 id 定位快捷入口而不是 class 选择器`() {
+        // 同一份脚本也跑在阅读视图上，而阅读视图的正文来自第三方网页，
+        // 里面完全可能有 class="links" 的元素（"相关链接"这类）——
+        // 用 class 选择器会把正文里那个元素当成快捷入口删掉。
+        val js = HomePage.themeUpdateJs(
+            background = "#FFF", onBackground = "#000", primary = "#1B6C4B",
+            onPrimary = "#FFF", primaryContainer = "#A8F2CB",
+            onPrimaryContainer = "#00210F", dark = false, linksHtml = "",
+        )
+        assertTrue(
+            "应通过 id 定位自己的快捷入口",
+            js.contains("getElementById('${HomePage.QUICK_LINKS_ID}')"),
+        )
+        assertFalse(
+            "不能用 class 选择器 —— 会误删阅读视图正文里的 class=links 元素",
+            js.contains("querySelector('.links')"),
+        )
+    }
+
+    @Test
+    fun `body 不固定高度以免内容溢出时顶部被裁掉`() {
+        val html = HomePage.html(
+            background = "#FBFDF8", onBackground = "#191C1A", primary = "#1B6C4B",
+            onPrimary = "#FFFFFF", primaryContainer = "#A8F2CB",
+            onPrimaryContainer = "#00210F", dark = false,
+        )
+        // height:100% + flex 居中：内容比视口高时（横屏/分屏/小屏 + 8 个快捷入口）
+        // 溢出的那部分会被顶到滚动区**上方**，滚不上去 —— logo 与「翎」被裁掉。
+        assertTrue("body 应使用 min-height: 100%", html.contains("min-height: 100%"))
+        assertFalse(
+            "body 不应固定 height:100%",
+            Regex("""body\s*\{[^}]*?(?<!min-)height:\s*100%""").containsMatchIn(html),
+        )
     }
 }

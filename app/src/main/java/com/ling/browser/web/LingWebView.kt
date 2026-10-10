@@ -40,6 +40,7 @@ class LingWebView @JvmOverloads constructor(
      * @param darkTheme 是否把网页内容暗化。由调用方在运行时算出
      *   `forceDarkWebPages && 夜间模式已解析为深色`，传进来的是**最终结果**
      *   而非中间开关 —— 这样"夜间模式关掉时网页立刻变亮"能在这里统一处理。
+     *   内部页（主页/阅读视图）由 [injectDarkMode] 自己拦掉，调用方不必区分。
      */
     @Suppress("DEPRECATION")
     fun applySettings(settings: LingSettings, incognito: Boolean, darkTheme: Boolean) {
@@ -115,11 +116,20 @@ class LingWebView @JvmOverloads constructor(
      * 兜底做法是整体 invert + hue-rotate(180deg)（色相转一圈回到原位，
      * 因此彩色不会变成反色负片），再对 img/video/canvas 反色一次还原。
      *
-     * [enabled] 为 false 时**移除**已注入的样式，而不是只"不注入"：
+     * **内部页（内置主页 / 阅读视图）在这里被统一拦掉**，调用方不需要各自判断：
+     * 它们的配色由 CSS 变量精确控制，套一层 invert 只会把主题整个反过来 ——
+     * 深色主页（`--bg:#111412`）会被反成亮底（`#EEEBED`），正好与预期相反。
+     * 判据必须落在 WebView 自己身上：`applySettings` 会遍历**所有** WebView，
+     * 每个实例当前停在哪一页只有它自己知道，在调用点判一定会漏。
+     *
+     * [darken] 为 false 时**移除**已注入的样式，而不是只"不注入"：
      * 早期版本只注入不移除，导致关掉夜间模式后页面残留 `__ling_dark__`
      * 样式，切回浅色模式网页还是暗的 —— 组件切换不同步的又一根因。
+     * 内部页同理走移除分支：万一历史版本已经注入过，这里会顺手清掉。
      */
-    fun injectDarkMode(enabled: Boolean) {
+    fun injectDarkMode(darken: Boolean) {
+        // 内部页永远是"不要兜底暗化"，与调用方传什么无关
+        val enabled = darken && !InternalPage.isInternal(url)
         evaluateJavascript(if (enabled) DARK_CSS_JS else REMOVE_DARK_CSS_JS, null)
     }
 
