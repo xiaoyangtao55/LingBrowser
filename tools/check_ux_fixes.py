@@ -363,7 +363,8 @@ if re.search(r"private var pendingExternalUrl: String\?", vm) and \
 else:
     bad("冷启动打开链接没有排队 —— 会被 restore/newTab 覆盖，表现为'点了没反应'")
 
-if re.search(r"fun openExternalUrl\(raw: String\)[\s\S]{0,700}?if \(UrlUtils\.isHome\(activeTab\(\)\?\.url\)\)", vm):
+if re.search(r"fun openExternalUrl\(raw: String\)[\s\S]{0,900}?UrlUtils\.isHome\(active\.url\)", vm) and \
+        re.search(r"fun openExternalUrl\(raw: String\)[\s\S]{0,900}?openInNewTab\(url\)", vm):
     ok("当前标签还停在主页就复用它，否则新开标签")
 else:
     bad("外部链接落在哪个标签没有约定 —— 会凭空多一个空标签")

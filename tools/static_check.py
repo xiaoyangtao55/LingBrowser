@@ -187,6 +187,36 @@ def check_calls(rel, raw, problems):
                 )
 
 
+# 形参是**非空** String 的函数：实参里出现安全调用（`?.`）就会编译不过。
+#
+# 这一条是 CI 真实抓到的错误促成的（commit fba6599）：
+#   `if (UrlUtils.isHome(activeTab()?.url))` —— isHome(url: String) 是非空形参。
+# "括号配平 / import 一致 / 具名参数完整"三项都发现不了它，18 个脚本全绿而 CI 红。
+# 判据：实参里有 `?.`，且**没有**兜底（`?:` 或 `!!`）—— 有兜底时类型已经非空，
+# 报出来就是误报，而"没人看的检查等于没有检查"。
+NON_NULL_STRING_PARAMS = (
+    "UrlUtils.isHome",
+    "UrlUtils.prettify",
+    "UrlUtils.hostOf",
+    "UrlUtils.toUrl",
+    "UrlScheme.isNavigable",
+    "UrlScheme.shouldTakeOver",
+)
+
+
+def check_nullable_args(rel, raw, problems):
+    code = strip_comments_and_strings(raw)
+    for fn in NON_NULL_STRING_PARAMS:
+        for m in re.finditer(re.escape(fn) + r"\s*\(", code):
+            args = extract_args(code, m.end() - 1)
+            if "?." in args and "?:" not in args and "!!" not in args:
+                line = code[:m.start()].count("\n") + 1
+                problems.append(
+                    f"{rel}:{line} {fn}() 的实参是可空链（`?.`）却没有兜底 —— "
+                    f"该形参是非空 String，编译会报 type mismatch"
+                )
+
+
 def main():
     problems = []
     files = list(kotlin_files())
@@ -200,6 +230,7 @@ def main():
         if os.sep + "test" + os.sep not in rel:
             check_imports(rel, raw, problems)
             check_calls(rel, raw, problems)
+            check_nullable_args(rel, raw, problems)
         for bad, why in FORBIDDEN.items():
             if bad in raw:
                 problems.append(f"{rel}: 残留 `{bad}` —— {why}")
@@ -209,7 +240,7 @@ def main():
         for p in problems:
             print("  ! " + p)
         return 1
-    print("静态检查通过：括号配平、import 一致、调用参数完整、无残留旧 API。")
+    print("静态检查通过：括号配平、import 一致、调用参数完整、可空实参、无残留旧 API。")
     return 0
 
 

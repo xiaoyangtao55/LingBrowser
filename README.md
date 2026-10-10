@@ -1068,6 +1068,34 @@ manifest 里 VIEW / SEND 两个 filter **一直都有**，但 `MainActivity` 从
 
 ---
 
+### 15. CI 抓到的第一处编译错误，以及为它补的判据
+
+`fba6599` 在 CI 上编译失败，只有一行：
+
+```
+BrowserViewModel.kt:278:29 Argument type mismatch: actual type is 'String?', but 'String' was expected.
+```
+
+成因是把**可空链直接传给了非空形参**：`UrlUtils.isHome(activeTab()?.url)` ——
+`isHome(url: String)` 的形参是非空的。而 18 个静态检查全绿，因为它们查的是
+"括号配平 / import 一致 / 具名参数完整 / 文本接线"，**没有类型系统**。
+
+修法：先取 `val active = activeTab()`，再判 `active == null || UrlUtils.isHome(active.url)`。
+
+更重要的是把这类错误变成可检查的：`static_check.py` 新增 `check_nullable_args()` ——
+对一批**已知形参非空**的函数（`UrlUtils.isHome` / `prettify` / `hostOf` / `toUrl`、
+`UrlScheme.isNavigable` / `shouldTakeOver`）检查实参里是否出现 `?.` 且**没有兜底**
+（`?:` / `!!`）。已验证：把上面那行改回去，脚本立刻报
+`isHome() 的实参是可空链（?.）却没有兜底 —— 该形参是非空 String，编译会报 type mismatch`。
+带兜底的写法会被跳过 —— 不这样做就是误报，而误报多的检查没人看。
+
+> **教训：静态文本检查不能替代编译器。** 这类改动必须在 CI（或本地
+> `./gradlew :app:compileDebugKotlin`）上过一遍才敢说"通过"。本仓库是 public 的，
+> 推送后用 GitHub API 读 `repos/…/commits/<sha>/check-runs` 就能确认结论 ——
+> 本地没有 Android SDK 时，这是最省事的编译验证路径。
+
+---
+
 ## 五、启动图标
 
 图标源自 `tools/icon.xml`：**纯色圆底（主页 primaryContainer `#A8F2CB`）+ 一枚描边

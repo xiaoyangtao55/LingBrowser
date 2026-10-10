@@ -275,7 +275,10 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
         }
         // 把界面拉回浏览页（用户可能正停在二级页面）
         _showBrowser.update { it + 1 }
-        if (UrlUtils.isHome(activeTab()?.url)) {
+        // 注意 UrlUtils.isHome 的形参是**非空** String：
+        // 不能写成 isHome(activeTab()?.url)（可空链传给非空形参，编译不过）
+        val active = activeTab()
+        if (active == null || UrlUtils.isHome(active.url)) {
             navigate(url)
         } else {
             openInNewTab(url)
