@@ -66,4 +66,29 @@ class InternalPageTest {
         assertNull("null", InternalPage.logicalUrl(null))
         assertNull("空串与纯空白", InternalPage.logicalUrl("  "))
     }
+
+    @Test
+    fun `对外地址：主页没有、阅读视图用原文、普通页用自己`() {
+        // 收藏 / 分享 / 会话快照都用这个口径
+        assertNull("主页没有对外地址", InternalPage.externalUrl(HomePage.URL, null))
+        assertNull("主页的 baseUrl 同样", InternalPage.externalUrl(HomePage.BASE_URL, null))
+        assertEquals(
+            "阅读视图换成原文地址",
+            "https://example.com/post/1",
+            InternalPage.externalUrl(ReaderPage.URL, "https://example.com/post/1"),
+        )
+        assertEquals(
+            "普通页面就是自己",
+            "https://example.com/a",
+            InternalPage.externalUrl("https://example.com/a", null),
+        )
+    }
+
+    @Test
+    fun `阅读视图拿不到原文地址时返回 null`() {
+        // 正文缓存不落盘：重启后 ling://reader 的原文地址就是拿不到的。
+        // 这时绝不能退回合成地址 —— 那会存下一个点不开的书签（还会混进主页快捷入口）。
+        assertNull("缓存丢失", InternalPage.externalUrl(ReaderPage.URL, null))
+        assertNull("原文地址是空白", InternalPage.externalUrl(ReaderPage.URL, "   "))
+    }
 }

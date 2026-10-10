@@ -2,6 +2,7 @@ package com.ling.browser.web
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -431,5 +432,37 @@ class HomePageTest {
             "body 不应固定 height:100%",
             Regex("""body\s*\{[^}]*?(?<!min-)height:\s*100%""").containsMatchIn(html),
         )
+    }
+
+    // ---- 主页搜索框 ----
+
+    @Test
+    fun `搜索框提交的地址能解析出查询串`() {
+        assertEquals("abc", HomePage.searchQueryOf("ling://search?q=abc"))
+        // 与常量保持一致（HTML 里的 form action 由它生成，见 check_home_html.py 的漂移检查）
+        assertEquals("abc", HomePage.searchQueryOf("${HomePage.SEARCH_URL}?q=abc"))
+    }
+
+    @Test
+    fun `搜索串里的表单编码只解码一次`() {
+        // 表单编码：中文是 %XX、空格是 +。不解码会被二次编码 ——
+        // 搜"中文"会变成搜 "%E4%B8%AD%E6%96%87"，一个结果都没有。
+        assertEquals("中文", HomePage.searchQueryOf("ling://search?q=%E4%B8%AD%E6%96%87"))
+        assertEquals("a b", HomePage.searchQueryOf("ling://search?q=a+b"))
+    }
+
+    @Test
+    fun `只取 q 参数，忽略其它参数`() {
+        assertEquals("x", HomePage.searchQueryOf("ling://search?q=x&lang=zh"))
+    }
+
+    @Test
+    fun `空查询与不是搜索地址都返回 null`() {
+        assertNull("没有值", HomePage.searchQueryOf("ling://search?q="))
+        assertNull("纯空白也算空", HomePage.searchQueryOf("ling://search?q=%20"))
+        assertNull("没有 q 参数", HomePage.searchQueryOf("ling://search?lang=zh"))
+        assertNull("主页地址不是搜索", HomePage.searchQueryOf(HomePage.URL))
+        assertNull("普通网址不是搜索", HomePage.searchQueryOf("https://example.com/?q=x"))
+        assertNull(null)
     }
 }

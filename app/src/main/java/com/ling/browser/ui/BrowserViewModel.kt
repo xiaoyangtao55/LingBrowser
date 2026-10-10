@@ -16,6 +16,7 @@ import com.ling.browser.data.prefs.SearchEngine
 import com.ling.browser.data.prefs.TabsHeight
 import com.ling.browser.util.FaviconFetcher
 import com.ling.browser.util.UrlUtils
+import com.ling.browser.web.InternalPage
 import com.ling.browser.web.ReaderPage
 import com.ling.browser.web.ReaderResult
 import com.ling.browser.web.SniffResult
@@ -102,6 +103,11 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
         // 页面访问写历史
         tabManager.onVisited = { url, title, incognito ->
             viewModelScope.launch { container.history.record(title, url, incognito) }
+        }
+        // 主页搜索框提交：判定"网址还是搜索词"用地址栏同一套逻辑（UrlUtils），
+        // 在当前标签打开 —— 网页那边只负责把输入交回来，不做任何判定。
+        tabManager.onSearchRequested = { query ->
+            navigate(UrlUtils.toUrl(query, settings.value.searchEngine))
         }
 
         // 启动时恢复上次的会话；没有可恢复的内容才开一个主页。
@@ -335,14 +341,35 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
 
     // ------------------------------------------------------------ 书签
 
+    /**
+     * 当前标签「可收藏」的地址与标题。
+     *
+     * 阅读视图必须换成**原文地址**：它的逻辑地址是合成的 `ling://reader`，
+     * 收藏下来就是一个点不开的书签（还会混进主页快捷入口）。
+     * 主页则没有收藏价值（返回 null）。
+     */
+    private fun bookmarkTarget(): BookmarkTarget? {
+        val tab = activeTab() ?: return null
+        val url = InternalPage.externalUrl(tab.url, tabManager.readerOriginalUrl()) ?: return null
+        return BookmarkTarget(url, tab.displayTitle)
+    }
+
+    private data class BookmarkTarget(val url: String, val title: String)
+
     fun toggleBookmark() {
         val tab = activeTab() ?: return
-        if (UrlUtils.isHome(tab.url)) {
-            _message.value = "主页无需收藏"
+        val target = bookmarkTarget()
+        if (target == null) {
+            // 两种"没有可收藏地址"要分开说，否则用户不知道为什么点了没反应
+            _message.value = if (UrlUtils.isHome(tab.url)) {
+                "主页无需收藏"
+            } else {
+                "找不到这篇文章的原网页地址，无法收藏"
+            }
             return
         }
         viewModelScope.launch {
-            val now = container.bookmarks.toggle(tab.displayTitle, tab.url)
+            val now = container.bookmarks.toggle(target.title, target.url)
             _isBookmarked.value = now
             _message.value = if (now) "已加入书签" else "已取消收藏"
             if (now) {
@@ -352,7 +379,7 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
                     ?.takeIf { !it.isRecycled }
                     ?.let { encodeIcon(it) }
                 if (bytes != null) {
-                    container.bookmarks.setFavicon(tab.url, bytes)
+                    container.bookmarks.setFavicon(target.url, bytes)
                 } else {
                     fetchMissingFavicons()
                 }
@@ -395,9 +422,13 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
     }.getOrNull()
 
     fun refreshBookmarkState() {
-        val url = activeTab()?.url ?: return
+        // 用 bookmarkTarget()：阅读视图要按**原文地址**查收藏态，否则
+        // 明明收藏过这篇文章，菜单里还显示"添加书签"。
+        // 主页没有收藏态可言，直接置 false（不能提前 return —— 那会把上一个
+        // 页面的状态留在界面上）。
+        val url = bookmarkTarget()?.url
         viewModelScope.launch {
-            _isBookmarked.value = container.bookmarks.isBookmarked(url)
+            _isBookmarked.value = url != null && container.bookmarks.isBookmarked(url)
         }
     }
 

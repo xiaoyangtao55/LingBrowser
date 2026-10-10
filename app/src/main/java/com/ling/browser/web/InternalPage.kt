@@ -44,4 +44,24 @@ internal object InternalPage {
             else -> u
         }
     }
+
+    /**
+     * 内部页"对外"的地址：收藏、分享、写进会话快照都用它。
+     *
+     *   - 主页：**没有**对外地址（返回 null）—— 收藏它、恢复它都没有意义；
+     *   - 阅读视图：还原成**原文地址**。它的逻辑地址是合成的 `ling://reader`，
+     *     存下来既打不开（WebView 不认识这个 scheme），也没法再渲染
+     *     （正文缓存不落盘）；
+     *   - 普通页面：就是自己。
+     *
+     * @param readerOriginalUrl 阅读视图对应的原文地址（由 WebTabManager 的
+     *   正文缓存提供）。拿不到时返回 null —— 宁可"不能收藏"，也不要存下一个
+     *   点不开的 `ling://reader`。
+     */
+    fun externalUrl(url: String?, readerOriginalUrl: String?): String? {
+        val u = url?.trim().orEmpty()
+        if (u.isEmpty() || HomePage.isHomeUrl(u)) return null
+        if (ReaderPage.isReaderUrl(u)) return readerOriginalUrl?.trim()?.takeIf { it.isNotEmpty() }
+        return u
+    }
 }

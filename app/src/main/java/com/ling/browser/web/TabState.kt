@@ -104,9 +104,12 @@ data class TabState(
  * 不放在 `TabState` 内部做成成员函数，是为了让 `TabState`（纯 UI 状态）
  * 不反向依赖 `data.db` 包 —— 依赖方向应始终是 UI -> 数据。
  */
-internal fun TabState.toSnapshot(position: Int) = TabSnapshot(
+internal fun TabState.toSnapshot(position: Int, readerOriginalUrl: String? = null) = TabSnapshot(
     id = id,
-    url = url,
+    // 存**对外地址**：主页是 ling://home（能识别），阅读视图换成原文地址 ——
+    // 存合成的 ling://reader 的话，重启恢复只能得到错误页（WebView 不认识它，
+    // 正文缓存又不在磁盘上）。见 InternalPage.externalUrl。
+    url = InternalPage.externalUrl(url, readerOriginalUrl) ?: url,
     title = title,
     position = position,
     isIncognito = isIncognito,

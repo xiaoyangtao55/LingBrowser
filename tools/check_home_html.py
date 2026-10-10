@@ -25,6 +25,8 @@ SAMPLE = {
     "primaryContainer": "#A8F2CB",
     "onPrimaryContainer": "#00210F",
     "dark": "false",
+    # 与 Kotlin 的 HomePage.SEARCH_URL 必须一致：下面有专门的漂移检查
+    "SEARCH_URL": "ling://search",
     "quickLinks": (
         '<div class="links" id="ling-quick-links">'
         '<a class="link" href="https://www.baidu.com">'
@@ -138,11 +140,31 @@ def main():
         ("viewport", "viewport 声明"),
         ("<h1>翎</h1>", "品牌标题"),
         ('class="mark"', "品牌图标容器"),
-        ('class="hint"', "底部提示"),
+        ('class="search"', "主页搜索框"),
+        ('name="q"', "搜索框参数名"),
         ("env(safe-area-inset-bottom)", "刘海屏安全区适配"),
     ]:
         if need not in body:
             problems.append(f"缺少{desc}（{need}）")
+
+    # 5b) 搜索框：action 必须是**内部地址**，且与 Kotlin 常量一致。
+    #     这里最容易出的是"两边各写一份"的漂移：HTML 改了 action、Kotlin 的
+    #     searchQueryOf 没跟着改，输入就交不回来（点了没反应，且很难查）。
+    m_action = re.search(r'<form[^>]*\baction="([^"]+)"', body)
+    m_const = re.search(r'const val SEARCH_URL = "([^"]+)"', src)
+    if not m_action:
+        problems.append("主页没有搜索框表单（缺少 action）")
+    elif not m_const:
+        problems.append("HomePage 缺少 SEARCH_URL 常量 —— 搜索框提交地址没有唯一来源")
+    elif m_action.group(1) != m_const.group(1):
+        problems.append(
+            f"搜索框 action（{m_action.group(1)}）与 SEARCH_URL（{m_const.group(1)}）"
+            f"不一致 —— 提交上来的地址解析不出来"
+        )
+    elif not m_action.group(1).startswith("ling://"):
+        problems.append("搜索框 action 不是内部地址 —— 会被 WebView 当普通网址加载")
+    if 'method="get"' not in body:
+        problems.append("搜索框不是 GET 提交 —— 查询串带不回来")
 
     # 6) 布局：内容高于视口时顶部不能被裁掉。
     #    body 固定 height:100% + flex 的 justify-content:center 时，溢出的内容会被

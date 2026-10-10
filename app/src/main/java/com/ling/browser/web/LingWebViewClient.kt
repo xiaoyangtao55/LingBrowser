@@ -43,6 +43,14 @@ class LingWebViewClient(
     private val adBlockRules: () -> Set<String> = { emptySet() },
     /** 返回 true 表示已由外部接管（例如外部应用打开），WebView 不应继续加载。 */
     private val onExternalScheme: (Uri) -> Boolean,
+    /**
+     * 主页搜索框提交（`ling://search?q=…`）。
+     *
+     * 与 [onExternalScheme] 分开：这是**内部入口**，交给系统会弹"没有应用可打开"，
+     * 交给 WebView 就是 `ERR_UNKNOWN_URL_SCHEME` 白屏 —— 只能由我们自己吃掉。
+     * 这里只把查询串交出去，判定"网址还是搜索词"由 UI 层用同一套 UrlUtils 做。
+     */
+    private val onInternalSearch: (String) -> Unit = {},
 ) : WebViewClient() {
 
     /**
@@ -153,6 +161,14 @@ class LingWebViewClient(
     }
 
     private fun handleUri(view: WebView?, uri: Uri): Boolean {
+        // ⚠️ 主页搜索框必须**先**拦：它也是 ling://，而 ling 在
+        // UrlScheme.NAVIGABLE 里算"可加载"，不先拦就会被 WebView 揽走
+        // → ERR_UNKNOWN_URL_SCHEME 白屏。
+        HomePage.searchQueryOf(uri.toString())?.let { query ->
+            onInternalSearch(query)
+            return true
+        }
+
         // 判定统一走 UrlScheme：那是一条纯粹的字符串规则（可否交给 WebView 加载），
         // 抽出去之后能被单元测试完整覆盖。
         if (!UrlScheme.shouldTakeOver(uri.toString())) return false

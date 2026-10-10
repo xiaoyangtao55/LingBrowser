@@ -62,6 +62,14 @@ class WebTabManager(private val context: Context) {
     /** 下载请求回调（由 UI 层弹出确认或直接交给系统下载器）。 */
     var onDownloadRequested: ((url: String, mimeType: String?) -> Unit)? = null
 
+    /**
+     * 主页搜索框提交的回调（查询串，可能是一句搜索词也可能是个网址）。
+     *
+     * 判定"网址还是搜索词"要 UrlUtils + 用户选的搜索引擎，那是 UI 层的事；
+     * 这里只负责把网页提交上来的字符串转出去。
+     */
+    var onSearchRequested: ((query: String) -> Unit)? = null
+
     /** 当前标签页。 */
     val activeTab: TabState?
         get() = _tabs.value.firstOrNull { it.id == _activeId.value }
@@ -194,7 +202,8 @@ class WebTabManager(private val context: Context) {
 
     /** 导出当前标签用于持久化。无痕标签由 [TabSnapshot.isPersistable] 过滤掉。 */
     fun snapshots(): List<TabSnapshot> =
-        _tabs.value.mapIndexed { i, tab -> tab.toSnapshot(i) }
+        // 带上阅读视图的原文地址：快照里存合成地址的话，重启恢复只会得到错误页
+        _tabs.value.mapIndexed { i, tab -> tab.toSnapshot(i, readerOriginalUrl(tab.id)) }
             .filter { it.isPersistable }
 
     /**
@@ -378,6 +387,14 @@ class WebTabManager(private val context: Context) {
         // 这里做最后一道防线：直接忽略，保持当前页面不动。
         if (!isNavigable(url)) {
             updateTab(id) { it.copy(isLoading = false, errorText = null) }
+            return
+        }
+        // 阅读视图的逻辑地址是**合成的**：只能靠"正文缓存 + 重新渲染"得到，
+        // 而缓存不落盘。旧版本把它当普通地址交给 WebView，结果是
+        // ERR_UNKNOWN_URL_SCHEME 错误页 —— 上个标签停在阅读模式时，重启就会看到它。
+        // 快照现在改存原文地址了（见 snapshots()），这里再兜一道：回主页。
+        if (ReaderPage.isReaderUrl(url)) {
+            loadHome(id, wv)
             return
         }
         updateTab(id) { it.copy(url = url, errorText = null, isLoading = true, progress = 0) }
@@ -962,6 +979,8 @@ class WebTabManager(private val context: Context) {
                     updateTab(id) { it.copy(isLoading = false, errorText = desc) }
                 },
                 onExternalScheme = { uri -> onExternalUri?.invoke(uri) ?: false },
+                // 主页搜索框：只把查询串转出去，判定交给 UI 层（UrlUtils + 搜索引擎）
+                onInternalSearch = { query -> onSearchRequested?.invoke(query) },
                 // 用 lambda 而不是直接传布尔值：WebViewClient 是建 WebView 时
                 // 一次性构造的，传值会让开关"改完要重启才生效"。
                 //

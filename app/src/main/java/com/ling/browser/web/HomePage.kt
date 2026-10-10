@@ -55,6 +55,39 @@ object HomePage {
     }
 
     /**
+     * 主页搜索框提交到的内部地址（表单 action）。
+     *
+     * 为什么不是真正的搜索地址：输入可能是**网址**也可能是**搜索词**，而判定逻辑
+     * （[com.ling.browser.util.UrlUtils.toUrl]）在原生侧、且只该有一份 ——
+     * 前端只把这个固定地址交回来，由原生决定去哪个网址，避免在网页里重写一遍判定。
+     *
+     * 为什么不用 JS 提交：主页是**零脚本**的自包含 HTML（`check_home_html.py`
+     * 明令不许 `<script>`），而一次普通表单提交同样会走 `shouldOverrideUrlLoading`。
+     */
+    const val SEARCH_URL = "ling://search"
+
+    /**
+     * 从主页搜索框提交的地址里取出查询串；不是这个地址就返回 null。
+     *
+     * 纯字符串逻辑（**不碰** Android 的 `Uri` —— 它在本地单测里是空壳），
+     * 因此可以被单测覆盖。表单编码是 `application/x-www-form-urlencoded`，
+     * 中文与空格会变成 `%XX` / `+`，必须先解码再交给 `UrlUtils.toUrl`，
+     * 否则会被二次编码（搜"中文"会搜到 "%E4%B8%AD%E6%96%87"）。
+     */
+    fun searchQueryOf(url: String?): String? {
+        val prefix = "$SEARCH_URL?"
+        val u = url?.trim().orEmpty()
+        if (!u.startsWith(prefix)) return null
+        val raw = u.removePrefix(prefix)
+            .split('&')
+            .firstOrNull { it.startsWith("q=") }
+            ?.removePrefix("q=")
+            ?: return null
+        val decoded = runCatching { java.net.URLDecoder.decode(raw, "UTF-8") }.getOrNull()
+        return decoded?.takeIf { it.isNotBlank() }
+    }
+
+    /**
      * 生成主页 HTML。
      *
      * @param background      页面背景色（CSS 颜色）
@@ -137,9 +170,22 @@ object HomePage {
     margin-top: 8px; font-size: 14px;
     color: var(--fg); opacity: .6; letter-spacing: 1px;
   }
+  /* 搜索框：提交到内部地址 ling://search?q=…（见 HomePage.SEARCH_URL），
+     由原生用同一套 UrlUtils 判定「网址还是搜索词」。配色只用 --pc / --on-pc，
+     与 logo 圆底保持同一套。 */
+  .search { width: 100%; max-width: 320px; margin-top: 26px; }
+  .search input {
+    width: 100%; padding: 12px 16px;
+    border: none; border-radius: 24px;
+    background: var(--pc); color: var(--on-pc);
+    font-size: 14px; font-family: inherit; text-align: center;
+    -webkit-appearance: none; appearance: none;
+  }
+  .search input:focus { outline: none; }
+  .search input::placeholder { color: var(--on-pc); opacity: .6; }
   .links {
     display: flex; flex-wrap: wrap; gap: 14px 10px;
-    justify-content: center; margin-top: 34px;
+    justify-content: center; margin-top: 22px;
     max-width: 320px;
   }
   .link {
@@ -192,8 +238,16 @@ object HomePage {
   </div>
   <h1>翎</h1>
   <div class="tagline">轻巧 · 干净 · 快</div>
+  <!--
+    主页搜索框（在快捷入口**上面**）。提交到内部地址 ling://search?q=…，
+    由原生侧用 UrlUtils 判定「网址还是搜索词」（与地址栏同一套逻辑，不在网页里再写一份）。
+    隐藏的 submit 按钮是为了保证回车一定触发提交。
+  -->
+  <form class="search" action="$SEARCH_URL" method="get" autocomplete="off">
+    <input type="text" name="q" placeholder="搜索或输入网址" enterkeyhint="go">
+    <button type="submit" hidden aria-hidden="true"></button>
+  </form>
   $quickLinks
-  <div class="hint">在地址栏输入网址或搜索内容</div>
 </body>
 </html>
 """.trimIndent()
