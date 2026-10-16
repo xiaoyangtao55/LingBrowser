@@ -109,12 +109,13 @@ fun BrowserScreen(
 
     val activeTab = tabs.firstOrNull { it.id == activeId }
 
-    // 主页原生背景层是否**绘制**：仅当「当前标签停在内置主页」且「背景模式非纯色」。
-    // 两者都满足才画，切到普通网页后必须停止绘制 —— 否则网页自身的透明区域
-    // 会露出下面的背景图，观感不对。（组件本身仍无条件调用，见下面 Box 里的说明。）
+    // 主页原生背景层是否**绘制**：只要当前标签停在内置主页就画。
+    // 纯色档画主题背景色、自定义图片档在它之上叠照片与遮罩 —— 主页 HTML 与
+    // WebView 自身背景都是透明的，主页的背景颜色全部由这一层给。
+    // 切到普通网页后必须停止绘制，否则网页自身的透明区域会露出下面这层色。
+    // （组件本身仍无条件调用，见下面 Box 里的说明。）
     val activeUrl = activeTab?.url
-    val homeBackgroundVisible = settings.homeBackground.transparent &&
-        activeUrl != null && UrlUtils.isHome(activeUrl)
+    val homeBackgroundVisible = activeUrl != null && UrlUtils.isHome(activeUrl)
     val pendingDownload by viewModel.pendingDownload.collectAsStateWithLifecycle()
     // 阅读模式是否开启。必须 collect（而不是直接读 viewModel.readerActive），
     // 否则进入/退出后菜单文案不会刷新。
@@ -205,9 +206,9 @@ fun BrowserScreen(
     val colorScheme = MaterialTheme.colorScheme
     // 界面当前的明暗：既喂给主页配色，也当作"网页要不要重算暗化"的触发器。
     val uiDark = colorScheme.background.luminance() < 0.5f
-    // settings.homeBackground 也作为 key：背景模式（纯色 ↔ 自定义图片）变化时
-    // 主页要重新渲染成透明/不透明，这一步不经过配色变化，必须显式触发。
-    LaunchedEffect(colorScheme, settings.homeBackground) {
+    // 背景模式（纯色 ↔ 自定义图片）不再需要作为 key：它现在只决定原生背景层
+    // 画什么，而那一层直接跟着 settings 重组，与主页 HTML 的重绘无关。
+    LaunchedEffect(colorScheme) {
         viewModel.applyHomeTheme(
             background = colorScheme.background,
             onBackground = colorScheme.onBackground,
@@ -216,7 +217,6 @@ fun BrowserScreen(
             primaryContainer = colorScheme.primaryContainer,
             onPrimaryContainer = colorScheme.onPrimaryContainer,
             dark = uiDark,
-            transparent = settings.homeBackground.transparent,
         )
     }
 
@@ -306,8 +306,9 @@ fun BrowserScreen(
                 .weight(1f)
                 .imePadding(),
         ) {
-            // 原生背景层（自定义图片 + 顶部遮罩）：画在 WebView **之下**。
-            // 主页 HTML 此时背景透明（见 WebTabManager.homeBackgroundColor），
+            // 原生背景层：画在 WebView **之下**，主页的背景颜色全由它给
+            // —— 纯色档画主题背景色，自定义图片档在它之上叠照片与顶部遮罩。
+            // 主页 HTML 与 WebView 自身背景都是透明的（见 WebTabManager.loadHome），
             // 因此能透出这一层。
             //
             // ⚠️ 必须**无条件**调用、用 visible 参数控制是否绘制，不能写成

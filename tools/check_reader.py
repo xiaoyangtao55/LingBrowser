@@ -480,7 +480,7 @@ if "ReaderExtractorJs.SCRIPT" in mgr and "evaluateJavascript" in mgr:
 else:
     bad("提取脚本没有被执行 —— 阅读模式会永远拿不到正文")
 
-if re.search(r"fun enterReaderMode[\s\S]{0,400}?HomePage\.isHomeUrl", mgr):
+if re.search(r"fun enterReaderMode[\s\S]{0,400}?InternalPage\.isInternal", mgr):
     ok("对主页拒绝进入阅读模式（否则会递归提取）")
 else:
     bad("未拦截主页，读阅模式可能在主页上递归")
@@ -616,8 +616,10 @@ if re.search(r"if \(!isInternal\) \{(?:[^{}]|\n)*?wv\.injectDarkMode", mgr):
 else:
     bad("内部页面被注入反色 CSS —— 深色阅读视图会被反成亮底白字")
 
-if re.search(r"val isInternal = HomePage\.isHomeUrl\(url\) \|\| ReaderPage\.isReaderUrl\(url\)", mgr):
-    ok("用统一的 isInternal 判定内部页面（主页 + 阅读视图）")
+# 判据用统一入口 InternalPage.isInternal(url, …)：它同时覆盖"内部页 baseUrl"
+# 与 reload 后回写的 data: 形式（只看 baseUrl 会把刷新过的主页当成普通网页）。
+if re.search(r"val isInternal = InternalPage\.isInternal\(url", mgr):
+    ok("用统一的 isInternal 判定内部页面（主页 + 阅读视图，含 reload 的 data: 形式）")
 else:
     bad("未统一判定内部页面，容易出现只处理主页、漏掉阅读视图的情况")
 
@@ -773,7 +775,7 @@ for cb, nxt in (("onPageStarted", "onPageFinished"),
     start = mgr.find(cb + " = {")
     end = mgr.find(nxt, start + 1) if start >= 0 else -1
     blk = mgr[start:end] if start >= 0 and end > start else ""
-    if "ReaderPage.isReaderUrl(url)" in blk and "isNavigable(url)" in blk:
+    if "InternalPage.isInternal(url" in blk and "isNavigable(url)" in blk:
         ok(f"{cb} 同时挡住内部页面与自定义协议")
     else:
         bad(f"{cb} 的判定不完整 —— 会把 ling://reader 或 zhihu:// 写回状态")
@@ -1152,7 +1154,7 @@ if re.search(
     r"fun loadUrl\(id: String, url: String\)[\s\S]{0,450}?loadHomeOrRefresh\(id, wv\)",
     mgr,
 ) and re.search(
-    r"fun loadHomeOrRefresh\(id: String, wv: LingWebView\)[\s\S]{0,600}?isHomeRendered\(wv\)",
+    r"fun loadHomeOrRefresh\(id: String, wv: LingWebView\)[\s\S]{0,600}?isHomeRendered\(id, wv\)",
     mgr,
 ):
     ok("已在主页时点「主页」走原地刷新，不重复压历史条目")
@@ -1171,7 +1173,9 @@ else:
 # (9) 实时地址写回状态前必须归一化：内部页的 wv.url 是 baseUrl，原样写回会让
 # 同一个页面出现两种 url 值，还会把解析不了的假 https 地址写进会话快照。
 if re.search(
-    r"fun syncNavState\(id: String\)[\s\S]{0,900}?InternalPage\.logicalUrl\(live\)",
+    # logicalUrl(live, tab.url)：reload 后的 data: 形式要靠第二个参数（当前标签
+    # 逻辑地址）才分得出是主页还是阅读视图，所以参数允许有一个或多个。
+    r"fun syncNavState\(id: String\)[\s\S]{0,900}?InternalPage\.logicalUrl\(live[,)]",
     mgr,
 ):
     ok("syncNavState 把 baseUrl 归一化回逻辑地址（TabState 里只有一种 url）")
@@ -1235,7 +1239,9 @@ else:
 # loadDataWithBaseURL 每次调用都压历史条目（返回键在同一篇文章的不同字号之间
 # 来回），重渲染还会把滚动位置拉回顶部。
 font_body = body_of(
-    mgr, r"fun refreshReaderFontSize\(fontSize: ReaderPage\.FontSize\)", span=400
+    # span 要够大：函数体前面有一段解释"为什么用 isReaderDocument 而不是
+    # ReaderPage.isReaderUrl"的注释，短窗口会在注释里截断、看不到 fontSizeJs。
+    mgr, r"fun refreshReaderFontSize\(fontSize: ReaderPage\.FontSize\)", span=900
 )
 if "ReaderPage.fontSizeJs" in font_body and "loadDataWithBaseURL" not in font_body:
     ok("调字号走原地改变量（不压历史、不丢滚动位置）")

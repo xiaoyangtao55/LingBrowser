@@ -18,7 +18,9 @@ KOTLIN = os.path.join(
 )
 
 SAMPLE = {
-    "background": "#FFFBFE",
+    # 主页背景恒透明（模板里写的是 $TRANSPARENT_BG）：背景由原生背景层
+    # 在 WebView 之下供色，见第 7c 节的反向检查。
+    "TRANSPARENT_BG": "transparent",
     "onBackground": "#1C1B1F",
     "primaryContainer": "#A8F2CB",
     "onPrimaryContainer": "#00210F",
@@ -190,6 +192,15 @@ def main():
     # 7b) 主页是**零脚本** HTML：不能自带 <script>，时钟由原生侧注入刷新。
     if "<script" in body:
         problems.append("主页不应内嵌 <script> —— 时钟等动态内容由原生侧注入")
+
+    # 7c) 主页背景必须**恒透明**：背景一律由原生背景层在 WebView 之下供色
+    #     （纯色档画主题色、自定义图片档叠照片）。
+    #     若把实色写回 --bg，就回到"WebView 异步首帧 vs 页面自绘背景"两套颜色，
+    #     冷启动必然闪一段（先白后加载）；立此防止回退。
+    if "--bg: transparent" not in body:
+        problems.append(
+            "--bg 不是 transparent —— 主页背景必须由原生层供色（见 HomePage.TRANSPARENT_BG）"
+        )
 
     print(f"模板 {len(tpl)} 字符，实例化后 {len(body)} 字符")
     print(f"标签总数 {len(c.tags)}：{', '.join(sorted(set(c.tags)))}")

@@ -94,7 +94,6 @@ class HomePageTest {
         dark: Boolean = false,
         clock: String = "",
     ) = HomePage.html(
-        background = "#FFFBFE",
         onBackground = "#1C1B1F",
         primaryContainer = "#A8F2CB",
         onPrimaryContainer = "#00210F",
@@ -130,15 +129,23 @@ class HomePageTest {
     }
 
     @Test
+    fun `主页背景恒定透明`() {
+        // 背景一律由原生背景层（HomeBackgroundLayer）在 WebView 之下供色，
+        // 纯色档与自定义图片档走同一条路径：页面若自绘背景，就会和 WebView
+        // 那段异步首帧的颜色对不上，屏幕上闪一下（见 HomePage.TRANSPARENT_BG）。
+        val html = sampleHtml()
+        assertTrue("--bg 应为 transparent", html.contains("--bg: ${HomePage.TRANSPARENT_BG}"))
+        assertFalse("不应再把实色当页面背景", html.contains("--bg: #"))
+    }
+
+    @Test
     fun `配色被注入到 CSS 变量`() {
         val html = HomePage.html(
-            background = "#123456",
             onBackground = "#ABCDEF",
             primaryContainer = "#A8F2CB",
             onPrimaryContainer = "#00210F",
             dark = true,
         )
-        assertTrue("背景色应注入", html.contains("--bg: #123456"))
         assertTrue("前景色应注入", html.contains("--fg: #ABCDEF"))
         assertTrue("容器色应注入", html.contains("--pc: #A8F2CB"))
         assertTrue("容器文字色应注入", html.contains("--on-pc: #00210F"))
@@ -196,15 +203,16 @@ class HomePageTest {
 
     @Test
     fun `深色配色确实注入到 CSS 变量`() {
-        // 保证"跟随夜间模式"不只是 color-scheme，背景/文字色也跟着换，
-        // 否则页面仍是白底黑字，只是滚动条变深了而已。
+        // 保证"跟随夜间模式"不只是 color-scheme：正文与搜索框颜色也要跟着换，
+        // 否则页面仍是浅色文字，只是滚动条变深了而已。
+        // 背景不在这里断言 —— 主页背景恒透明，由原生背景层跟着主题换色。
         val html = HomePage.html(
-            background = "#111412", onBackground = "#E1E3DF",
+            onBackground = "#E1E3DF",
             primaryContainer = "#005231", onPrimaryContainer = "#A8F2CB",
             dark = true,
         )
-        assertTrue("背景色应注入 --bg", html.contains("--bg: #111412"))
         assertTrue("文字色应注入 --fg", html.contains("--fg: #E1E3DF"))
+        assertTrue("搜索框底色应注入 --pc", html.contains("--pc: #005231"))
     }
 
     @Test

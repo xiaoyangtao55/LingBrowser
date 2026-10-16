@@ -34,13 +34,21 @@ import kotlinx.coroutines.withContext
  * 移植自 OnyxBrowser 起始页的"背景层 + 前景层"分层思路，但落点不同：
  * Onyx 的起始页整页都是原生 Compose，前景（图标/搜索框/书签）是另一层；
  * 「翎」的主页是 WebView 渲染的 HTML，因此这里只提供**背景层**，画在 WebView
- * **之下**，并让主页 HTML 背景透明（见 [com.ling.browser.web.HomePage.TRANSPARENT_BG]）来透出它。
+ * **之下**，并让主页 HTML 与 WebView 自身背景都透明（见
+ * [com.ling.browser.web.HomePage.TRANSPARENT_BG]）来透出它。
  *
- * 只服务于 [HomeBackground.CUSTOM]：按用户选择的 `content://` URI 解码图片铺满。
- * [HomeBackground.SOLID] 不画背景（调用方不会挂载本组件），主页 HTML 自绘主题色。
+ * 两档都由本层供色：
+ *  - [HomeBackground.SOLID]：只画主题背景色；
+ *  - [HomeBackground.CUSTOM]：在主题色打底之上叠用户选的照片，再加顶部遮罩。
+ *
+ * 为什么纯色档也走本层、而不是让主页 HTML 自绘背景：WebView 从"建出来"到
+ * "HTML 首帧"之间有一段**异步**窗口，这段窗口期只能显示 WebView 自身的底。
+ * 让主页一律透明、由本层供色（它跟着 Compose 的 colorScheme 走，与首帧同源），
+ * 屏幕上就不会再出现"白底 → 主题色"的过渡帧。
  *
  * 顶部遮罩：顶部最暗、到屏幕中线渐隐 —— 保证状态栏/地址栏文字在浅色背景
- * （亮照片）上也清晰可读，与 Onyx 起始页一致。
+ * （亮照片）上也清晰可读，与 Onyx 起始页一致。只在有照片时画：纯色底上
+ * 压一条黑边反而突兀。
  */
 @Composable
 fun HomeBackgroundLayer(
@@ -57,9 +65,10 @@ fun HomeBackgroundLayer(
     visible: Boolean,
     modifier: Modifier = Modifier,
 ) {
-    // 不绘制时直接返回：连打底与遮罩都不画，否则纯色主页上会突兀地压一条黑边。
-    if (!visible || mode == HomeBackground.SOLID) return
+    // 不在主页时直接返回：连打底也不画，否则普通网页的透明区域会露出下面的背景色。
+    if (!visible) return
     val context = LocalContext.current
+    val custom = mode == HomeBackground.CUSTOM
     // 解码放到 IO 线程：大图解码可能耗时几十毫秒，放主线程会造成切到主页时卡一下。
     // 用 (mode, imageUri) 作为 key：换了图片或模式会重新解码，其它重组不会重复解码。
     var image by remember(mode, imageUri) { mutableStateOf<ImageBitmap?>(null) }
@@ -68,34 +77,38 @@ fun HomeBackgroundLayer(
     }
 
     Box(modifier = modifier.fillMaxSize()) {
-        // 打底：图片尚未解码完或解码失败时，先给一块主题背景色，避免出现"一片黑"。
-        // 纯色模式下本组件不会被挂载，这里的打底只服务于自定义图片这一档。
+        // 打底：主题背景色 —— 纯色档到这里就画完了。自定义图片档也留着它，
+        // 图片尚未解码完或解码失败时靠它兜底，避免出现"一片黑"。
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .background(MaterialTheme.colorScheme.background),
         )
-        image?.let { bitmap ->
-            Image(
-                bitmap = bitmap,
-                contentDescription = null,
-                modifier = Modifier.fillMaxSize(),
-                // Crop：让图片铺满整屏、不走样。宁可裁掉边角，也不留主题色边框。
-                contentScale = ContentScale.Crop,
+        // 照片与遮罩只在自定义图片档画：纯色底本就是主题色，
+        // 再压一层半透明黑只会平白多出一条渐变边。
+        if (custom) {
+            image?.let { bitmap ->
+                Image(
+                    bitmap = bitmap,
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize(),
+                    // Crop：让图片铺满整屏、不走样。宁可裁掉边角，也不留主题色边框。
+                    contentScale = ContentScale.Crop,
+                )
+            }
+            // 顶部遮罩（Onyx 起始页同款）。
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .fillMaxHeight(0.5f)
+                    .background(
+                        Brush.verticalGradient(
+                            0f to Color.Black.copy(alpha = 0.55f),
+                            1f to Color.Transparent,
+                        ),
+                    ),
             )
         }
-        // 顶部遮罩（Onyx 起始页同款）。
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .fillMaxHeight(0.5f)
-                .background(
-                    Brush.verticalGradient(
-                        0f to Color.Black.copy(alpha = 0.55f),
-                        1f to Color.Transparent,
-                    ),
-                ),
-        )
     }
 }
 

@@ -51,8 +51,13 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
     /** WebView 实例管理者。Activity 负责在合适时机 attachHost。 */
     val tabManager = WebTabManager(app)
 
+    /**
+     * 首帧就用**已经落库**的那份设置（见 [AppContainer.initialSettings]），
+     * 而不是 [LingSettings] 的默认值 —— 否则冷启动会先按默认配色画一帧，
+     * 再翻成用户真实配色（深色用户表现为"先亮后暗"）。
+     */
     val settings: StateFlow<LingSettings> = container.settings.settings
-        .stateIn(viewModelScope, SharingStarted.Eagerly, LingSettings())
+        .stateIn(viewModelScope, SharingStarted.Eagerly, container.initialSettings)
 
     val tabs: StateFlow<List<TabState>> = tabManager.tabs
     val activeId: StateFlow<String> = tabManager.activeId
@@ -845,14 +850,6 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
         primaryContainer: Color,
         onPrimaryContainer: Color,
         dark: Boolean,
-        /**
-         * 主页是否让出背景（自定义图片模式）。
-         *
-         * 必须传进来而不是让 [WebTabManager] 自己去读设置：主色来自 Compose 的
-         * ColorScheme（Web 层拿不到），而相等性判断以整个 [WebTabManager.HomeColors]
-         * 为单位 —— 把透明位并进去，改背景模式才能和改配色一样触发一次重绘。
-         */
-        transparent: Boolean = false,
     ) {
         val colors = WebTabManager.HomeColors(
             background = background.toCssHex(),
@@ -862,7 +859,6 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
             primaryContainer = primaryContainer.toCssHex(),
             onPrimaryContainer = onPrimaryContainer.toCssHex(),
             dark = dark,
-            transparent = transparent,
         )
         if (colors == tabManager.homeColors) return
         tabManager.homeColors = colors

@@ -22,8 +22,12 @@ enum class NightMode { FOLLOW_SYSTEM, ALWAYS_ON, ALWAYS_OFF }
  * 内置主页的背景模式。
  *
  * 移植自 OnyxBrowser 的起始页背景设计，但做了轻量化取舍：
- *  - [SOLID]  纯色：沿用 Material You 主题色，主页 HTML 自己画背景（默认，行为与旧版一致）；
- *  - [CUSTOM] 自定义图片：由原生层把用户选的图片画在 WebView **之下**，主页 HTML 背景透明让出空间。
+ *  - [SOLID]  纯色：用主题背景色（默认，观感与旧版一致）；
+ *  - [CUSTOM] 自定义图片：在原生的主题色打底之上再叠用户选的照片。
+ *
+ * 两档都**由原生背景层在 WebView 之下供色**，主页 HTML 自身恒定透明 ——
+ * 这个枚举只决定"画什么"，不存在"谁来画"的分支（见
+ * `com.ling.browser.ui.components.HomeBackgroundLayer`）。
  *
  * 为什么不做 Onyx 那套"窗口透明 + SurfaceFlinger 透传"：那需要把整个 App 的窗口改成
  * 半透明（`PixelFormat.TRANSLUCENT` + `FLAG_SHOW_WALLPAPER`）并让最外层 Surface 也透明，
@@ -37,14 +41,6 @@ enum class NightMode { FOLLOW_SYSTEM, ALWAYS_ON, ALWAYS_OFF }
 enum class HomeBackground(val key: String, val label: String) {
     SOLID("solid", "纯色"),
     CUSTOM("custom", "自定义图片");
-
-    /**
-     * 该模式是否让主页 HTML 的背景透明、由原生层来画背景。
-     *
-     * 纯逻辑派生属性（可单测）：只有 [SOLID] 需要主页自己填背景色，
-     * 其余档位都必须透明，否则会把原生画好的图片整个盖住。
-     */
-    val transparent: Boolean get() = this != SOLID
 
     companion object {
         /**

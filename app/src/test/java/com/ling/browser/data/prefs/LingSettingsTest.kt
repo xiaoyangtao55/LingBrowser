@@ -166,17 +166,9 @@ class LingSettingsTest {
 
     @Test
     fun `主页背景默认是纯色`() {
-        // 默认保持旧版行为：新用户不主动设置时，主页仍用主题色自绘背景。
+        // 默认不打扰：新用户不主动设置时，主页就是一块主题背景色。
         assertEquals(HomeBackground.SOLID, LingSettings().homeBackground)
         assertEquals("默认没有自定义背景图", "", LingSettings().homeBackgroundImageUri)
-    }
-
-    @Test
-    fun `只有纯色模式才让主页自绘背景`() {
-        // 这是"主页背景"的核心纯逻辑：自定义图片档必须让主页 HTML 透明，
-        // 否则原生层画好的背景会被不透明的主页整个盖住，用户看到的是"设了没反应"。
-        assertFalse("纯色由主页自己填背景色", HomeBackground.SOLID.transparent)
-        assertTrue("自定义图片需要主页透明", HomeBackground.CUSTOM.transparent)
     }
 
     @Test

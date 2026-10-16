@@ -9,7 +9,8 @@ package com.ling.browser.web
  * 现在改成用 `loadDataWithBaseURL` 直接渲染下面这段 HTML，主页完全不依赖网络：
  *  - 不联网、不请求任何外部资源，打开即显示；
  *  - 主题色由原生侧通过 CSS 变量注入，跟随 Material You 动态取色；
- *  - 深色模式同步切换，不会白屏闪一下。
+ *  - 页面背景透明，由原生背景层在 WebView 之下供色 —— 纯色档与自定义图片档
+ *    走同一条路径，因此不存在"底与页面颜色不一致"的过渡帧。
  *
  * 页面内容刻意保持极简 —— **只有一个时钟 + 一个搜索框**（参照 OnyxBrowser 起始页
  * 的极简形态做了取舍，没有 logo、标题、快捷入口）：
@@ -60,10 +61,14 @@ object HomePage {
     /**
      * 透明背景的 CSS 颜色值。
      *
-     * 非纯色背景模式（自定义图片）下，[html] 的 `background` 传这个值，
-     * 主页便不再自绘背景，从而让原生层画在 WebView **之下**的背景透出来。
-     * 抽成常量是为了让"透明"这个字符串只有一个来源 —— 散落的字面量一旦
-     * 有一处写错（比如拼成 `none`），主页就会突然变成白底，很难查。
+     * 主页**始终**用它当 `--bg`：背景一律交给原生层
+     * （`com.ling.browser.ui.components.HomeBackgroundLayer`）画在 WebView 之下 ——
+     * 纯色档画主题背景色，自定义图片档再叠上图片与顶部遮罩。
+     *
+     * 为什么不再分档：WebView 自身的底是**异步**转成 HTML 首帧的，
+     * 只要两者颜色不一致（比如 WebView 白底 vs 主页深色），中间就必然闪一段。
+     * 让 HTML 恒透明 + WebView 恒透明底，屏幕上从窗口建立到首帧都由原生层给色，
+     * 这段闪烁就不存在了。
      */
     const val TRANSPARENT_BG = "transparent"
 
@@ -105,7 +110,9 @@ object HomePage {
     /**
      * 生成主页 HTML。
      *
-     * @param background          页面背景色（CSS 颜色）
+     * 背景恒定 [TRANSPARENT_BG]（不再由调用方传）：页面背景由原生背景层供色，
+     * 见 [TRANSPARENT_BG] 与 [WebTabManager.loadHome] 的说明。
+     *
      * @param onBackground        正文颜色
      * @param primaryContainer    搜索框底色
      * @param onPrimaryContainer  搜索框上的文字颜色
@@ -113,7 +120,6 @@ object HomePage {
      * @param clock               初始时间文本（`HH:mm`），之后由 [clockJs] 原地刷新
      */
     fun html(
-        background: String,
         onBackground: String,
         primaryContainer: String,
         onPrimaryContainer: String,
@@ -134,7 +140,8 @@ object HomePage {
      那种"定义了但没人用"的代码最危险，测试还会因为它存在而变绿。 */
   :root {
     color-scheme: ${if (dark) "dark" else "light"};
-    --bg: $background;
+    /* 背景恒透明：由原生层在 WebView 之下供色，见 TRANSPARENT_BG */
+    --bg: $TRANSPARENT_BG;
     --fg: $onBackground;
     --pc: $primaryContainer;
     --on-pc: $onPrimaryContainer;
