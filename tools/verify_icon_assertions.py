@@ -143,15 +143,15 @@ check("android:fillColor" in bg, "有纯色填充")
 check('android:fillColor="#A8F2CB"' in bg, "底色 = 主页 primaryContainer #A8F2CB")
 check("M0,0h108v108h-108z" in bg, "纯色铺满 108dp 画布（外侧交给遮罩裁切）")
 
-# ---- 6. 颜色取自主页 logo ----
-print("\n6. 颜色取自主页 logo 的取色")
+# ---- 6. 颜色取自设计源（浅色主题 HomeColors）----
+print("\n6. 颜色取自设计源（浅色主题 HomeColors）")
 check("#A8F2CB" in bg, "圆底 = --pc（primaryContainer）")
 check("#00210F" in fg, "羽毛描边 = --on-pc（onPrimaryContainer）")
 
 # ---- 7. 前景只有描边羽毛（无外环）----
 print("\n7. 前景层只有描边羽毛，没有外环")
 check("a30.19" not in fg and "a30" not in fg, "不含外环圆弧（外环已去掉）")
-check('android:strokeColor="#00210F"' in fg, "羽毛用主页的描边色 #00210F")
+check('android:strokeColor="#00210F"' in fg, "羽毛用设计源的描边色 #00210F")
 check('android:fillColor="#00000000"' in fg, "羽毛 fill 为空（描边线画）")
 check('android:strokeLineCap="round"' in fg, "羽毛用圆角端帽")
 check('android:strokeLineJoin="round"' in fg, "羽毛用圆角拐角")

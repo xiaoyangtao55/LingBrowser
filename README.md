@@ -27,7 +27,7 @@
 | 无痕模式 | 独立标签页；不写历史、关闭 DOM storage 与 Cookie；Cookie 策略跟随当前标签，改设置不会清掉它的前进/后退历史 |
 | 从其它应用打开 | 别的 App「用翎打开链接」→ 直接打开该网页（当前标签在主页就复用它，否则新开标签）；**分享纯文本**则当作搜索词 |
 | 前进/后退/刷新/停止 | 刷新常驻在地址栏右侧；底部工具栏保留前进/后退/主页/标签页/更多 |
-| **内置主页** | `ling://home` 由原生渲染，**离线可用**；跟随 Material You 动态取色；顶部**搜索框**（网址/搜索词自动判定，与地址栏同一套逻辑）+ 书签快捷入口 |
+| **内置主页** | `ling://home` 由原生渲染，**离线可用**；跟随 Material You 动态取色；**只有一个时钟 + 一个搜索框**（网址/搜索词自动判定，与地址栏同一套逻辑）；页面背景透明，由原生背景层（纯色 / 自定义图片）在 WebView 之下供色 —— 消除冷启动白帧 |
 
 ### 页面适配
 | 功能 | 说明 |
@@ -947,19 +947,15 @@ webViews[tab.id]?.let { loadHome(tab.id, it) }   // WebView 不存在就静默�
 （历史里残留的旧条目）。
 
 改成"原地刷新"：已渲染的主页/阅读视图，用 `evaluateJavascript` 直接改
-`:root` 上的 CSS 变量（`--bg`/`--fg`/…/`color-scheme`），主页顺带重建
-`.links` 快捷入口。不触发导航、不压历史，深浅色切换即时生效且返回键行为不变。
+`:root` 上的 CSS 变量（`--bg`/`--fg`/…/`color-scheme`）。不触发导航、不压历史，
+深浅色切换即时生效且返回键行为不变。
 
-两个边界要守住：
-
-- **只有"已渲染"才原地刷新**：用 `HomePage.isHomeUrl(wv.url)` 判断 WebView
-  是否真的落在了 `BASE_URL`（冷启动首帧前还是 `about:blank`，注入会打在空
-  文档上白注入一次），否则仍走完整渲染。
-  判据收敛成 `isHomeRendered(wv)`：**额外要求地址非空** —— `isHomeUrl` 按
-  地址栏语义把 `null` 也算主页，而刚建出来的 WebView `url` 正是 `null`，
-  混用会让冷启动"以为已经在主页上"而跳过渲染（主页空白）。
-- **`linksHtml()` 必须两处复用**：完整渲染（`html()`）与原地刷新
-  （`themeUpdateJs`）共用同一份快捷入口 HTML，各写一份迟早不同步。
+一个边界要守住：**只有"已渲染"才原地刷新** —— 用 `HomePage.isHomeUrl(wv.url)`
+判断 WebView 是否真的落在了 `BASE_URL`（冷启动首帧前还是 `about:blank`，
+注入会打在空文档上白注入一次），否则仍走完整渲染。判据收敛成
+`isHomeRendered(wv)`：**额外要求地址非空** —— `isHomeUrl` 按地址栏语义把
+`null` 也算主页，而刚建出来的 WebView `url` 正是 `null`，混用会让冷启动
+"以为已经在主页上"而跳过渲染（主页空白）。
 
 ---
 
@@ -990,16 +986,9 @@ webViews[tab.id]?.let { loadHome(tab.id, it) }   // WebView 不存在就静默�
 `check_home_html.py` 新增布局判据，`HomePageTest` / `InternalPageTest` 覆盖纯逻辑。
 
 **顺带修掉的布局问题**：主页 `body` 原来固定 `height:100%` + flex 居中，内容比
-视口高时（横屏 / 分屏 / 小屏 + 8 个快捷入口）溢出的部分会被顶到滚动区**上方**，
-滚不上去 —— logo 和「翎」直接看不见。现在改成 `html{height:100%}` +
+视口高时（横屏 / 分屏 / 小屏 + 大号时钟）溢出的部分会被顶到滚动区**上方**，
+滚不上去 —— 时钟和搜索框直接看不见。现在改成 `html{height:100%}` +
 `body{min-height:100%}`：装得下才居中，装不下就从头排、正常滚动。
-
-**顺带修掉的一处正文损坏**：主题刷新脚本用 `document.querySelector('.links')`
-定位快捷入口，可同一份脚本（`readerThemeJs`，`linksHtml` 传空）**也跑在阅读视图上**，
-而阅读视图的正文来自第三方网页 —— 文章里只要有 `class="links"` 的元素
-（"相关链接"这类很常见），就会被当成快捷入口**从正文里删掉**。现在快捷入口
-带固定 id（`HomePage.QUICK_LINKS_ID = "ling-quick-links"`），脚本改用它定位，
-`.links` 这个 class 只留作样式。
 
 ---
 
@@ -1158,7 +1147,7 @@ run: https://github.com/xiaoyangtao55/LingBrowser/actions/runs/38042019419
 
 | 场景 | 之前的症状 | 现在 |
 |---|---|---|
-| 阅读模式里点收藏 | 存下 `ling://reader` —— 一个点不开的书签，还会混进主页快捷入口 | 存**原文地址**（提取时缓存的 canonical）；查收藏态也用同一口径，否则"收藏过了还显示添加书签" |
+| 阅读模式里点收藏 | 存下 `ling://reader` —— 一个点不开的书签 | 存**原文地址**（提取时缓存的 canonical）；查收藏态也用同一口径，否则"收藏过了还显示添加书签" |
 | 会话快照（`toSnapshot`） | 存 `ling://reader`，重启恢复时交给 WebView → **错误页** | 存原文地址 → 恢复后直接打开那篇文章 |
 | `loadUrl` 收到合成地址（旧快照） | 同上，错误页 | 兜底回主页，至少是个能用的页面 |
 
@@ -1170,9 +1159,10 @@ run: https://github.com/xiaoyangtao55/LingBrowser/actions/runs/38042019419
 
 ## 五、启动图标
 
-图标源自 `tools/icon.xml`：**纯色圆底（主页 primaryContainer `#A8F2CB`）+ 一枚描边
-羽毛（主页 onPrimaryContainer `#00210F`）** —— 与主页 logo 完全同款，没有渐变、
-没有浏览器外环、没有高光点。
+图标的设计源是 `tools/icon_source.svg` —— 一枚 24×24 视口的描边羽毛（6 条 stroke
+路径）；`tools/emit_icon_xml.py` 把它等比放大并居中到 256×256 画布、配上纯色圆底，
+写出 `tools/icon.xml`。造型是**纯色圆底（`#A8F2CB`）+ 一枚描边羽毛（`#00210F`）**，
+没有渐变、没有浏览器外环、没有高光点。
 
 Android 的自适应图标有一个容易踩的坑：**画布 108dp，但只有中心 72dp 直径的
 圆形区域对所有遮罩形状都可见**（圆形、方形、圆角、水滴…）。原图整圆半径占满
@@ -1191,21 +1181,24 @@ Android 的自适应图标有一个容易踩的坑：**画布 108dp，但只有�
 触达**算出来，羽毛的形状/大小一改就自动重算（旧版是按外环算的，外环去掉后
 改成了按羽毛算）。
 
-### 造型与取色：与主页 logo 对齐
+### 造型：以 `tools/icon_source.svg` 为唯一事实来源
 
-早期启动图标是"**填充**羽毛 + 白色浏览器外环 + 青蓝渐变底 + 高光点"，与主页
-logo 的"**描边**羽毛 + 纯色圆底"是两套造型。现在让主页 `HomePage.kt` 成为
-**唯一事实来源**：
+早期启动图标是"**填充**羽毛 + 白色浏览器外环 + 青蓝渐变底 + 高光点"，与设计源的
+"**描边**羽毛 + 纯色圆底"是两套造型。现在造型只有一个来源：
 
-- `tools/emit_icon_xml.py` 从 `HomePage.kt` 抽出内联 SVG 的 6 条 stroke 路径，
+- `tools/emit_icon_xml.py` 从 `tools/icon_source.svg` 抽出 6 条 stroke 路径，
   等比缩放（描边宽 1.6 → 12）并居中到 256×256 画布，配上纯色圆底写出
-  `tools/icon.xml`。改主页 logo 会自动反映到启动图标，不存在两处各画一遍的漂移。
-- **外环与高光点都去掉了** —— 主页 logo 没有这两样。
-- 颜色取主页 `HomeColors` 的默认配色：圆底 `#A8F2CB`（`--pc`）、
+  `tools/icon.xml`。改设计源会自动反映到启动图标，不存在两处各画一遍的漂移。
+- **外环与高光点都去掉了** —— 设计源里没有这两样。
+- 颜色取浅色主题 `HomeColors` 的默认配色：圆底 `#A8F2CB`（`--pc`）、
   羽毛描边 `#00210F`（`--on-pc`）。
 
+> 这份路径原先内联在主页 logo 里，靠"改主页 logo 自动同步启动图标"维持唯一来源。
+> 主页改版成"时钟 + 搜索框"后不再有 logo，于是把它独立成 `tools/icon_source.svg`
+> —— 启动图标自此与主页解耦，以该文件为唯一造型来源。
+
 关于"跟随取色"要说清楚：启动图标是**静态资源**，无法在运行时读到壁纸色，所以
-底色只能取"主页在浅色主题下的那一档 primaryContainer"作为固定值。真正会随壁纸
+底色只能取"浅色主题下的那一档 primaryContainer"作为固定值。真正会随壁纸
 变色的是 Android 13+ 的**主题化图标** —— 系统读 `ic_launcher_monochrome` 单色层
 并重新着色。这两件事要分开理解，否则会误以为图标本该自己变色。
 
@@ -1218,7 +1211,7 @@ logo 的"**描边**羽毛 + 纯色圆底"是两套造型。现在让主页 `Home
 ### 生成与校验工具链
 
 ```bash
-python tools/emit_icon_xml.py          # 从 HomePage.kt 抽羽毛 -> 生成 tools/icon.xml
+python tools/emit_icon_xml.py        # icon_source.svg -> 生成 tools/icon.xml
 python tools/check_icon_svg.py         # SVG 安全区 + ASCII 预览
 python tools/gen_launcher_icon.py      # icon.xml -> 3 层 vector drawable
 python tools/make_icons.py             # 生成 API<26 的 5 档 PNG
@@ -1239,36 +1232,14 @@ python tools/verify_icon_assertions.py # 复算 LauncherIconTest 的全部断言
 
 > API 23~25 不支持自适应图标，故保留 `mipmap-*/ic_launcher.png` 位图 fallback。
 
-### 主页 logo：启动图标的唯一事实来源
+### 设计源羽毛的两条硬约束
 
-主页头部那枚圆形 logo（`HomePage.kt` 里的内联 SVG）画的正是启动图标里的那枚
-描边羽毛 —— 现在**两者是同一份造型、同一套取色**：`tools/emit_icon_xml.py` 直接从
-`HomePage.kt` 抽 SVG 路径、等比缩放后写进 `tools/icon.xml`，圆底与羽毛描边色也取
-`HomeColors` 的 `--pc` / `--on-pc`。改主页 logo 会自动反映到启动图标上，不存在
-"两处各画一遍漂移"的问题。
-
-仍存在的差异只是**画布与描边粗细**，造型与配色本身一致：
-
-| | 启动图标 | 主页 logo |
-|---|---|---|
-| 画布 | 108dp 自适应图标（安全区 72dp） | 24×24 viewBox，显示 40px |
-| 描边宽 | 12（256 画布，等比放大自主页的 1.6） | 1.6 |
-| 圆底 / 描边色 | `#A8F2CB` / `#00210F`（固定） | `--pc` / `--on-pc`（跟随动态取色） |
-
-主页 logo 本身仍守住它早先迭代出的两条硬约束：
+`tools/icon_source.svg` 的造型是早先迭代出来的，改它时要守住两条：
 
 1. **羽片必须够宽，否则羽枝线会糊成一片。** 描边宽 1.6 时，羽轴与边缘之间
    要留出 ≥ 描边宽度的空隙；实测羽片半宽 < 4 单位时三条线就并成一条白块。
 2. **羽片轮廓要用两条"开放"曲线，不能闭合成一个圈。** 闭合轮廓 + 羽轴 + 羽枝线
-   在 40px 下会读成一整块白色实心（enclose 出来的区域视觉上被填掉了）。
-
-```bash
-python tools/preview_home_mark.py      # 当前造型 -> build/home-mark*.png（200px + 40px）
-python tools/preview_home_mark.py old  # 改版前的造型，用于对照
-```
-
-> `preview_home_mark.py` 早先用品牌绿近似主页圆底、羽毛画成白色，颜色对不上；
-> 现已改成 `--pc` / `--on-pc` 的真实取色，可以直接和启动图标并排对照。
+   在小尺寸下会读成一整块白色实心（enclose 出来的区域视觉上被填掉了）。
 
 ---
 
@@ -1300,7 +1271,6 @@ python tools/preview_home_mark.py old  # 改版前的造型，用于对照
 | `tools/ascii_icons.py` | 把图标按 even-odd 扫描线填充渲染成 ASCII，编译前肉眼校验造型 |
 | `tools/import_material_icons.py` | 官方 VectorDrawable → Compose 矢量代码 |
 | `tools/emit_ling_icons.py` | 组装 `LingIcons.kt` |
-| `tools/preview_home_mark.py` | 把 `HomePage.kt` 里的主页 logo（描边线画）渲染成 PNG，终端里看不到图形时用它 |
 | `tools/preview_launcher_png.py` | 把 PNG 图标渲染成 ASCII 预览（终端里就能看构图） |
 
 ```bash
@@ -1353,7 +1323,7 @@ python tools/preview_launcher_png.py mipmap-xxxhdpi  # 预览启动图标
 > 合入前需要：`./gradlew :app:testDebugUnitTest` + 下面的真机回归。
 > （上表的 231 用例 / `HomePageTest` 19 是更早一轮的记录；此后新增
 > `InternalPageTest` 8 条、主页用例 9 条、阅读视图用例 2 条、地址栏文案用例 6 条，
-> 预期总数 260。）
+> 预期总数 256。）
 >
 > **§四.12**（主页/阅读视图的静默失效）的 6 项**已在真机验证通过**：
 >
@@ -1362,7 +1332,7 @@ python tools/preview_launcher_png.py mipmap-xxxhdpi  # 预览启动图标
 > 3. ✅ 在主页连点「主页」多次：返回键不再攒下一串同样的主页历史；
 > 4. ✅ 切到深色 → 点地址栏刷新：主页配色保持深色；
 > 5. ✅ 切标签页：主页标签标题仍是「主页」，地址栏不出现 `home.ling.invalid`；
-> 6. ✅ 横屏 / 分屏：主页 logo 与「翎」不被裁掉，内容可正常滚动。
+> 6. ✅ 横屏 / 分屏：主页内容不被裁切、可正常滚动（验证时主页还是"logo + 「翎」"，主页改版后待复验）。
 >
 > **§四.13**（无痕历史 / Cookie 策略 / 系统明暗重算 / 阅读字号）**待真机验证**：
 >
@@ -1432,7 +1402,7 @@ D LingFocus: focusWebContent host=true webview=true wvHasFocus=true hostHasFocus
 | `:app:processDebugResources` | ✅ 通过 —— AAPT2 接受新的 3 层矢量图与 5 档 PNG |
 | 生成管线幂等性 | ✅ 重跑 `emit_icon_xml` → `gen_launcher_icon` → `make_icons`，8 个产物逐字节一致 |
 | `:app:testDebugUnitTest` / `:app:assembleDebug` | ✅ 通过（修掉下面两个编译错误之后） |
-| 主页 logo 造型 | ✅ 用 `tools/preview_home_mark.py` 把 `HomePage.kt` 里的内联 SVG 描边渲染成 PNG 逐轮比对（该 SVG 是描边线画，`svg_preview.py` 只支持填充图形，渲染不了它） |
+| 设计源羽毛造型 | ✅ 用 `tools/check_icon_svg.py` 预览并逐轮比对 `icon.xml`（描边线画，`svg_preview.py` 现已支持描边与填充） |
 
 顺带修掉两处让工程编译不过的错误（与造型无关，但会挡住任何真机验证）：
 

@@ -87,7 +87,7 @@ class InternalPageTest {
     @Test
     fun `阅读视图拿不到原文地址时返回 null`() {
         // 正文缓存不落盘：重启后 ling://reader 的原文地址就是拿不到的。
-        // 这时绝不能退回合成地址 —— 那会存下一个点不开的书签（还会混进主页快捷入口）。
+        // 这时绝不能退回合成地址 —— 那会存下一个点不开的书签。
         assertNull("缓存丢失", InternalPage.externalUrl(ReaderPage.URL, null))
         assertNull("原文地址是空白", InternalPage.externalUrl(ReaderPage.URL, "   "))
     }

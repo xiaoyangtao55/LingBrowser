@@ -1,16 +1,14 @@
-"""把主页的描边羽毛（HomePage.kt 里的内联 SVG）重排进启动图标，写出 tools/icon.xml。
+"""把设计源羽毛（tools/icon_source.svg）重排进启动图标，写出 tools/icon.xml。
 
-主页 logo 的构成：**纯色圆底（primaryContainer）+ 一枚描边羽毛
-（onPrimaryContainer 描边）**。启动图标现在完全对齐这套造型：
-纯色圆底（取主页的 primaryContainer 色）+ 同一枚描边羽毛，**去掉旧版的外环**。
+造型：**纯色圆底（primaryContainer）+ 一枚描边羽毛（onPrimaryContainer 描边）**，
+没有外环、没有高光点。
 
-主页 logo 里的颜色来自 Material You 动态取色（`--pc` / `--on-pc`），
-而启动图标的位图/矢量资源是静态的、无法在运行时读壁纸色。所以这里用
-**浅色主题下的主页配色**作为固定值；真正的"跟随取色"由 Android 13+
-的主题化图标（monochrome 单色层）承担 —— 系统按壁纸给单色层重新着色。
+圆底与描边色取自浅色主题的默认配色（`--pc` / `--on-pc`），写成固定值 ——
+启动图标的位图/矢量资源是静态的、无法在运行时读壁纸色；真正的"跟随取色"
+由 Android 13+ 的主题化图标（monochrome 单色层）承担，系统按壁纸给单色层重新着色。
 
 流程：
-  - 从 HomePage.kt 读内联 SVG 的 6 条 stroke 路径（24x24 视口，stroke-width 1.6）
+  - 从 tools/icon_source.svg 读 6 条 stroke 路径（24x24 视口，stroke-width 1.6）
   - 等比缩放到 256x256，羽毛包围盒中心对齐画布中心，描边宽随缩放等比放大
   - 写成 stroke 路径 + 纯色圆底
 """
@@ -20,21 +18,18 @@ import sys
 import math
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-KOTLIN = os.path.join(
-    os.path.dirname(HERE),
-    "app", "src", "main", "java", "com", "ling", "browser", "web", "HomePage.kt",
-)
+SOURCE = os.path.join(HERE, "icon_source.svg")
 OUT = os.path.join(HERE, "icon.xml")
 
 # ---------------------------------------------------------------- 颜色
-# 取自 HomePage.kt 的 HomeColors 默认值（浅色主题），与主页 logo 完全一致
-BG_COLOR = "#A8F2CB"          # primaryContainer —— 主页圆底色
-FG_COLOR = "#00210F"          # onPrimaryContainer —— 主页羽毛描边色
+# 取自浅色主题的默认配色（HomeColors 默认值）
+BG_COLOR = "#A8F2CB"          # primaryContainer —— 圆底色
+FG_COLOR = "#00210F"          # onPrimaryContainer —— 羽毛描边色
 
 # ---------------------------------------------------------------- 画布
 VB = 256.0                    # 视口边长
 CENTER = VB / 2               # 画布中心 (128,128)
-HOME_STROKE = 1.6             # 主页羽毛的 stroke-width（24 视口单位）
+HOME_STROKE = 1.6             # 设计源羽毛的 stroke-width（24 视口单位）
 
 # 羽毛（含描边）离画布中心的目标距离。画布半径 128，自适应图标那边还会
 # 再按安全区缩一次（见 gen_launcher_icon.py 的 FG），这里给的是"主稿"尺寸：
@@ -43,11 +38,11 @@ FEATHER_REACH = 90.0
 
 
 def extract_feather_paths():
-    """从 HomePage.kt 抽出主页羽毛的所有 <path d="...">。"""
-    src = open(KOTLIN, encoding="utf-8").read()
+    """从 tools/icon_source.svg 抽出羽毛的所有 <path d="...">。"""
+    src = open(SOURCE, encoding="utf-8").read()
     m = re.search(r"<svg\b.*?</svg>", src, re.S)
     if not m:
-        raise SystemExit("HomePage.kt 里找不到 <svg>")
+        raise SystemExit("tools/icon_source.svg 里找不到 <svg>")
     return re.findall(r'<path\s+d="([^"]+)"', m.group(0))
 
 
@@ -129,7 +124,7 @@ def transform(d, scale, tx, ty):
 def main():
     paths = extract_feather_paths()
     if not paths:
-        raise SystemExit("主页羽毛没有 path")
+        raise SystemExit("设计源羽毛没有 path")
 
     allpts = [p for d in paths for p in flatten(d)]
     xs = [p[0] for p in allpts]
@@ -155,14 +150,14 @@ def main():
 
     xml = f'''<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
   <!--
-    与主页 logo 完全同款：纯色圆底（primaryContainer）+ 描边羽毛
-    （onPrimaryContainer）。由 tools/emit_icon_xml.py 从 HomePage.kt 生成，请勿手改。
-    颜色取主页浅色主题的默认配色；"跟随取色"由 Android 13+ 主题化图标承担。
+    纯色圆底（primaryContainer）+ 描边羽毛（onPrimaryContainer）。
+    由 tools/emit_icon_xml.py 从 tools/icon_source.svg 生成，请勿手改。
+    颜色取浅色主题的默认配色；"跟随取色"由 Android 13+ 主题化图标承担。
   -->
   <circle cx="128" cy="128" r="128" fill="{BG_COLOR}"/>
 
   <!--
-    羽毛：与主页 logo 同一枚描边羽毛（6 条 stroke 路径，等比放大 {scale:.4f} 倍）。
+    羽毛：与设计源同一枚描边羽毛（6 条 stroke 路径，等比放大 {scale:.4f} 倍）。
     fill=none + round cap/join，无外环、无高光点。
   -->
 {feather}
@@ -173,9 +168,9 @@ def main():
         fh.write(xml)
 
     reach = far0 * scale + stroke / 2
-    print(f"主页羽毛 {len(paths)} 条 stroke 路径")
-    print(f"纯色圆底 {BG_COLOR}（主页 primaryContainer），无外环")
-    print(f"羽毛描边色 {FG_COLOR}（主页 onPrimaryContainer）")
+    print(f"设计源羽毛 {len(paths)} 条 stroke 路径")
+    print(f"纯色圆底 {BG_COLOR}（primaryContainer），无外环")
+    print(f"羽毛描边色 {FG_COLOR}（onPrimaryContainer）")
     print(f"缩放系数 = {scale:.4f}，stroke-width = {stroke:.2f}")
     print(f"羽毛包围盒 {max(xs)-min(xs):.1f} x {max(ys)-min(ys):.1f}（24 视口）")
     print(f"羽毛描边外沿离画布中心 {reach:.1f}  (画布半径 {CENTER:.0f}，占比 {reach/CENTER*100:.0f}%)")

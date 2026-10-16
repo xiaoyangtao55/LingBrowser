@@ -351,7 +351,7 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
      * 当前标签「可收藏」的地址与标题。
      *
      * 阅读视图必须换成**原文地址**：它的逻辑地址是合成的 `ling://reader`，
-     * 收藏下来就是一个点不开的书签（还会混进主页快捷入口）。
+     * 收藏下来就是一个点不开的书签。
      * 主页则没有收藏价值（返回 null）。
      */
     private fun bookmarkTarget(): BookmarkTarget? {

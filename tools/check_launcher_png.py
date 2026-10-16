@@ -1,6 +1,6 @@
 """用数字校验生成的 PNG 图标（因为我无法直接查看图片）。
 
-图标现在与主页 logo 同款：**纯色圆底（primaryContainer）+ 描边羽毛
+图标造型取自 tools/icon_source.svg：**纯色圆底（primaryContainer）+ 描边羽毛
 （onPrimaryContainer），无外环、无渐变**。检查：
 
   - 圆形外观：四角是否透明（圆形遮罩生效）
@@ -24,7 +24,7 @@ SIZES = {
     "mipmap-xxxhdpi": 192,
 }
 
-# 主页 logo 的取色（HomeColors 默认值，浅色主题）
+# 设计源的取色（HomeColors 默认值，浅色主题）
 BG = (0xA8, 0xF2, 0xCB)      # primaryContainer
 FG = (0x00, 0x21, 0x0F)      # onPrimaryContainer
 

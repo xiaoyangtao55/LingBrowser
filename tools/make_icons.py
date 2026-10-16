@@ -2,7 +2,7 @@
 
 API 23~25（Android 6~7）不支持自适应图标，只能给位图。
 这里绘制与 tools/icon.xml 完全一致的造型：
-  纯色圆底（主页 primaryContainer）+ 描边羽毛（与主页 logo 同款），无外环。
+  纯色圆底（浅色主题 primaryContainer）+ 描边羽毛（与设计源同款），无外环。
 
 传统图标没有遮罩裁切，所以整圆可以铺满画布（与自适应图标的背景层一致），
 但内容仍需留出内边距，否则贴边会显得拥挤。
@@ -56,9 +56,9 @@ def draw_icon(size):
     img.paste(Image.new("RGB", (px, px), hex_rgb(bg["fill"])), (0, 0), mask)
     d = ImageDraw.Draw(img)
 
-    # ---- 羽毛（描边路径，与主页 logo 一致）----
+    # ---- 羽毛（描边路径，与设计源一致）----
     # 每条 path 采样成点列后用圆角线描出来，等价于 stroke-linecap/join="round"。
-    # 描边色取自每条的 stroke（主页的 onPrimaryContainer）。
+    # 描边色取自每条的 stroke（浅色主题的 onPrimaryContainer）。
     for p in feather:
         rgb = hex_rgb(p["stroke"])
         sw_px = max(1, int(round(s(p["sw"]))))

@@ -1,6 +1,6 @@
 """把 tools/icon.xml 转成 Android 自适应图标的三层 vector drawable。
 
-造型与主页 logo 对齐（见 tools/emit_icon_xml.py）：
+造型取自设计源 tools/icon_source.svg（见 tools/emit_icon_xml.py）：
   - background: 纯色圆底（主页 primaryContainer）铺满 108dp 画布，
     会被遮罩裁切 —— 正合预期
   - foreground: 一枚描边羽毛（无外环），缩到中心 72dp 安全区内，任何遮罩都不裁
@@ -111,8 +111,8 @@ def main():
 
     feather = paths                                            # 描边羽毛（全部 stroke 路径）
 
-    # 纯色圆底（主页 primaryContainer）：取 icon.xml 里那个无描边的圆的填充色。
-    # 旧版是渐变底 + 白色外环；现在与主页 logo 对齐 —— 纯色圆底 + 描边羽毛。
+    # 纯色圆底（浅色主题 primaryContainer）：取 icon.xml 里那个无描边的圆的填充色。
+    # 旧版是渐变底 + 白色外环；现在取自设计源 —— 纯色圆底 + 描边羽毛。
     bg_color = next(c["fill"] for c in circles if c["fill"] and not c["stroke"])
     fg_stroke = feather[0]["stroke"].upper()
 
@@ -131,7 +131,7 @@ def main():
     bg_xml = f'''<?xml version="1.0" encoding="utf-8"?>
 <!--
   「翎」启动图标 · 背景层
-  纯色圆底（{bg_color}，取自主页 logo 的 primaryContainer），铺满 108dp 画布。
+  纯色圆底（{bg_color}，取自浅色主题的 primaryContainer），铺满 108dp 画布。
   自适应图标的外侧会被遮罩裁切，这正是背景层期望的行为 ——
   「铺满 + 遮罩裁切」在各遮罩形状下都呈现为纯色圆/方/圆角底。
   由 tools/gen_launcher_icon.py 生成，请勿手改。
@@ -149,7 +149,7 @@ def main():
 '''
 
     # ---------------- foreground ----------------
-    # 只有描边羽毛（与主页 logo 一致）：fill=none + 主页取来的描边色
+    # 只有描边羽毛（与设计源一致）：fill=none + 取自浅色主题的描边色
     # + round cap/join。必须逐条输出 —— 只取第一条会丢掉羽轴和羽枝缝。
     feather_d = [
         path_to_androiddata(p["d"], matrix=p.get("matrix"), transform="fg")
@@ -169,14 +169,14 @@ def main():
             for d in ds
         )
 
-    # 前景层用主页的羽毛描边色；单色层一律白色（系统会按壁纸重新着色）
+    # 前景层用设计源的羽毛描边色；单色层一律白色（系统会按壁纸重新着色）
     feather_xml = feather_block(feather_d, fg_stroke)
     mono_feather_xml = feather_block(feather_d, "#FFFFFF")
 
     fg_xml = f'''<?xml version="1.0" encoding="utf-8"?>
 <!--
   「翎」启动图标 · 前景层
-  只有一枚描边羽毛（与主页 logo 同款），**无外环**。
+  只有一枚描边羽毛（取自 tools/icon_source.svg），**无外环**。
   整体已缩放到中心 72dp 安全区内（缩放系数 {FG:.4f}，留 8% 余量），
   因此无论 launcher 用圆形、方形还是圆角遮罩都不会被裁切。
   由 tools/gen_launcher_icon.py 生成，请勿手改。

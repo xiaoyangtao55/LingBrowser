@@ -8,8 +8,8 @@ import java.io.File
 /**
  * 启动图标资源的回归测试。
  *
- * 图标造型现在与主页 logo 完全一致：**纯色圆底（主页 primaryContainer）
- * + 一笔描边羽毛（主页 onPrimaryContainer），没有外环、没有渐变**。
+ * 图标造型取自设计源 tools/icon_source.svg：**纯色圆底（浅色主题 primaryContainer）
+ * + 一笔描边羽毛（浅色主题 onPrimaryContainer），没有外环、没有渐变**。
  * 主题化图标（monochrome 单色层）由 Android 13+ 按壁纸重新着色。
  *
  * 图标是"改一次就可能踩坑"的资源：自适应图标只保证中心 72/108 可见，
@@ -146,7 +146,7 @@ class LauncherIconTest {
     @Test
     fun `背景层是纯色圆底并铺满画布`() {
         // 背景必须铺满，否则遮罩裁切后会露出透明边。
-        // 已从"渐变"改为"纯色"（与主页 logo 的 primaryContainer 一致）。
+        // 已从"渐变"改为"纯色"（与浅色主题的 primaryContainer 一致）。
         val xml = drawable("ic_launcher_background.xml").readText()
         assertFalse("背景层不应再用渐变", xml.contains("<gradient"))
         assertTrue("背景层应有纯色填充", xml.contains("android:fillColor"))
@@ -154,7 +154,7 @@ class LauncherIconTest {
     }
 
     @Test
-    fun `背景色取自主页 logo 的 primaryContainer`() {
+    fun `背景色取自浅色主题的 primaryContainer`() {
         // 与 HomePage.kt 的 --pc（HomeColors.primaryContainer 默认值）保持一致
         val xml = drawable("ic_launcher_background.xml").readText()
         assertTrue("圆底应为 #A8F2CB（主页 primaryContainer）", xml.contains("#A8F2CB"))
@@ -165,7 +165,7 @@ class LauncherIconTest {
         val xml = drawable("ic_launcher_foreground.xml").readText()
         assertFalse("外环已去掉，不应再有圆弧", xml.contains("a30.19"))
         assertTrue(
-            "羽毛应用主页的描边色 #00210F",
+            "羽毛应用设计源的描边色 #00210F",
             xml.contains("android:strokeColor=\"#00210F\""),
         )
         assertTrue("羽毛 fill 应为空（描边线画）", xml.contains("android:fillColor=\"#00000000\""))
@@ -175,7 +175,7 @@ class LauncherIconTest {
 
     @Test
     fun `前景层羽毛是多条描边路径`() {
-        // 描边羽毛（与主页 logo 一致）由多条 stroke 路径组成：
+        // 描边羽毛（与设计源一致）由多条 stroke 路径组成：
         // 3 条羽片/羽轴曲线 + 3 条羽枝缝线段。只取一条会丢掉羽枝缝，
         // 羽毛就退化成一片叶子。
         val xml = drawable("ic_launcher_foreground.xml").readText()

@@ -1,13 +1,13 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
   <!--
-    与主页 logo 完全同款：纯色圆底（primaryContainer）+ 描边羽毛
-    （onPrimaryContainer）。由 tools/emit_icon_xml.py 从 HomePage.kt 生成，请勿手改。
-    颜色取主页浅色主题的默认配色；"跟随取色"由 Android 13+ 主题化图标承担。
+    纯色圆底（primaryContainer）+ 描边羽毛（onPrimaryContainer）。
+    由 tools/emit_icon_xml.py 从 tools/icon_source.svg 生成，请勿手改。
+    颜色取浅色主题的默认配色；"跟随取色"由 Android 13+ 主题化图标承担。
   -->
   <circle cx="128" cy="128" r="128" fill="#A8F2CB"/>
 
   <!--
-    羽毛：与主页 logo 同一枚描边羽毛（6 条 stroke 路径，等比放大 7.5029 倍）。
+    羽毛：与设计源同一枚描边羽毛（6 条 stroke 路径，等比放大 7.5029 倍）。
     fill=none + round cap/join，无外环、无高光点。
   -->
   <path fill="none" stroke="#00210F" stroke-width="12.00" stroke-linecap="round" stroke-linejoin="round"

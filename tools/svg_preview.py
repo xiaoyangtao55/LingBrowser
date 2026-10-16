@@ -315,7 +315,7 @@ def render(items, grad, view, W, ss=SS, bg=None):
                              else hex_rgb(it["fill"])) + (int(255 * it["opacity"]),)
                 else:
                     # 描边路径（fill=none）：判断点到各采样线段的距离是否落在
-                    # stroke-width/2 内。用于描边羽毛（与主页 logo 一致）。
+                    # stroke-width/2 内。用于描边羽毛（见 tools/icon_source.svg）。
                     if it["stroke"]:
                         hit = False
                         half = it["sw"] / 2

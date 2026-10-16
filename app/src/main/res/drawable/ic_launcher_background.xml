@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
   「翎」启动图标 · 背景层
-  纯色圆底（#A8F2CB，取自主页 logo 的 primaryContainer），铺满 108dp 画布。
+  纯色圆底（#A8F2CB，取自浅色主题的 primaryContainer），铺满 108dp 画布。
   自适应图标的外侧会被遮罩裁切，这正是背景层期望的行为 ——
   「铺满 + 遮罩裁切」在各遮罩形状下都呈现为纯色圆/方/圆角底。
   由 tools/gen_launcher_icon.py 生成，请勿手改。

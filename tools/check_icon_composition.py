@@ -1,6 +1,6 @@
 """量化分析：纯色圆底 + 描边羽毛的构图是否协调。
 
-启动图标现在与主页 logo 同款：**纯色圆底（primaryContainer）+ 描边羽毛
+启动图标造型取自 tools/icon_source.svg：**纯色圆底（primaryContainer）+ 描边羽毛
 （onPrimaryContainer），没有外环**。这里用数字确认：底色圆确实是纯色、
 没有残留外环、羽毛没有越出圆底、占比也在合理区间 —— 避免"看着差不多"就提交。
 """
