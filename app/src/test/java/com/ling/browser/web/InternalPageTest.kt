@@ -46,6 +46,40 @@ class InternalPageTest {
     }
 
     @Test
+    fun `唯一入口 typeOf 分出主页与阅读视图`() {
+        assertEquals(InternalPage.Type.HOME, InternalPage.typeOf(HomePage.URL))
+        assertEquals("baseUrl 同样", InternalPage.Type.HOME, InternalPage.typeOf(HomePage.BASE_URL))
+        assertEquals("遗留的 about:home 一并认", InternalPage.Type.HOME, InternalPage.typeOf("about:home"))
+        assertEquals(InternalPage.Type.READER, InternalPage.typeOf(ReaderPage.URL))
+        assertEquals(InternalPage.Type.READER, InternalPage.typeOf(ReaderPage.BASE_URL))
+        assertNull("普通页面不是内部页", InternalPage.typeOf("https://example.com"))
+        assertNull("空地址不是内部页", InternalPage.typeOf(null))
+        assertNull(InternalPage.typeOf("   "))
+    }
+
+    @Test
+    fun `reload 后的 data 形式靠逻辑地址线索区分主页与阅读视图`() {
+        val data = InternalPage.DATA_HTML_PREFIX + ";charset=utf-8;base64,PGh0bWw+"
+        // 单看地址串分不出是哪种内部页 —— 必须靠 [logicalUrl] 线索，否则刷新一次就"不再是内部页"
+        assertNull("没有线索就不猜", InternalPage.typeOf(data))
+        assertEquals("线索是主页", InternalPage.Type.HOME, InternalPage.typeOf(data, HomePage.URL))
+        assertEquals("线索是阅读视图", InternalPage.Type.READER, InternalPage.typeOf(data, ReaderPage.URL))
+        assertTrue(InternalPage.isHomeDocument(data, HomePage.URL))
+        assertFalse(InternalPage.isHomeDocument(data, ReaderPage.URL))
+        assertTrue(InternalPage.isReaderDocument(data, ReaderPage.URL))
+        assertEquals(HomePage.URL, InternalPage.logicalUrl(data, HomePage.URL))
+        assertNull("无线索时保留原状态，绝不写回这串 base64", InternalPage.logicalUrl(data))
+    }
+
+    @Test
+    fun `无线索的 data 形式在夜间兜底里按内部页处理`() {
+        val data = InternalPage.DATA_HTML_PREFIX + ";charset=utf-8;base64,PGh0bWw+"
+        // injectDarkMode 用单参调用，不能把内部页文档反色 —— 反向误判只是少暗化一个页面，无害
+        assertTrue(InternalPage.isInternal(data))
+        assertFalse("带了非内部页线索则不算", InternalPage.isInternal(data, "https://example.com"))
+    }
+
+    @Test
     fun `baseUrl 归一化回逻辑地址`() {
         assertEquals("主页 baseUrl", HomePage.URL, InternalPage.logicalUrl(HomePage.BASE_URL))
         assertEquals("主页逻辑地址本身", HomePage.URL, InternalPage.logicalUrl(HomePage.URL))

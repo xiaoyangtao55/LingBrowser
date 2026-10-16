@@ -981,7 +981,9 @@ webViews[tab.id]?.let { loadHome(tab.id, it) }   // WebView 不存在就静默�
   会变成 `https://home.ling.invalid/`，标题被页面自己的 `<title>翎</title>`
   盖成「翎」。现在统一过 `InternalPage.logicalUrl()` 归一化，内部页标题保持不变。
 
-判定收敛在 `InternalPage`（`isInternal` / `logicalUrl`）一处，日后新增内部页只改它；
+判定收敛在 `InternalPage` 一处 —— 唯一入口 `typeOf` 处理全部地址形态，
+`isInternal` / `isHomeDocument` / `isReaderDocument` / `logicalUrl` 都由它派生，
+日后新增内部页只改它；
 `check_reader.py` 新增 5 条判据盯住上面这些**调用点**（要构造 WebView，单测覆盖不到），
 `check_home_html.py` 新增布局判据，`HomePageTest` / `InternalPageTest` 覆盖纯逻辑。
 
@@ -1323,7 +1325,7 @@ python tools/preview_launcher_png.py mipmap-xxxhdpi  # 预览启动图标
 > 合入前需要：`./gradlew :app:testDebugUnitTest` + 下面的真机回归。
 > （上表的 231 用例 / `HomePageTest` 19 是更早一轮的记录；此后新增
 > `InternalPageTest` 8 条、主页用例 9 条、阅读视图用例 2 条、地址栏文案用例 6 条，
-> 预期总数 256。）
+> 预期总数 259。）
 >
 > **§四.12**（主页/阅读视图的静默失效）的 6 项**已在真机验证通过**：
 >
