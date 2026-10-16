@@ -12,6 +12,9 @@ import org.junit.Test
  * 这段逻辑修的是一个真实缺陷：早期版本把 `about:home` 直接交给 WebView，
  * 而 WebView 只认识 `about:blank`，于是 `onReceivedError` 被触发、主页白屏。
  * 现在主页由原生渲染，这里把「哪些 URL 算主页」的规则固化下来。
+ *
+ * 另外，主页内容已极简到**只有时钟 + 搜索框**（无 logo / 品牌标题 / 快捷入口），
+ * 本文件也把这条约束固化下来 —— 免得日后又悄悄加回一堆元素。
  */
 class HomePageTest {
 
@@ -84,22 +87,46 @@ class HomePageTest {
         assertTrue("逻辑地址仍是 ling://", HomePage.URL.startsWith("ling://"))
     }
 
+    // ------------------------------------------------------------ HTML 结构
+
+    /** 用一组固定配色生成主页 HTML，供结构类断言复用。 */
+    private fun sampleHtml(
+        dark: Boolean = false,
+        clock: String = "",
+    ) = HomePage.html(
+        background = "#FFFBFE",
+        onBackground = "#1C1B1F",
+        primaryContainer = "#A8F2CB",
+        onPrimaryContainer = "#00210F",
+        dark = dark,
+        clock = clock,
+    )
+
     @Test
     fun `生成的 HTML 是完整文档`() {
-        val html = HomePage.html(
-            background = "#FFFFFF",
-            onBackground = "#000000",
-            primary = "#1B6C4B",
-            onPrimary = "#FFFFFF",
-            primaryContainer = "#A8F2CB",
-            onPrimaryContainer = "#00210F",
-            dark = false,
-        )
+        val html = sampleHtml()
         assertTrue(html.startsWith("<!DOCTYPE html>"))
         assertTrue(html.contains("</html>"))
         assertTrue(html.contains("charset=\"utf-8\""))
-        // 深色模式适配
-        assertTrue("应声明 color-scheme", html.contains("viewport"))
+        assertTrue("应声明 viewport", html.contains("viewport"))
+    }
+
+    @Test
+    fun `主页只保留时钟与搜索框`() {
+        // 极简重构的核心约束：主页只该有「时间 + 搜索框」两样东西。
+        // 这条用例就是防止日后又把 logo / 品牌标题 / 快捷入口加回来。
+        val html = sampleHtml()
+        assertTrue("应有时钟节点", html.contains("id=\"${HomePage.CLOCK_ID}\""))
+        assertTrue("应有搜索框", html.contains("class=\"search\""))
+        assertFalse("不应再有品牌标题", html.contains("<h1"))
+        assertFalse("不应再有品牌图标", html.contains("class=\"mark\""))
+        assertFalse("不应再有快捷入口区块", html.contains("class=\"links\""))
+    }
+
+    @Test
+    fun `时钟文本被注入到主页`() {
+        val html = sampleHtml(clock = "09:41")
+        assertTrue("初始时间应写进时钟节点", html.contains(">09:41<"))
     }
 
     @Test
@@ -107,30 +134,20 @@ class HomePageTest {
         val html = HomePage.html(
             background = "#123456",
             onBackground = "#ABCDEF",
-            primary = "#1B6C4B",
-            onPrimary = "#FFFFFF",
             primaryContainer = "#A8F2CB",
             onPrimaryContainer = "#00210F",
             dark = true,
         )
         assertTrue("背景色应注入", html.contains("--bg: #123456"))
         assertTrue("前景色应注入", html.contains("--fg: #ABCDEF"))
-        assertTrue("主色应注入", html.contains("--primary: #1B6C4B"))
         assertTrue("容器色应注入", html.contains("--pc: #A8F2CB"))
+        assertTrue("容器文字色应注入", html.contains("--on-pc: #00210F"))
     }
 
     @Test
     fun `每个 CSS 变量都被真正使用`() {
         // 定义了却没人用，说明主题色没生效（曾经 --primary 就是这样漏掉的）
-        val html = HomePage.html(
-            background = "#FFFBFE",
-            onBackground = "#1C1B1F",
-            primary = "#1B6C4B",
-            onPrimary = "#FFFFFF",
-            primaryContainer = "#A8F2CB",
-            onPrimaryContainer = "#00210F",
-            dark = false,
-        )
+        val html = sampleHtml()
         val defined = Regex("(--[\\w-]+)\\s*:").findAll(html).map { it.groupValues[1] }.toSet()
         val used = Regex("var\\((--[\\w-]+)").findAll(html).map { it.groupValues[1] }.toSet()
         assertEquals("有变量定义了但没被使用", emptySet<String>(), defined - used)
@@ -141,123 +158,26 @@ class HomePageTest {
     fun `SVG 不在表现属性里使用 CSS 变量`() {
         // stroke="var(--x)" 作为表现属性是非法的，浏览器不会解析，
         // 图标会变成透明 —— 必须通过 CSS 规则设置。
-        val html = HomePage.html(
-            background = "#FFFBFE",
-            onBackground = "#1C1B1F",
-            primary = "#1B6C4B",
-            onPrimary = "#FFFFFF",
-            primaryContainer = "#A8F2CB",
-            onPrimaryContainer = "#00210F",
-            dark = false,
-        )
-        Regex("<(?:svg|path|circle|rect|line|polyline|g)\\b[^>]*>")
-            .findAll(html)
-            .forEach { m ->
-                assertFalse(
-                    "SVG 表现属性里不能出现 var()：${m.value.take(70)}",
-                    m.value.contains("var(--"),
-                )
-            }
-    }
-
-    @Test
-    fun `书签快捷入口被渲染为链接`() {
-        val html = HomePage.html(
-            background = "#FFFFFF",
-            onBackground = "#000000",
-            primary = "#1B6C4B",
-            onPrimary = "#FFFFFF",
-            primaryContainer = "#A8F2CB",
-            onPrimaryContainer = "#00210F",
-            dark = false,
-            links = listOf("百度" to "https://www.baidu.com", "知乎" to "https://zhihu.com"),
-        )
-        assertTrue(html.contains("href=\"https://www.baidu.com\""))
-        assertTrue(html.contains("href=\"https://zhihu.com\""))
-        assertTrue("应显示书签标题", html.contains("百度"))
-    }
-
-    @Test
-    fun `无书签时不渲染快捷入口区块`() {
-        val html = HomePage.html(
-            background = "#FFFFFF",
-            onBackground = "#000000",
-            primary = "#1B6C4B",
-            onPrimary = "#FFFFFF",
-            primaryContainer = "#A8F2CB",
-            onPrimaryContainer = "#00210F",
-            dark = false,
-            links = emptyList(),
-        )
-        assertFalse("没有书签就不该出现快捷入口容器", html.contains("class=\"links\""))
-    }
-
-    @Test
-    fun `书签标题里的 HTML 特殊字符被转义`() {
-        // 不转义的话，标题里的引号会截断 href 属性，破坏页面结构
-        val html = HomePage.html(
-            background = "#FFFFFF",
-            onBackground = "#000000",
-            primary = "#1B6C4B",
-            onPrimary = "#FFFFFF",
-            primaryContainer = "#A8F2CB",
-            onPrimaryContainer = "#00210F",
-            dark = false,
-            links = listOf(
-                """<script>alert("xss")</script>""" to "https://example.com",
-            ),
-        )
-        assertFalse("脚本标签必须被转义", html.contains("<script>alert"))
-        assertTrue("应输出转义后的实体", html.contains("&lt;script&gt;"))
-    }
-
-    @Test
-    fun `书签数量被限制为 8 个`() {
-        val many = (1..20).map { "站点$it" to "https://s$it.example.com" }
-        val html = HomePage.html(
-            background = "#FFFFFF",
-            onBackground = "#000000",
-            primary = "#1B6C4B",
-            onPrimary = "#FFFFFF",
-            primaryContainer = "#A8F2CB",
-            onPrimaryContainer = "#00210F",
-            dark = false,
-            links = many,
-        )
-        assertTrue("第 8 个应存在", html.contains("href=\"https://s8.example.com\""))
-        assertFalse("第 9 个应被截断", html.contains("href=\"https://s9.example.com\""))
-    }
-
-    @Test
-    fun `空标题时退回显示 URL`() {
-        val html = HomePage.html(
-            background = "#FFFFFF",
-            onBackground = "#000000",
-            primary = "#1B6C4B",
-            onPrimary = "#FFFFFF",
-            primaryContainer = "#A8F2CB",
-            onPrimaryContainer = "#00210F",
-            dark = false,
-            links = listOf("" to "https://example.com"),
-        )
-        assertTrue("空标题应退回 URL 文本", html.contains("example.com"))
+        sampleHtml().let { html ->
+            Regex("<(?:svg|path|circle|rect|line|polyline|g)\\b[^>]*>")
+                .findAll(html)
+                .forEach { m ->
+                    assertFalse(
+                        "SVG 表现属性里不能出现 var()：${m.value.take(70)}",
+                        m.value.contains("var(--"),
+                    )
+                }
+        }
     }
 
     @Test
     fun `主页不引用任何外部资源`() {
         // 离线可用是硬要求：不能出现 http(s) 形式的资源引用
-        val html = HomePage.html(
-            background = "#FFFFFF",
-            onBackground = "#000000",
-            primary = "#1B6C4B",
-            onPrimary = "#FFFFFF",
-            primaryContainer = "#A8F2CB",
-            onPrimaryContainer = "#00210F",
-            dark = false,
-        )
+        val html = sampleHtml()
         assertFalse("不应有 <link> 外链", html.contains("<link"))
         assertFalse("不应有 <script src>", html.contains("<script src"))
         assertFalse("不应有远程图片", html.contains("<img"))
+        assertFalse("不应内嵌 <script>（主页是零脚本 HTML）", html.contains("<script"))
     }
 
     @Test
@@ -265,20 +185,11 @@ class HomePageTest {
         // 回归用例：早期版本把这段逻辑写成 prefersDarkCss() 函数却从未调用，
         // 于是 dark 参数完全不起作用，深色模式下滚动条仍是白的。
         // 现在直接内联到 :root，这里断言它真的出现在了 HTML 里。
-        val dark = HomePage.html(
-            background = "#111412", onBackground = "#E1E3DF",
-            primary = "#7EDBAE", onPrimary = "#00391F",
-            primaryContainer = "#005231", onPrimaryContainer = "#A8F2CB",
-            dark = true,
+        assertTrue(
+            "深色模式应写入 color-scheme: dark",
+            sampleHtml(dark = true).contains("color-scheme: dark"),
         )
-        assertTrue("深色模式应写入 color-scheme: dark", dark.contains("color-scheme: dark"))
-
-        val light = HomePage.html(
-            background = "#FBFDF8", onBackground = "#191C1A",
-            primary = "#1B6C4B", onPrimary = "#FFFFFF",
-            primaryContainer = "#A8F2CB", onPrimaryContainer = "#00210F",
-            dark = false,
-        )
+        val light = sampleHtml(dark = false)
         assertTrue("浅色模式应写入 color-scheme: light", light.contains("color-scheme: light"))
         assertFalse("浅色不应出现 dark 声明", light.contains("color-scheme: dark"))
     }
@@ -289,7 +200,6 @@ class HomePageTest {
         // 否则页面仍是白底黑字，只是滚动条变深了而已。
         val html = HomePage.html(
             background = "#111412", onBackground = "#E1E3DF",
-            primary = "#7EDBAE", onPrimary = "#00391F",
             primaryContainer = "#005231", onPrimaryContainer = "#A8F2CB",
             dark = true,
         )
@@ -297,32 +207,19 @@ class HomePageTest {
         assertTrue("文字色应注入 --fg", html.contains("--fg: #E1E3DF"))
     }
 
-    // ---- 原地刷新（themeUpdateJs / linksHtml）----
-
     @Test
-    fun `linksHtml 生成快捷入口且与 html 内联一致`() {
-        val links = listOf(
-            "示例" to "https://example.com",
-            "" to "https://blank-title.com",
+    fun `body 不固定高度以免内容溢出时顶部被裁掉`() {
+        val html = sampleHtml()
+        // height:100% + flex 居中：内容比视口高时（横屏/分屏/小屏 + 大号时钟）
+        // 溢出的那部分会被顶到滚动区**上方**，滚不上去 —— 时钟与搜索框被裁掉。
+        assertTrue("body 应使用 min-height: 100%", html.contains("min-height: 100%"))
+        assertFalse(
+            "body 不应固定 height:100%",
+            Regex("""body\s*\{[^}]*?(?<!min-)height:\s*100%""").containsMatchIn(html),
         )
-        val fragment = HomePage.linksHtml(links)
-        assertTrue("应含 class=links", fragment.contains("""<div class="links" id="${HomePage.QUICK_LINKS_ID}">"""))
-        assertTrue("应含第一个书签地址", fragment.contains("https://example.com"))
-        assertTrue("空标题退回 URL", fragment.contains("blank-title.com"))
-
-        // 内联进 html 与单独生成必须一致，否则"完整渲染"与"原地刷新"会不同步
-        val full = HomePage.html(
-            background = "#FFF", onBackground = "#000", primary = "#1B6C4B",
-            onPrimary = "#FFF", primaryContainer = "#A8F2CB",
-            onPrimaryContainer = "#00210F", dark = false, links = links,
-        )
-        assertTrue("html 应内联同样的快捷入口片段", full.contains(fragment))
     }
 
-    @Test
-    fun `linksHtml 空书签返回空串`() {
-        assertEquals("", HomePage.linksHtml(emptyList()))
-    }
+    // ---- 原地刷新（themeUpdateJs / clockJs）----
 
     @Test
     fun `themeUpdateJs 写入主题变量与 color-scheme`() {
@@ -330,7 +227,7 @@ class HomePageTest {
             background = "#111412", onBackground = "#E1E3DF",
             primary = "#7EDBAE", onPrimary = "#00391F",
             primaryContainer = "#005231", onPrimaryContainer = "#A8F2CB",
-            dark = true, linksHtml = "",
+            dark = true,
         )
         assertTrue("应设置 --bg", js.contains("--bg', '#111412'"))
         assertTrue("应设置 --fg", js.contains("--fg', '#E1E3DF'"))
@@ -339,99 +236,30 @@ class HomePageTest {
         val light = HomePage.themeUpdateJs(
             background = "#FFF", onBackground = "#000", primary = "#1B6C4B",
             onPrimary = "#FFF", primaryContainer = "#A8F2CB",
-            onPrimaryContainer = "#00210F", dark = false, linksHtml = "",
+            onPrimaryContainer = "#00210F", dark = false,
         )
         assertTrue("浅色 colorScheme", light.contains("colorScheme = 'light'"))
     }
 
     @Test
-    fun `themeUpdateJs 注入的 linksHtml 引号被正确转义`() {
-        // 书签标题可能含引号/尖括号，转义后不能破坏 JS 字符串
-        val fragment = HomePage.linksHtml(listOf("""a"b""" to "https://x.com"))
+    fun `themeUpdateJs 不再为快捷入口改 DOM 结构`() {
+        // 主页已无快捷入口，主题脚本只该改 CSS 变量，
+        // 不能再出现 innerHTML 之类的结构改动（那会误伤阅读视图正文）。
         val js = HomePage.themeUpdateJs(
             background = "#FFF", onBackground = "#000", primary = "#1B6C4B",
             onPrimary = "#FFF", primaryContainer = "#A8F2CB",
-            onPrimaryContainer = "#00210F", dark = false, linksHtml = fragment,
-        )
-        // linksHtml 里的引号已转成 &quot;，注入 JS 时不会再含裸双引号打断字符串
-        assertTrue("linksHtml 的引号应已转义", fragment.contains("&quot;"))
-        assertTrue("JS 应包含 linksHtml 内容", js.contains("innerHTML ="))
-    }
-
-    // ---- 快捷入口头像 ----
-
-    @Test
-    fun `快捷入口头像取标题首字`() {
-        assertEquals("中文标题取首字", "百", HomePage.avatarInitial("百度", "https://www.baidu.com"))
-        assertEquals("英文标题取首字母并大写", "G", HomePage.avatarInitial("github", "https://github.com"))
-    }
-
-    @Test
-    fun `空标题时头像取主机名首字母而不是 URL 首字母`() {
-        // 取整串 URL 的首字母会让**每个**空标题书签都是 "H"（https 的 h），
-        // 既没有区分度、也和标签页列表（TabState.initial）的口径不一致。
-        assertEquals(
-            "空标题应取主机名首字母",
-            "E",
-            HomePage.avatarInitial("", "https://www.example.com/a/b"),
-        )
-        assertEquals(
-            "纯空白标题同样视为空",
-            "E",
-            HomePage.avatarInitial("   ", "https://example.com"),
-        )
-        assertEquals(
-            "没有站点名时用中性占位符（与标签页列表一致）",
-            "•",
-            HomePage.avatarInitial("", "about:blank"),
-        )
-    }
-
-    @Test
-    fun `linksHtml 的头像也走同一套首字母规则`() {
-        val fragment = HomePage.linksHtml(listOf("" to "https://www.example.com/x"))
-        // 渲染在 HTML 里的头像必须与 avatarInitial 一致，否则"改了一处漏一处"
-        assertTrue(
-            "空标题书签的头像应是主机名首字母",
-            fragment.contains("""<span class="avatar">E</span>"""),
-        )
-        assertFalse("不应出现 URL 首字母 H", fragment.contains("""<span class="avatar">H</span>"""))
-    }
-
-    @Test
-    fun `主题脚本用 id 定位快捷入口而不是 class 选择器`() {
-        // 同一份脚本也跑在阅读视图上，而阅读视图的正文来自第三方网页，
-        // 里面完全可能有 class="links" 的元素（"相关链接"这类）——
-        // 用 class 选择器会把正文里那个元素当成快捷入口删掉。
-        val js = HomePage.themeUpdateJs(
-            background = "#FFF", onBackground = "#000", primary = "#1B6C4B",
-            onPrimary = "#FFF", primaryContainer = "#A8F2CB",
-            onPrimaryContainer = "#00210F", dark = false, linksHtml = "",
-        )
-        assertTrue(
-            "应通过 id 定位自己的快捷入口",
-            js.contains("getElementById('${HomePage.QUICK_LINKS_ID}')"),
-        )
-        assertFalse(
-            "不能用 class 选择器 —— 会误删阅读视图正文里的 class=links 元素",
-            js.contains("querySelector('.links')"),
-        )
-    }
-
-    @Test
-    fun `body 不固定高度以免内容溢出时顶部被裁掉`() {
-        val html = HomePage.html(
-            background = "#FBFDF8", onBackground = "#191C1A", primary = "#1B6C4B",
-            onPrimary = "#FFFFFF", primaryContainer = "#A8F2CB",
             onPrimaryContainer = "#00210F", dark = false,
         )
-        // height:100% + flex 居中：内容比视口高时（横屏/分屏/小屏 + 8 个快捷入口）
-        // 溢出的那部分会被顶到滚动区**上方**，滚不上去 —— logo 与「翎」被裁掉。
-        assertTrue("body 应使用 min-height: 100%", html.contains("min-height: 100%"))
-        assertFalse(
-            "body 不应固定 height:100%",
-            Regex("""body\s*\{[^}]*?(?<!min-)height:\s*100%""").containsMatchIn(html),
-        )
+        assertFalse("不应改动 DOM 结构", js.contains("innerHTML"))
+    }
+
+    @Test
+    fun `clockJs 原地更新时钟文本`() {
+        // 主页是零脚本 HTML，时间只能由原生每分钟注入回这个文本节点。
+        val js = HomePage.clockJs("09:41")
+        assertTrue("应通过 id 定位时钟节点", js.contains("getElementById('${HomePage.CLOCK_ID}')"))
+        assertTrue("应写入新的时间文本", js.contains("09:41"))
+        assertTrue("只改文本节点，不碰结构", js.contains("textContent"))
     }
 
     // ---- 主页搜索框 ----

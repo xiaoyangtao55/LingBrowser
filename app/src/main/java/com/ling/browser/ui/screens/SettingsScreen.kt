@@ -1,6 +1,9 @@
 package com.ling.browser.ui.screens
 
+import android.content.Intent
 import com.ling.browser.ui.theme.LingIcons
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -35,7 +38,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import com.ling.browser.data.prefs.HomeBackground
 import com.ling.browser.data.prefs.LingSettings
 import com.ling.browser.data.prefs.NightMode
 import com.ling.browser.data.prefs.SearchEngine
@@ -51,6 +56,8 @@ fun SettingsScreen(
     settings: LingSettings,
     onSearchEngine: (SearchEngine) -> Unit,
     onHomepage: (String) -> Unit,
+    onHomeBackground: (HomeBackground) -> Unit,
+    onHomeBackgroundImage: (String) -> Unit,
     onNightMode: (NightMode) -> Unit,
     onDesktopMode: (Boolean) -> Unit,
     onDynamicColor: (Boolean) -> Unit,
@@ -69,7 +76,30 @@ fun SettingsScreen(
 ) {
     var showEngineDialog by remember { mutableStateOf(false) }
     var showHomepageDialog by remember { mutableStateOf(false) }
+    var showHomeBackgroundDialog by remember { mutableStateOf(false) }
     var showNightModeDialog by remember { mutableStateOf(false) }
+
+    // 选主页背景图。用 OpenDocument 而不是 GetContent：OpenDocument 支持持久化
+    // 读权限，选一次后重启 App 仍读得到；GetContent 的授权只在本次会话有效。
+    val context = LocalContext.current
+    val pickBackgroundImage = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri != null) {
+            // 尽力申请持久化读权限。部分 ROM 的相册 provider 不支持持久授权，
+            // 申请失败顶多是"重启后可能读不到"，不该因此中断用户操作，故吞掉异常。
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                )
+            }
+            onHomeBackgroundImage(uri.toString())
+            // 记下 URI 后再切到「自定义图片」，避免出现"模式是自定义、却没有图"的空档。
+            onHomeBackground(HomeBackground.CUSTOM)
+        }
+        // 用户取消时什么都不改：保持原模式，不会把主页切成一个没有图的"自定义"。
+    }
     var showTabsHeightDialog by remember { mutableStateOf(false) }
     var showReaderFontDialog by remember { mutableStateOf(false) }
     var confirmClear by remember { mutableStateOf(false) }
@@ -112,6 +142,23 @@ fun SettingsScreen(
                     title = "自定义主页",
                     subtitle = settings.customHomepage.ifBlank { "内置主页（默认）" },
                     onClick = { showHomepageDialog = true },
+                )
+            }
+            item {
+                SettingRow(
+                    icon = LingIcons.Layers,
+                    title = "主页背景",
+                    // 副标题带上"自定义图片"有没有选图，否则用户会看到
+                    // "自定义图片"却不知道到底设没设 —— 空图时给出明确提示。
+                    subtitle = when (settings.homeBackground) {
+                        HomeBackground.SOLID -> "纯色"
+                        HomeBackground.CUSTOM -> if (settings.homeBackgroundImageUri.isBlank()) {
+                            "自定义图片（未选择）"
+                        } else {
+                            "自定义图片"
+                        }
+                    },
+                    onClick = { showHomeBackgroundDialog = true },
                 )
             }
 
@@ -377,6 +424,85 @@ fun SettingsScreen(
             },
             dismissButton = {
                 TextButton(onClick = { showHomepageDialog = false }) { Text("取消") }
+            },
+        )
+    }
+
+    // ---- 主页背景 ----
+    if (showHomeBackgroundDialog) {
+        // 选中某一档并关闭弹窗。选「自定义图片」但还没选过图时，直接拉系统
+        // 选择器 —— 否则会切到一个"自定义"却没有图的空档（背景层只能退回
+        // 主题色，用户看到的是"没生效"）。
+        val select: (HomeBackground) -> Unit = { mode ->
+            showHomeBackgroundDialog = false
+            if (mode == HomeBackground.CUSTOM && settings.homeBackgroundImageUri.isBlank()) {
+                pickBackgroundImage.launch(arrayOf("image/*"))
+            } else {
+                onHomeBackground(mode)
+            }
+        }
+        AlertDialog(
+            onDismissRequest = { showHomeBackgroundDialog = false },
+            title = { Text("主页背景") },
+            text = {
+                Column {
+                    HomeBackground.entries.forEach { mode ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { select(mode) }
+                                .padding(vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RadioButton(
+                                selected = settings.homeBackground == mode,
+                                onClick = { select(mode) },
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(mode.label, style = MaterialTheme.typography.bodyLarge)
+                        }
+                    }
+
+                    // 选/换自定义背景图。选完会自动切到「自定义图片」，
+                    // 用户不必再回来点一次选项。
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                showHomeBackgroundDialog = false
+                                pickBackgroundImage.launch(arrayOf("image/*"))
+                            }
+                            .padding(vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            imageVector = LingIcons.Image,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(22.dp),
+                        )
+                        Spacer(Modifier.width(16.dp))
+                        Text(
+                            text = if (settings.homeBackgroundImageUri.isBlank()) {
+                                "选择图片…"
+                            } else {
+                                "更换图片…"
+                            },
+                            style = MaterialTheme.typography.bodyLarge,
+                        )
+                    }
+
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "「自定义图片」模式下，主页会透出背景；" +
+                            "顶部有渐变遮罩，保证时钟与搜索框在浅色背景上也清晰。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showHomeBackgroundDialog = false }) { Text("完成") }
             },
         )
     }

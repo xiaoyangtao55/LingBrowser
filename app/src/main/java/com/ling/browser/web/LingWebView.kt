@@ -132,6 +132,22 @@ class LingWebView @JvmOverloads constructor(
         get() = WebSettings.getDefaultUserAgent(context)
 
     /**
+     * 设置 WebView **自身**的背景是否不透明。
+     *
+     * 为什么需要：主页在「自定义图片」模式下把 HTML 背景改成透明、
+     * 由原生层在 WebView 之下来画背景，但 WebView 本身默认有一层不透明白底 ——
+     * 只让 HTML 透明是不够的，白底仍会把下面的图片整个盖住。
+     *
+     * [opaque] 为 true 时用白色，与 WebView 的默认底色一致，因此切回普通网页/阅读视图
+     * 时行为与旧版完全相同；为 false 时透明，让原生背景层透出。
+     */
+    fun setOpaqueBackground(opaque: Boolean) {
+        setBackgroundColor(
+            if (opaque) android.graphics.Color.WHITE else android.graphics.Color.TRANSPARENT,
+        )
+    }
+
+    /**
      * 注入 / 移除强制夜间模式的 CSS。
      *
      * 为什么在 `setForceDark` / `isAlgorithmicDarkeningAllowed` 之外还要这一层：

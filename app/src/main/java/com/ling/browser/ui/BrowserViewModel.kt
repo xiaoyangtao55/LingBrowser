@@ -9,6 +9,7 @@ import com.ling.browser.data.db.Bookmark
 import com.ling.browser.data.db.DownloadEntry
 import com.ling.browser.data.db.HistoryEntry
 import com.ling.browser.data.repo.deriveFolders
+import com.ling.browser.data.prefs.HomeBackground
 import com.ling.browser.data.prefs.LingSettings
 import com.ling.browser.data.prefs.NightMode
 import com.ling.browser.data.prefs.ReaderFontSize
@@ -648,6 +649,13 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setSearchEngine(engine: SearchEngine) = io { container.settings.setSearchEngine(engine) }
     fun setCustomHomepage(url: String) = io { container.settings.setCustomHomepage(url) }
+
+    /** 切换内置主页的背景模式（纯色 / 自定义图片）。 */
+    fun setHomeBackground(mode: HomeBackground) = io { container.settings.setHomeBackground(mode) }
+
+    /** 记录用户选中的主页背景图片 URI（持久化读权限由设置页取图时申请）。 */
+    fun setHomeBackgroundImageUri(uri: String) =
+        io { container.settings.setHomeBackgroundImageUri(uri) }
     fun setNightMode(mode: NightMode) = io { container.settings.setNightMode(mode) }
     fun setDesktopMode(on: Boolean) = io { container.settings.setDesktopMode(on) }
     fun setForceDark(on: Boolean) = io { container.settings.setForceDarkWebPages(on) }
@@ -824,7 +832,7 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
     // ------------------------------------------------------------ 内置主页
 
     /**
-     * 把当前主题配色与书签快捷入口同步给内置主页。
+     * 把当前主题配色同步给内置主页。
      *
      * 主页是 WebView 渲染的 HTML，拿不到 Compose 的 ColorScheme，
      * 因此这里把颜色转成 CSS 十六进制串传过去；配色没变时直接跳过，避免无谓重绘。
@@ -837,7 +845,14 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
         primaryContainer: Color,
         onPrimaryContainer: Color,
         dark: Boolean,
-        links: List<Pair<String, String>>,
+        /**
+         * 主页是否让出背景（自定义图片模式）。
+         *
+         * 必须传进来而不是让 [WebTabManager] 自己去读设置：主色来自 Compose 的
+         * ColorScheme（Web 层拿不到），而相等性判断以整个 [WebTabManager.HomeColors]
+         * 为单位 —— 把透明位并进去，改背景模式才能和改配色一样触发一次重绘。
+         */
+        transparent: Boolean = false,
     ) {
         val colors = WebTabManager.HomeColors(
             background = background.toCssHex(),
@@ -847,7 +862,7 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
             primaryContainer = primaryContainer.toCssHex(),
             onPrimaryContainer = onPrimaryContainer.toCssHex(),
             dark = dark,
-            links = links,
+            transparent = transparent,
         )
         if (colors == tabManager.homeColors) return
         tabManager.homeColors = colors
@@ -855,6 +870,14 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
         // 可能还没建出来，refreshHome 会静默跳过，导致主页停在默认浅色。
         tabManager.ensureHomeRendered()
     }
+
+    /**
+     * 刷新内置主页上的时钟（`HH:mm`）。
+     *
+     * 由 UI 层的定时器每分钟调用一次（见 BrowserScreen）：主页是零脚本 HTML，
+     * 时间不能自己走，只能由原生侧把文本注入进去。
+     */
+    fun updateHomeClock() = tabManager.updateHomeClock()
 
     /**
      * 重新计算「网页是否暗化」并应用到所有 WebView。

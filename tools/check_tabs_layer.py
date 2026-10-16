@@ -1,17 +1,22 @@
-"""校验标签页面板的图层结构：是否真的能"透出后面的网页"。
+"""校验「标签页 / 更多」面板改用 BottomSheet 后的结构与关键交互。
 
-背景（真实问题）：
-  原实现里 MainActivity 用 `when (route)` 在 BrowserScreen 与 TabsScreen
-  之间**二选一**。切到标签页时 BrowserScreen 被卸载，它的
-  DisposableEffect 触发 tabManager.detachHost(host)，WebView 从视图树
-  摘下来 —— 面板背后根本没有内容，再透明也只能看到窗口底色。
+背景（保留的历史教训）：
+  早期标签页是一个**独立路由**页面 —— MainActivity 用 `when (route)` 在
+  BrowserScreen 与 TabsScreen 之间二选一。切到它时 BrowserScreen 被卸载，
+  DisposableEffect 触发 tabManager.detachHost(host)，WebView 从视图树摘下来，
+  面板背后根本没有内容，再透明也只能看到窗口底色。
+  随后改为「BrowserScreen 常驻 + TabsScreen 自绘叠加层」。
 
-修复要点（本脚本逐条校验）：
-  1. BrowserScreen 常驻，不再参与 when 二选一
-  2. TabsScreen 画在其上，作为叠加层
-  3. 非全屏档位面板底色必须是半透明（否则等于没透）
-  4. 遮罩只压暗面板上方露出的区域，且不盖住面板本身
-  5. 全屏档位不画遮罩，且面板用不透明色（避免透出浏览页干扰阅读）
+本次改动：
+  「标签页」与「更多」不再自绘叠加层 / 不再锚定下拉菜单，统一换成 Material3
+  的 ModalBottomSheet（自屏幕底部升起）。本脚本逐条校验新结构：
+    1. 标签页不再是独立路由；BrowserScreen 常驻（when 之外）
+    2. BrowserScreen 内有两个 ModalBottomSheet（标签页 / 更多）
+    3. 标签页半屏档位用半透明容器色，全屏档位回退为不透明
+    4. 高度档位落在**内容**高度（fillMaxHeight(fraction)），不依赖 sheet 锚点
+    5. 半透明常量仍在 TabsScreen 导出（TABS_SHEET_ALPHA），且落在合理区间
+    6. 旧叠加层的残留（自绘整屏遮罩 / 位移动画）已清除
+    7. 标签排序、favicon、设置档位等既有约束不回退
 """
 import os
 import re
@@ -40,11 +45,16 @@ main = read("app/src/main/java/com/ling/browser/MainActivity.kt")
 tabs = read("app/src/main/java/com/ling/browser/ui/screens/TabsScreen.kt")
 browser = read("app/src/main/java/com/ling/browser/ui/screens/BrowserScreen.kt")
 
-# ---------- 1. BrowserScreen 常驻 ----------
-print("1. BrowserScreen 是否常驻挂载")
+# ---------- 1. 标签页不再是独立路由，BrowserScreen 常驻 ----------
+print("1. 标签页不再是独立路由，BrowserScreen 常驻")
+if "Route.Tabs" in main or "onOpenTabs" in main:
+    bad("MainActivity 仍保留 Route.Tabs / onOpenTabs，标签页未改由 BottomSheet 承载")
+else:
+    ok("MainActivity 已移除 Route.Tabs 路由与 onOpenTabs 透传")
+
 # 关键：when(route) 里不能再有 Route.Browser -> BrowserScreen(...)
 if re.search(r"Route\.Browser\s*->\s*BrowserScreen", main):
-    bad("Route.Browser 仍直接返回 BrowserScreen，切到标签页时它会被卸载")
+    bad("Route.Browser 仍直接返回 BrowserScreen，切页时它会被卸载")
 else:
     ok("when(route) 中不再用 Route.Browser 直接渲染 BrowserScreen")
 
@@ -70,108 +80,120 @@ if re.search(r"Box\(modifier = Modifier\s*\n?\s*\.fillMaxSize\(\)", main):
 else:
     bad("未找到承载图层的 Box")
 
-# ---------- 2. 面板透明度 ----------
-print("\n2. 面板底色是否半透明")
-m = re.search(r"PANEL_ALPHA\s*=\s*([0-9.]+)f", tabs)
+# ---------- 2. 两个 BottomSheet ----------
+print("\n2. BrowserScreen 内是否用 ModalBottomSheet 承载两个面板")
+n_sheets = browser.count("ModalBottomSheet(")
+if n_sheets >= 2:
+    ok(f"BrowserScreen 内有 {n_sheets} 个 ModalBottomSheet（标签页 / 更多）")
+else:
+    bad(f"只找到 {n_sheets} 个 ModalBottomSheet，两个面板没有都换成 BottomSheet")
+
+if re.search(r"if \(showTabsSheet\)\s*\{[\s\S]{0,200}?ModalBottomSheet\(", browser):
+    ok("标签页面板由 ModalBottomSheet 承载")
+else:
+    bad("没有找到标签页的 ModalBottomSheet")
+
+if re.search(r"if \(showMoreSheet\)\s*\{[\s\S]{0,200}?ModalBottomSheet\(", browser):
+    ok("「更多」面板由 ModalBottomSheet 承载")
+else:
+    bad("没有找到「更多」的 ModalBottomSheet")
+
+if "onTabs = { showTabsSheet = true }" in browser and \
+        "onMore = { showMoreSheet = true }" in browser:
+    ok("工具栏的 onTabs / onMore 已接线到两个面板开关")
+else:
+    bad("工具栏回调没有接线到面板开关")
+
+# 旧的锚定式下拉菜单不应残留
+if "DropdownMenuItem" in browser:
+    bad("仍残留 DropdownMenuItem（旧的锚定式下拉菜单没删干净）")
+else:
+    ok("已移除 DropdownMenuItem")
+
+# ---------- 3. 标签页面板透明度 ----------
+print("\n3. 标签页面板透明度（半屏透出网页，全屏不透明）")
+m = re.search(r"TABS_SHEET_ALPHA\s*=\s*([0-9.]+)f", tabs)
 if not m:
-    bad("没有定义 PANEL_ALPHA")
+    bad("TabsScreen 没有定义 TABS_SHEET_ALPHA")
 else:
     v = float(m.group(1))
     if 0.0 < v < 1.0:
-        ok(f"PANEL_ALPHA = {v}（半透明）")
+        ok(f"TABS_SHEET_ALPHA = {v}（半透明）")
     else:
-        bad(f"PANEL_ALPHA = {v}，不在 (0,1) 区间，不是半透明")
+        bad(f"TABS_SHEET_ALPHA = {v}，不在 (0,1) 区间，不是半透明")
     if v > 0.95:
-        bad(f"PANEL_ALPHA = {v} 太高，几乎不透明，透不出网页")
+        bad(f"TABS_SHEET_ALPHA = {v} 太高，几乎不透明，透不出网页")
     if v < 0.55:
-        bad(f"PANEL_ALPHA = {v} 太低，面板文字会与网页内容互相干扰")
+        bad(f"TABS_SHEET_ALPHA = {v} 太低，面板文字会与网页内容互相干扰")
 
-if re.search(r"surface\.copy\(alpha\s*=\s*PANEL_ALPHA\)", tabs):
-    ok("非全屏档位使用半透明 surface")
+if re.search(r"copy\(alpha\s*=\s*TABS_SHEET_ALPHA\)", browser):
+    ok("BrowserScreen 把 TABS_SHEET_ALPHA 应用到面板容器色")
 else:
-    bad("未对 surface 应用 PANEL_ALPHA")
+    bad("没有把 TABS_SHEET_ALPHA 应用到 ModalBottomSheet 的 containerColor")
 
-if re.search(r"TabsHeight\.FULL\s*\)\s*\{\s*\n\s*MaterialTheme\.colorScheme\.surface\s*\n", tabs):
-    ok("全屏档位回退为不透明 surface")
+if re.search(
+    r"settings\.tabsHeight == TabsHeight\.FULL\)\s*\{\s*\n"
+    r"\s*MaterialTheme\.colorScheme\.surface\s*\n",
+    browser,
+):
+    ok("全屏档位回退为不透明 surface（避免透出浏览页干扰阅读）")
 else:
     bad("全屏档位未做不透明回退（半透明会透出浏览页干扰阅读）")
 
-# ---------- 3. 遮罩 ----------
-print("\n3. 遮罩是否只压暗面板上方")
-# 遮罩应使用 (1 - fraction) 高度并顶部对齐
-if re.search(r"fillMaxHeight\(1f\s*-\s*tabsHeight\.fraction\)", tabs):
-    ok("遮罩高度 = 1 - 面板高度（只覆盖露出区域）")
+# ---------- 4. 高度档位落在内容高度上 ----------
+print("\n4. 高度档位如何落地")
+if re.search(r"fillMaxHeight\(settings\.tabsHeight\.fraction\)", browser):
+    ok("标签页内容高度 = settings.tabsHeight.fraction（全屏 / 一半）")
 else:
-    bad("遮罩未按面板高度留白，会盖住面板本身")
+    bad("标签页高度未绑定 tabsHeight.fraction，档位切换不会生效")
 
-if re.search(r"\.align\(Alignment\.TopCenter\)", tabs):
-    ok("遮罩顶部对齐")
+if "tabsHeight = settings.tabsHeight" in browser:
+    ok("TabsScreen 收到当前档位")
 else:
-    bad("遮罩未顶部对齐")
+    bad("TabsScreen 未收到 tabsHeight")
 
-# 遮罩必须画在 Surface 之后（否则会盖住面板）
-# 注意搜"使用处"而不是常量名本身：SCRIM_MAX_ALPHA 在文件顶部有声明，
-# 直接 find("SCRIM_MAX_ALPHA") 会命中声明行，导致永远判定"在面板之前"。
-idx_scrim = tabs.find("SCRIM_MAX_ALPHA * scrimAlpha.value")
-idx_surface = tabs.find("color = if (tabsHeight == TabsHeight.FULL)")
-if idx_scrim == -1:
-    bad("没有找到遮罩 alpha 的使用处")
-elif idx_surface == -1:
-    bad("没有找到面板 Surface 的颜色定义")
-elif idx_scrim > idx_surface:
-    ok("遮罩绘制在面板之后（不会盖住面板）")
+if "onTabsHeightChange = viewModel::setTabsHeight" in browser:
+    ok("档位切换已接线到 viewModel.setTabsHeight")
 else:
-    bad("遮罩在面板之前绘制，会把面板也压暗")
+    bad("档位切换未接线到 viewModel")
 
-# 遮罩 alpha 必须由动画驱动，否则加了动画也只有面板在动
-if re.search(r"SCRIM_MAX_ALPHA\s*\*\s*scrimAlpha\.value", tabs):
-    ok("遮罩 alpha 由动画值驱动（会随面板一起淡入）")
-else:
-    bad("遮罩 alpha 未接动画，淡入会缺失")
-
-if re.search(r"if \(tabsHeight != TabsHeight\.FULL\)", tabs):
-    ok("全屏档位不画遮罩")
-else:
-    bad("全屏档位仍会画遮罩")
-
-# ---------- 3b. 入场动画 ----------
-print("\n3b. 入场动画")
-if "Animatable(1f)" in tabs:
-    ok("面板位移动画初值 1f（在屏幕外）")
-else:
-    bad("未找到面板位移动画的 Animatable")
-
-if re.search(r"translationY\s*=\s*slide\.value\s*\*\s*size\.height", tabs):
-    ok("用 graphicsLayer.translationY 平移（不触发重新测量）")
-else:
-    bad("面板位移未用 graphicsLayer，动画期间列表可能抖动")
-
-if re.search(r"LaunchedEffect\(Unit\)", tabs):
-    ok("挂载时播放一次动画")
-else:
-    bad("未找到 LaunchedEffect 触发动画")
-
-# 动画时长：太快看不见，太慢拖沓
-durs = re.findall(r"private const val (\w+_MS)\s*=\s*(\d+)", tabs)
-if not durs:
-    bad("没有定义动画时长常量")
-for name, v in durs:
-    v = int(v)
-    if 100 <= v <= 400:
-        ok(f"{name} = {v}ms（在合理区间）")
+# ---------- 5. 不能再有旧叠加层残留 ----------
+print("\n5. 旧叠加层残留")
+old_marks = {
+    "Animatable(1f)": "面板位移动画（已由 BottomSheet 提供）",
+    "SCRIM_MAX_ALPHA": "自绘遮罩",
+    "slide.value": "面板位移动画值",
+}
+for token, why in old_marks.items():
+    if token in tabs:
+        bad(f"TabsScreen 仍残留 {token}（{why}）")
     else:
-        bad(f"{name} = {v}ms 不在 100~400ms，手感会不对")
+        ok(f"已移除 {token}")
 
-# ---------- 4. 不能再用整屏不透明遮罩 ----------
-print("\n4. 回归：旧的整屏遮罩写法")
-# 旧写法是 Box 上直接 background(Black 0.32f) + fillMaxSize
+if re.search(r"fillMaxHeight\(1f\s*-\s*tabsHeight\.fraction\)", tabs):
+    bad("TabsScreen 仍自绘「只压暗面板上方」的遮罩")
+else:
+    ok("不再自绘只压暗面板上方的遮罩")
+
+# 旧的整屏不透明遮罩写法
 if re.search(r"\.fillMaxSize\(\)\s*\n\s*\.background\(Color\.Black", tabs):
-    bad("仍在 Box 上用整屏 background 遮罩（会连面板一起压暗）")
+    bad("仍在 Box 上用整屏 background 遮罩")
 else:
     ok("已移除整屏遮罩写法")
 
-# ---------- 4b. 高度档位只有两档 ----------
-print("\n4b. 高度档位（1/4 已移除）")
+# 面板本体改用组件后，TabsScreen 只应是纯内容：根节点是 Column，不再是 Scaffold
+if "Scaffold" in tabs:
+    bad("TabsScreen 仍是独立页面骨架（Scaffold），应只保留纯内容")
+else:
+    ok("TabsScreen 已剥离为纯内容（无 Scaffold）")
+
+if re.search(r"Column\(modifier = modifier\.fillMaxWidth\(\)\)", tabs):
+    ok("TabsScreen 根节点是填宽的 Column，可直接放进 BottomSheet")
+else:
+    bad("TabsScreen 根节点结构不符（应为 Column）")
+
+# ---------- 6. 高度档位枚举（1/4 已移除） ----------
+print("\n6. 高度档位（1/4 已移除）")
 store = read("app/src/main/java/com/ling/browser/data/prefs/SettingsStore.kt")
 # 排除注释：老数据兼容的那段说明里会提到 "QUARTER" 这个字符串字面量，
 # 那是解释文字，不是残留的枚举条目。
@@ -182,8 +204,7 @@ if "QUARTER" in store_code:
     bad("SettingsStore 里仍有 QUARTER，1/4 档位未移除干净")
 else:
     ok("TabsHeight 已无 QUARTER（仅注释中作为历史说明提及）")
-entries = re.findall(r"^\s+([A-Z_]+)\(\"", store, re.M)
-# 只取 TabsHeight 枚举体内的条目
+
 m_enum = re.search(r"enum class TabsHeight.*?\{(.*?)\n\}", store, re.S)
 if m_enum:
     names = re.findall(r"([A-Z_]+)\(", m_enum.group(1))
@@ -210,21 +231,21 @@ if re.search(r"\?\: TabsHeight\.HALF", store):
 else:
     bad("解析失败未回退到 HALF")
 
-# 面板与遮罩逻辑用的是 != FULL，因此天然支持两档
+# 面板内的高度切换 UI 用的是 entries，因此天然支持两档
 if "TabsHeight.entries.forEach" in tabs:
     ok("高度切换 UI 遍历 entries，档位增删无需改代码")
 else:
     bad("高度切换 UI 未遍历 entries，改档位时容易漏改")
 
-# ---------- 5. WebView 宿主生命周期 ----------
-print("\n5. WebView 宿主生命周期（关键是别被卸载）")
+# ---------- 7. WebView 宿主生命周期 ----------
+print("\n7. WebView 宿主生命周期（关键是别被卸载）")
 if "DisposableEffect(host)" in browser and "attachHost" in browser:
     ok("BrowserScreen 用 DisposableEffect 挂载宿主")
 if "detachHost" in browser:
     ok("detachHost 只在 onDispose 中调用（常驻后不会误触发）")
 
-# ---------- 6. 拖拽排序 ----------
-print("\n6. 拖拽排序（长按触发，不能吃掉点击）")
+# ---------- 8. 拖拽排序 ----------
+print("\n8. 拖拽排序（长按触发，不能吃掉点击）")
 if "detectDragGesturesAfterLongPress" in tabs:
     ok("用 detectDragGesturesAfterLongPress（长按才拖拽）")
 else:
@@ -251,13 +272,13 @@ if re.search(r"dragOffsetY\s*-=\s*\(target\s*-\s*draggingIndex\)\s*\*\s*rowH", t
 else:
     bad("未扣减已消耗位移，拖动会连续换位")
 
-if "onMoveTab" in tabs and "onMoveTab = viewModel::moveTab" in main:
+if "onMoveTab" in tabs and "onMoveTab = viewModel::moveTab" in browser:
     ok("onMoveTab 已接线到 viewModel.moveTab")
 else:
     bad("onMoveTab 未接线到 viewModel")
 
-# ---------- 7. 缩略图 ----------
-print("\n7. 缩略图（favicon，不是网页截图）")
+# ---------- 9. 缩略图 ----------
+print("\n9. 缩略图（favicon，不是网页截图）")
 if re.search(r"favicon\s*!=\s*null\s*&&\s*!favicon\.isRecycled", tabs):
     ok("绘制前检查 isRecycled（否则会抛 recycled bitmap 崩溃）")
 else:
@@ -305,4 +326,4 @@ if problems:
     for p in problems:
         print("  ! " + p)
     sys.exit(1)
-print("标签页图层结构校验通过")
+print("标签页 / 更多面板结构校验通过")

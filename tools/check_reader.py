@@ -588,11 +588,23 @@ else:
 
 # (1b) 已渲染的主页要原地刷新（改 CSS 变量），不能重导航 ——
 # 重导航（loadDataWithBaseURL）会压入新历史条目，导致"切深色后按返回回到浅色主页"。
-# 判据绑定到"调用点"：evaluateJavascript(homeThemeJs() 必须真的出现在
-# ensureHomeRendered 里。只查 "homeThemeJs()" 会撞上函数定义（homeThemeJs():），
-# 定义在、调用没了也照样误报通过。
-if "evaluateJavascript(homeThemeJs()" in ensure:
-    ok("主题切换走原地刷新（不压历史，返回键行为不变）")
+#
+# 现在这条路径收敛到了 loadHomeOrRefresh（"点主页按钮"那条统一路径）：
+# ensureHomeRendered 只负责把「所有停在主页/阅读视图的标签」找出来、转交给它，
+# 不再自己手写一份原地刷新（早先那份漏了 WebView 背景对齐，导致改背景模式
+# 要手动按一下主页按钮才生效）。因此判据分两步：
+#   a) ensureHomeRendered 真的调用了 loadHomeOrRefresh；
+#   b) loadHomeOrRefresh 里确实做的是原地刷新（evaluateJavascript(homeThemeJs()），
+#      而不是 loadDataWithBaseURL 重导航。
+# 只查 "homeThemeJs()" 会撞上函数定义（homeThemeJs():），定义在、调用没了也照样误报通过。
+if "loadHomeOrRefresh(" in ensure:
+    ok("主题切换把主页交给统一的原地刷新路径（loadHomeOrRefresh）")
+else:
+    bad("ensureHomeRendered 未走 loadHomeOrRefresh —— 可能又手写了不一致的分支")
+
+refresh = body_of(mgr, r"private fun loadHomeOrRefresh\(")
+if "evaluateJavascript(homeThemeJs()" in refresh:
+    ok("主页原地刷新（不压历史，返回键行为不变）")
 else:
     bad("主题切换仍走重导航 —— 切深色后按返回会回到浅色主页")
 
@@ -922,9 +934,9 @@ else:
 
 # 菜单入口 + 二级页
 # 只查"资源嗅探"字符串不够：注释里也含这个词，会漏掉"菜单项被删"的回归。
-# 必须确认菜单项本身（Text("资源嗅探") + 触发嗅探）还在。
-if 'text = { Text("资源嗅探") }' in screen and "viewModel.sniffResources()" in screen \
-        and "onOpenSniff" in screen:
+# 必须确认菜单项本身（MoreMenuItem(label = "资源嗅探") + 触发嗅探）还在。
+if 'label = "资源嗅探"' in screen and "viewModel.sniffResources()" in screen \
+        and "onOpenSniff()" in screen:
     ok("浏览器菜单有「资源嗅探」入口（菜单项 + 触发 + 跳转）")
 else:
     bad("浏览器菜单缺少资源嗅探入口")

@@ -1,22 +1,16 @@
-﻿package com.ling.browser.ui.screens
+package com.ling.browser.ui.screens
 
 import com.ling.browser.ui.theme.LingIcons
-import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.LinearOutSlowInEasing
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -26,18 +20,13 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.CenterAlignedTopAppBar
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -47,7 +36,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -59,35 +47,26 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import com.ling.browser.data.prefs.TabsHeight
 import com.ling.browser.web.TabState
-import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
 /**
- * 非全屏档位下面板的底色透明度。
+ * 半屏档位下面板的底色透明度。
  *
  * 取值理由：太低（< 0.6）面板上的文字会与网页内容互相干扰、读不清；
  * 太高（> 0.9）就等于不透明，"能看到后面的网页"这个设计意图就没了。
  *
- * 从 0.82 提到 0.92：实机上半屏面板里要读标签标题，0.82 时背后的
- * 网页文字会透上来干扰阅读。0.92 仍然能看出背后"有内容"，
- * 但不再和标题抢注意力 —— 可读性优先于通透感。
+ * 0.92 是实机调过的值：半屏面板里要读标签标题，更透时背后的网页文字会透上来
+ * 干扰阅读；0.92 仍能看出背后"有内容"，但不再和标题抢注意力 ——
+ * 可读性优先于通透感。全屏档位不用它（见 BrowserScreen 的容器色回退）。
  */
-private const val PANEL_ALPHA = 0.92f
-
-/** 面板升起动画时长。180ms 够快，不拖沓，又能看清"从下方滑上来"。 */
-private const val PANEL_SLIDE_IN_MS = 180
-
-/** 遮罩淡入时长，略长于面板，让背景先暗下去。 */
-private const val SCRIM_FADE_IN_MS = 220
-
-/** 遮罩最暗时的黑度。0.28 能压住网页又不至于发闷。 */
-private const val SCRIM_MAX_ALPHA = 0.28f
+internal const val TABS_SHEET_ALPHA = 0.92f
 
 /**
- * 标签页管理页。
+ * 标签页 BottomSheet 的**内容**。
  *
- * 高度由 [tabsHeight] 控制，默认占屏幕下半 —— 这样切标签时仍能看到
- * 底下的网页，符合"标签页是临时面板而非独立页面"的直觉。
+ * 面板容器（ModalBottomSheet）本身由 [BrowserScreen][com.ling.browser.ui.screens.BrowserScreen]
+ * 创建：遮罩、圆角、拖动关闭、升起/落下动画都由 BottomSheet 组件提供，
+ * 这里只负责摆列表与底部动作，不再自带一整套叠加层。
  *
  * 列表项显示站点 favicon 作为缩略图（不是网页截图，理由见 [TabThumbnail]）。
  * 长按列表项可上下拖动排序，见 [TabRow] 的 dragOffsetY 参数。
@@ -96,7 +75,6 @@ private const val SCRIM_MAX_ALPHA = 0.28f
  * 而面板最高只占屏幕一半，需要滚动的场景很少见；实现它要额外引入一个
  * 随拖动位置变化的协程循环，复杂度与收益不成比例。等真机反馈需要再加。
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun TabsScreen(
     tabs: List<TabState>,
@@ -107,7 +85,6 @@ fun TabsScreen(
     onNewIncognitoTab: () -> Unit,
     onCloseAll: () -> Unit,
     onMoveTab: (Int, Int) -> Unit,
-    onBack: () -> Unit,
     tabsHeight: TabsHeight,
     onTabsHeightChange: (TabsHeight) -> Unit,
     modifier: Modifier = Modifier,
@@ -132,149 +109,55 @@ fun TabsScreen(
     // 用一个 remember 的持有者，每次重组写入最新值，回调再从中读。
     val tabsRef = remember { mutableStateOf(tabs) }
     tabsRef.value = tabs
-    // 面板从底部升起：用 Box + align 而不是 fillMaxSize，短面板下方不会留白。
-    //
-    // 遮罩只压暗**面板上方**的区域，让底下的网页隐约可见（Via 的做法）：
-    // 完全盖死会让用户失去"我还在那个网页上"的空间感。
-    //
-    // 入场动画：面板从下方滑入，遮罩同时淡入。
-    // 用 Animatable 而不是 AnimatedVisibility —— 这里没有"显示/隐藏"的
-    // 状态切换（TabsScreen 被加入组合树时才存在），需要的是挂载即播放，
-    // LaunchedEffect 触发一次最直接。
-    val slide = remember { Animatable(1f) }
-    val scrimAlpha = remember { Animatable(0f) }
 
-    LaunchedEffect(Unit) {
-        launch { slide.animateTo(0f, tween(PANEL_SLIDE_IN_MS, easing = FastOutSlowInEasing)) }
-        launch { scrimAlpha.animateTo(1f, tween(SCRIM_FADE_IN_MS, easing = LinearOutSlowInEasing)) }
-    }
-
-    Box(
-        modifier = modifier
-            .fillMaxSize()
-            // 点击面板外的遮罩也可关闭
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = onBack,
-            ),
-        contentAlignment = Alignment.BottomCenter,
-    ) {
-        Surface(
-            shape = if (tabsHeight == TabsHeight.FULL) {
-                RectangleShape
-            } else {
-                RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
-            },
-            // 半透明面板：能透出后方网页。用 surface 的 alpha 而不是纯色，
-            // 保证 Material You 动态取色仍然生效。
-            // 全屏档位下若仍然半透明，背后会透出浏览页造成视觉干扰，
-            // 因此全屏时用不透明表面。
-            color = if (tabsHeight == TabsHeight.FULL) {
-                MaterialTheme.colorScheme.surface
-            } else {
-                MaterialTheme.colorScheme.surface.copy(alpha = PANEL_ALPHA)
-            },
-            tonalElevation = 3.dp,
-            // 高度不够时内部列表自行滚动，不会把面板撑破
+    Column(modifier = modifier.fillMaxWidth()) {
+        // ---- 头部：标题 + 高度档位 + 关闭全部 ----
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .fillMaxHeight(tabsHeight.fraction)
-                // 面板自下而上滑入：用 graphicsLayer 平移而非改布局高度，
-                // 这样不会触发重新测量，动画期间列表不会抖。
-                .graphicsLayer {
-                    translationY = slide.value * size.height
-                }
-                // 面板自身拦截点击，避免穿透到遮罩把面板关掉
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                    onClick = {},
-                ),
+                .padding(start = 20.dp, end = 6.dp, top = 2.dp, bottom = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Scaffold(
-                containerColor = Color.Transparent,
-                topBar = {
-                    CenterAlignedTopAppBar(
-                        title = { Text("标签页 (${tabs.size})") },
-                        navigationIcon = {
-                            IconButton(onClick = onBack) {
-                                Icon(LingIcons.Close, contentDescription = "关闭")
-                            }
-                        },
-                        actions = {
-                            // 高度档位切换
-                            HeightToggle(
-                                current = tabsHeight,
-                                onChange = onTabsHeightChange,
-                            )
-                            if (tabs.size > 1) {
-                                TextButton(onClick = onCloseAll) { Text("关闭全部") }
-                            }
-                        },
-                        colors = TopAppBarDefaults.topAppBarColors(
-                            containerColor = Color.Transparent,
-                        ),
-                    )
-                },
-                bottomBar = {
-                    Surface(color = MaterialTheme.colorScheme.surfaceContainer) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 12.dp, vertical = 10.dp),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        ) {
-                            PillButton(
-                                icon = LingIcons.Add,
-                                label = "新建标签页",
-                                container = MaterialTheme.colorScheme.primaryContainer,
-                                content = MaterialTheme.colorScheme.onPrimaryContainer,
-                                onClick = onNewTab,
-                                modifier = Modifier.weight(1f),
-                            )
-                            PillButton(
-                                icon = LingIcons.PrivacyTip,
-                                label = "无痕",
-                                container = MaterialTheme.colorScheme.tertiaryContainer,
-                                content = MaterialTheme.colorScheme.onTertiaryContainer,
-                                onClick = onNewIncognitoTab,
-                                modifier = Modifier.weight(1f),
-                            )
-                        }
-                    }
-                },
-            ) { inner ->
-                if (tabs.isEmpty()) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(inner),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Icon(
-                                LingIcons.Layers,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(40.dp),
-                            )
-                            Spacer(Modifier.height(10.dp))
-                            Text(
-                                "没有打开的标签页",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    }
-                    return@Scaffold
-                }
+            Text(
+                text = "标签页 (${tabs.size})",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.weight(1f),
+            )
+            // 高度档位切换
+            HeightToggle(
+                current = tabsHeight,
+                onChange = onTabsHeightChange,
+            )
+            if (tabs.size > 1) {
+                TextButton(onClick = onCloseAll) { Text("关闭全部") }
+            }
+        }
 
+        // ---- 列表区：占满头部与底部动作之间的空间 ----
+        Box(modifier = Modifier.weight(1f)) {
+            if (tabs.isEmpty()) {
+                Column(
+                    modifier = Modifier.fillMaxSize(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
+                ) {
+                    Icon(
+                        LingIcons.Layers,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(40.dp),
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        "没有打开的标签页",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            } else {
                 LazyColumn(
                     state = listState,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(inner),
+                    modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(
                         horizontal = 12.dp,
                         vertical = 8.dp,
@@ -363,19 +246,31 @@ fun TabsScreen(
             }
         }
 
-        // 压暗遮罩：只覆盖面板**上方**露出的网页区域。
-        // 放在面板之后绘制，因此不会盖住面板本身；
-        // 它让背后的网页"退到后面"，避免与面板内容抢注意力。
-        // 全屏档位下没有露出的区域，就不画。
-        if (tabsHeight != TabsHeight.FULL) {
-            Box(
+        // ---- 底部动作：新建 / 无痕 ----
+        Surface(color = MaterialTheme.colorScheme.surfaceContainer) {
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .fillMaxHeight(1f - tabsHeight.fraction)
-                    .align(Alignment.TopCenter)
-                    // alpha 由动画驱动：背景先淡入，视觉上更连贯
-                    .background(Color.Black.copy(alpha = SCRIM_MAX_ALPHA * scrimAlpha.value)),
-            )
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                PillButton(
+                    icon = LingIcons.Add,
+                    label = "新建标签页",
+                    container = MaterialTheme.colorScheme.primaryContainer,
+                    content = MaterialTheme.colorScheme.onPrimaryContainer,
+                    onClick = onNewTab,
+                    modifier = Modifier.weight(1f),
+                )
+                PillButton(
+                    icon = LingIcons.PrivacyTip,
+                    label = "无痕",
+                    container = MaterialTheme.colorScheme.tertiaryContainer,
+                    content = MaterialTheme.colorScheme.onTertiaryContainer,
+                    onClick = onNewIncognitoTab,
+                    modifier = Modifier.weight(1f),
+                )
+            }
         }
     }
 }

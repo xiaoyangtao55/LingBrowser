@@ -200,7 +200,11 @@ else:
     bad("缺少 BookmarkAdd 图标")
 
 # 「添加书签」动作必须用带加号的图标，否则与书签入口图标完全相同
-if re.search(r"isBookmarked\s*->\s*LingIcons\.Bookmark\b[\s\S]{0,200}?else\s*->\s*LingIcons\.BookmarkAdd", browser):
+# （菜单改用 BottomSheet 后，这一项由 MoreMenuItem 的 icon 参数给出。）
+if re.search(
+    r"if \(isBookmarked\)\s*LingIcons\.Bookmark\b[\s\S]{0,60}?else\s*LingIcons\.BookmarkAdd",
+    browser,
+):
     ok("添加书签用 BookmarkAdd、已收藏用 Bookmark（两者形状不同）")
 else:
     bad("「添加书签」未使用 BookmarkAdd，会与纯书签入口图标一模一样")

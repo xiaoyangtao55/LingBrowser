@@ -165,6 +165,42 @@ class LingSettingsTest {
     }
 
     @Test
+    fun `主页背景默认是纯色`() {
+        // 默认保持旧版行为：新用户不主动设置时，主页仍用主题色自绘背景。
+        assertEquals(HomeBackground.SOLID, LingSettings().homeBackground)
+        assertEquals("默认没有自定义背景图", "", LingSettings().homeBackgroundImageUri)
+    }
+
+    @Test
+    fun `只有纯色模式才让主页自绘背景`() {
+        // 这是"主页背景"的核心纯逻辑：自定义图片档必须让主页 HTML 透明，
+        // 否则原生层画好的背景会被不透明的主页整个盖住，用户看到的是"设了没反应"。
+        assertFalse("纯色由主页自己填背景色", HomeBackground.SOLID.transparent)
+        assertTrue("自定义图片需要主页透明", HomeBackground.CUSTOM.transparent)
+    }
+
+    @Test
+    fun `主页背景各档齐全且可安全往返`() {
+        assertEquals(2, HomeBackground.entries.size)
+        HomeBackground.entries.forEach { m ->
+            assertTrue("${m.label} 应有非空标签", m.label.isNotBlank())
+            assertTrue("${m.key} 应有非空持久化 key", m.key.isNotBlank())
+            // 持久化以 key 往返，改 key 必须同步迁移，这里固化"能解析回来"
+            assertEquals(m, HomeBackground.fromKey(m.key))
+        }
+    }
+
+    @Test
+    fun `未知的主页背景 key 安全降级为纯色`() {
+        // 脏数据/老版本可能存过不存在的 key，直接 valueOf 会抛异常导致启动闪退。
+        assertEquals(HomeBackground.SOLID, HomeBackground.fromKey("nonsense"))
+        assertEquals(HomeBackground.SOLID, HomeBackground.fromKey(null))
+        assertEquals(HomeBackground.SOLID, HomeBackground.fromKey(""))
+        // 已移除的「系统壁纸」档：历史设置必须安全降级，不能闪退
+        assertEquals(HomeBackground.SOLID, HomeBackground.fromKey("wallpaper"))
+    }
+
+    @Test
     fun `外部 App 开关是唯一的转发开关`() {
         // 这个开关必须能真的关掉转发，而不是"关掉了但代码里还在转发"。
         // 这里只能断言数据层，行为层由 check_reader.py 静态校验。

@@ -34,7 +34,6 @@ import com.ling.browser.ui.screens.BrowserScreen
 import com.ling.browser.ui.screens.DownloadsScreen
 import com.ling.browser.ui.screens.HistoryScreen
 import com.ling.browser.ui.screens.SettingsScreen
-import com.ling.browser.ui.screens.TabsScreen
 import com.ling.browser.ui.theme.LingTheme
 
 /**
@@ -187,8 +186,6 @@ private fun LingApp(viewModel: BrowserViewModel) {
     val hasOverlay = backStack.size > 1
     BackHandler(enabled = hasOverlay) { pop() }
 
-    val tabs by viewModel.tabs.collectAsStateWithLifecycle()
-    val activeId by viewModel.activeId.collectAsStateWithLifecycle()
     val bookmarks by viewModel.bookmarks.collectAsStateWithLifecycle()
     val bookmarkFolders by viewModel.bookmarkFolders.collectAsStateWithLifecycle()
     val history by viewModel.history.collectAsStateWithLifecycle()
@@ -217,14 +214,16 @@ private fun LingApp(viewModel: BrowserViewModel) {
         }
     }
 
-    // 标签页面板是**叠加层**而非独立页面：BrowserScreen 必须一直挂载着，
-    // 否则 when 一切换它就被卸载，DisposableEffect 会 detachHost 把 WebView
-    // 摘下来 —— 面板背后就成了空白，自然"透"不出网页。
+    // 所有上层界面（书签 / 历史 / 设置 / 嗅探…）都是**叠加层**而非独立页面：
+    // BrowserScreen 必须一直挂载着，否则 when 一切换它就被卸载，
+    // DisposableEffect 会 detachHost 把 WebView 摘下来 —— 上层背后就成了空白。
+    //
+    // 注：「标签页」与「更多」两个面板现在由 BrowserScreen 内部的
+    // ModalBottomSheet 承载，不再经过这里的路由。
     Box(modifier = Modifier.fillMaxSize()) {
-        // 底层：浏览页常驻。叠加层打开时它不再处理返回键。
+        // 底层：浏览页常驻。上层叠加时它不再处理返回键。
         BrowserScreen(
             viewModel = viewModel,
-            onOpenTabs = { push(Route.Tabs) },
             onOpenBookmarks = { push(Route.Bookmarks) },
             onOpenHistory = { push(Route.History) },
             onOpenDownloads = { push(Route.Downloads) },
@@ -233,33 +232,9 @@ private fun LingApp(viewModel: BrowserViewModel) {
             canHandleBack = !hasOverlay,
         )
 
-        // 上层：二级页面。不带遮罩的页面（书签/历史/设置）自己是不透明的，
-        // 会盖住底层；只有标签页面板故意留出透明区域。
+        // 上层：二级页面。这些页面自己是不透明的，会盖住底层浏览页。
         when (route) {
             Route.Browser -> Unit
-
-            Route.Tabs -> TabsScreen(
-                tabs = tabs,
-                activeId = activeId,
-                onSelect = {
-                    viewModel.switchTab(it)
-                    pop()
-                },
-                onClose = viewModel::closeTab,
-                onNewTab = {
-                    viewModel.newTab()
-                    pop()
-                },
-                onNewIncognitoTab = {
-                    viewModel.newIncognitoTab()
-                    pop()
-                },
-                onCloseAll = { tabs.forEach { viewModel.closeTab(it.id) } },
-                onMoveTab = viewModel::moveTab,
-                onBack = pop,
-                tabsHeight = settings.tabsHeight,
-                onTabsHeightChange = viewModel::setTabsHeight,
-            )
 
             Route.Bookmarks -> {
                 // 进书签页时补一次图标。放在这里而不是 setContent 里：
@@ -307,6 +282,8 @@ private fun LingApp(viewModel: BrowserViewModel) {
                 settings = settings,
                 onSearchEngine = viewModel::setSearchEngine,
                 onHomepage = viewModel::setCustomHomepage,
+                onHomeBackground = viewModel::setHomeBackground,
+                onHomeBackgroundImage = viewModel::setHomeBackgroundImageUri,
                 onNightMode = viewModel::setNightMode,
                 onDesktopMode = viewModel::setDesktopMode,
                 onDynamicColor = viewModel::setDynamicColor,
@@ -350,7 +327,6 @@ private fun LingApp(viewModel: BrowserViewModel) {
 
 private sealed interface Route {
     data object Browser : Route
-    data object Tabs : Route
     data object Bookmarks : Route
     data object History : Route
     data object Downloads : Route

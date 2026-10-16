@@ -19,6 +19,47 @@ private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(na
 enum class NightMode { FOLLOW_SYSTEM, ALWAYS_ON, ALWAYS_OFF }
 
 /**
+ * 内置主页的背景模式。
+ *
+ * 移植自 OnyxBrowser 的起始页背景设计，但做了轻量化取舍：
+ *  - [SOLID]  纯色：沿用 Material You 主题色，主页 HTML 自己画背景（默认，行为与旧版一致）；
+ *  - [CUSTOM] 自定义图片：由原生层把用户选的图片画在 WebView **之下**，主页 HTML 背景透明让出空间。
+ *
+ * 为什么不做 Onyx 那套"窗口透明 + SurfaceFlinger 透传"：那需要把整个 App 的窗口改成
+ * 半透明（`PixelFormat.TRANSLUCENT` + `FLAG_SHOW_WALLPAPER`）并让最外层 Surface 也透明，
+ * 会牵连每一个二级页面；对「翎」这种轻量目标来说代价过大。这里改为在主页这一层
+ * 直接画背景位图 —— 效果一致，且不影响其它界面。
+ *
+ * 曾经还有一档「系统壁纸」：用 `WallpaperManager.getDrawable()` 取系统壁纸位图来画。
+ * 但该接口在部分 ROM 上受存储权限/厂商定制影响拿不到位图，只能静默退化成一块纯色底，
+ * 收益低且行为不可预期，已移除。历史值 `"wallpaper"` 由 [fromKey] 兜底成 [SOLID]。
+ */
+enum class HomeBackground(val key: String, val label: String) {
+    SOLID("solid", "纯色"),
+    CUSTOM("custom", "自定义图片");
+
+    /**
+     * 该模式是否让主页 HTML 的背景透明、由原生层来画背景。
+     *
+     * 纯逻辑派生属性（可单测）：只有 [SOLID] 需要主页自己填背景色，
+     * 其余档位都必须透明，否则会把原生画好的图片整个盖住。
+     */
+    val transparent: Boolean get() = this != SOLID
+
+    companion object {
+        /**
+         * 从持久化的 key 还原。
+         *
+         * 与 [TabsHeight] 同款兜底：老版本/脏数据里可能出现未知的 key
+         * （例如已移除的 `"wallpaper"`），直接 valueOf 会抛异常导致启动闪退，
+         * 这里退回默认 [SOLID]。
+         */
+        fun fromKey(key: String?): HomeBackground =
+            entries.firstOrNull { it.key == key } ?: SOLID
+    }
+}
+
+/**
  * 标签页管理页的高度档位。
  *
  * 只有两档。原先还有个 1/4 档，但配合半透明面板后，1/4 的高度连两三个
@@ -70,6 +111,23 @@ data class LingSettings(
      */
     val searchEngine: SearchEngine = SearchEngine.BING,
     val customHomepage: String = "",
+    /**
+     * 内置主页的背景模式。
+     *
+     * 默认 [HomeBackground.SOLID]：保持旧版行为（主页用主题色自绘背景），
+     * 新用户不主动去设置里改时不会感知到这次改动。
+     */
+    val homeBackground: HomeBackground = HomeBackground.SOLID,
+    /**
+     * 自定义主页背景图片的 `content://` URI（仅在 [homeBackground] 为
+     * [HomeBackground.CUSTOM] 时有意义）。
+     *
+     * 存 URI 字符串而不是位图：位图动辄几十 MB，塞进 DataStore 既不合规范
+     * （Preferences 只该存小标量），也会让每次读设置都反序列化一大坨数据。
+     * 这里只在真正需要画背景时按 URI 去解码，并且解码时会做降采样（见
+     * `HomeBackgroundLayer`），避免大图直接 OOM。
+     */
+    val homeBackgroundImageUri: String = "",
     val nightMode: NightMode = NightMode.FOLLOW_SYSTEM,
     val desktopMode: Boolean = false,
     val dynamicColor: Boolean = true,
@@ -169,6 +227,8 @@ class SettingsStore(private val context: Context) {
     private object Keys {
         val SEARCH_ENGINE = stringPreferencesKey("search_engine")
         val CUSTOM_HOMEPAGE = stringPreferencesKey("custom_homepage")
+        val HOME_BACKGROUND = stringPreferencesKey("home_background")
+        val HOME_BACKGROUND_URI = stringPreferencesKey("home_background_uri")
         val NIGHT_MODE = stringPreferencesKey("night_mode")
         val DESKTOP_MODE = booleanPreferencesKey("desktop_mode")
         val DYNAMIC_COLOR = booleanPreferencesKey("dynamic_color")
@@ -190,6 +250,9 @@ class SettingsStore(private val context: Context) {
                 ?.let { runCatching { SearchEngine.valueOf(it) }.getOrNull() }
                 ?: SearchEngine.BING,
             customHomepage = p[Keys.CUSTOM_HOMEPAGE] ?: "",
+            // fromKey 内部兜底：未知 key 退回 SOLID，不会因脏数据闪退。
+            homeBackground = HomeBackground.fromKey(p[Keys.HOME_BACKGROUND]),
+            homeBackgroundImageUri = p[Keys.HOME_BACKGROUND_URI] ?: "",
             nightMode = p[Keys.NIGHT_MODE]
                 ?.let { runCatching { NightMode.valueOf(it) }.getOrNull() }
                 ?: NightMode.FOLLOW_SYSTEM,
@@ -221,6 +284,19 @@ class SettingsStore(private val context: Context) {
 
     suspend fun setCustomHomepage(url: String) =
         context.dataStore.edit { it[Keys.CUSTOM_HOMEPAGE] = url.trim() }
+
+    suspend fun setHomeBackground(mode: HomeBackground) =
+        context.dataStore.edit { it[Keys.HOME_BACKGROUND] = mode.key }
+
+    /**
+     * 保存自定义主页背景图片的 URI。
+     *
+     * 只存字符串。持久化读权限（`takePersistableUriPermission`）由**取图的那一侧**
+     * （设置页的 ActivityResult 回调）负责申请 —— 这里不做，因为它需要 Activity/Context
+     * 与 Intent flag，属于 UI 职责；存储层只忠实落库。
+     */
+    suspend fun setHomeBackgroundImageUri(uri: String) =
+        context.dataStore.edit { it[Keys.HOME_BACKGROUND_URI] = uri.trim() }
 
     suspend fun setNightMode(mode: NightMode) =
         context.dataStore.edit { it[Keys.NIGHT_MODE] = mode.name }

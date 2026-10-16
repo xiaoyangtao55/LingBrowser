@@ -35,7 +35,7 @@ IMPORT_WHITELIST_SUFFIX = (
 
 # 本工程自定义 composable 的必需具名参数（重构重点）
 SIGNATURES = {
-    "BottomToolbar": ["canGoBack", "moreExpanded", "onMoreToggle", "onMoreDismiss"],
+    "BottomToolbar": ["canGoBack", "onTabs", "onMore"],
     "AddressBar": ["onReloadOrStop", "suggestions", "onSuggestionClick"],
     "TabsScreen": ["tabsHeight", "onTabsHeightChange"],
     "SettingsScreen": ["onTabsHeight"],

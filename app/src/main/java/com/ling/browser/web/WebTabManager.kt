@@ -397,6 +397,10 @@ class WebTabManager(private val context: Context) {
             loadHome(id, wv)
             return
         }
+        // 普通网页恢复 WebView 自身的不透明底（白色，与默认一致）：
+        // 主页的透明底是在壁纸/自定义图片模式下特设的，若带到普通网页上，
+        // 页面自身的透明区域会露出下面的 Compose 背景，观感不对。
+        wv.setOpaqueBackground(true)
         updateTab(id) { it.copy(url = url, errorText = null, isLoading = true, progress = 0) }
         wv.loadUrl(url)
     }
@@ -519,6 +523,8 @@ class WebTabManager(private val context: Context) {
                 progress = 100,
             )
         }
+        // 阅读视图有自己烘好的主题底色，恢复 WebView 不透明底即可（与旧版一致）。
+        wv.setOpaqueBackground(true)
         wv.loadDataWithBaseURL(
             ReaderPage.BASE_URL,
             readerHtml(result),
@@ -609,10 +615,14 @@ class WebTabManager(private val context: Context) {
      * 历史里压入一个新条目（见 [HomePage.themeUpdateJs] 的说明）。而「主页」是
      * 底部工具栏上的常驻按钮，用户很容易连点 —— 那样会攒下一串一模一样的历史条目：
      * 返回键是亮的，按一下却回到同一个主页（看着像"没反应"），要连按好几次才能退出主页。
-     * 原地刷新只改 CSS 变量与快捷入口，不产生导航，行为与主题切换时完全一致。
+     * 原地刷新只改 CSS 变量，不产生导航，行为与主题切换时完全一致。
      */
     private fun loadHomeOrRefresh(id: String, wv: LingWebView) {
         if (isHomeRendered(wv)) {
+            // 原地刷新：同时把 WebView 自身背景对齐到当前模式 —— 背景模式
+            // （纯色 ↔ 自定义图片）变化也是一次"外观变化"，只改 CSS 变量而
+            // 不动 WebView 背景，旧的不透明白底会继续盖住原生背景层。
+            wv.setOpaqueBackground(!homeColors.transparent)
             wv.evaluateJavascript(homeThemeJs(), null)
             updateTab(id) {
                 it.copy(
@@ -622,7 +632,8 @@ class WebTabManager(private val context: Context) {
                     errorText = null,
                     isLoading = false,
                     progress = 100,
-                    canGoBack = wv.canGoBack(),
+                    // 主页是历史起点：停在主页时返回键始终不可用（见本函数说明）。
+                    canGoBack = false,
                     canGoForward = wv.canGoForward(),
                 )
             }
@@ -661,17 +672,18 @@ class WebTabManager(private val context: Context) {
                 canGoForward = false,
             )
         }
+        // 主页自身背景是否透明：自定义图片模式下让 WebView 与 HTML 都透明，
+        // 才能把原生层画在 WebView 之下的背景图透出来。
+        wv.setOpaqueBackground(!homeColors.transparent)
         wv.loadDataWithBaseURL(
             HomePage.BASE_URL,
             HomePage.html(
-                background = homeColors.background,
+                background = homeBackgroundColor(),
                 onBackground = homeColors.onBackground,
-                primary = homeColors.primary,
-                onPrimary = homeColors.onPrimary,
                 primaryContainer = homeColors.primaryContainer,
                 onPrimaryContainer = homeColors.onPrimaryContainer,
                 dark = homeColors.dark,
-                links = homeColors.links,
+                clock = clockText(),
             ),
             "text/html",
             "utf-8",
@@ -691,7 +703,16 @@ class WebTabManager(private val context: Context) {
         val primaryContainer: String = "#A8F2CB",
         val onPrimaryContainer: String = "#00210F",
         val dark: Boolean = false,
-        val links: List<Pair<String, String>> = emptyList(),
+        /**
+         * 主页是否让出背景（自定义图片模式）。
+         *
+         * 为 true 时主页 HTML 的背景写成透明（[HomePage.TRANSPARENT_BG]），
+         * 由原生背景层（`HomeBackgroundLayer`）画在 WebView 之下。
+         * 把它并入 [HomeColors] 而不是单开一个字段：两者都是"主页外观"的一部分，
+         * 放在一起才能让 UI 层用**一次**相等性判断决定要不要重绘主页 ——
+         * 分成两处的话，改背景模式时很容易漏触发重绘（表现为"设了没反应"）。
+         */
+        val transparent: Boolean = false,
     )
 
     /**
@@ -714,19 +735,15 @@ class WebTabManager(private val context: Context) {
      */
     fun ensureHomeRendered() {
         _tabs.value.filter { HomePage.isHomeUrl(it.url) }.forEach { tab ->
-            val existing = webViews[tab.id]
-            // 关键：只有当 WebView 已经**真的渲染出主页**（url 落到 BASE_URL）
-            // 才走原地刷新。冷启动时首帧前 WebView 还是 about:blank，此时
-            // evaluateJavascript 会打在空文档上、白注入一次 —— 必须走完整渲染。
-            if (existing != null && isHomeRendered(existing)) {
-                // 已渲染的主页：原地刷新主题变量与快捷入口，**不重导航**。
-                // 重导航会压入新历史条目，导致"切深色后按返回回到浅色主页"。
-                existing.evaluateJavascript(homeThemeJs(), null)
-            } else {
-                // 冷启动 / 被 LRU 回收后重建：完整渲染。
-                // 此时 WebView 尚无内容，无所谓历史，loadDataWithBaseURL 只产生一个条目。
-                loadHome(tab.id, obtainWebView(tab.id))
-            }
+            // 统一走 [loadHomeOrRefresh]（也就是「点主页按钮」那条路径），
+            // 不要再在这里手写一份"原地刷新"：
+            //   - 它会自己判断是否已经真的渲染出主页，冷启动 / 被 LRU 回收时
+            //     走完整渲染（此时直接 evaluateJavascript 会打在 about:blank 上白注入）；
+            //   - 它同时对齐 WebView 自身背景与标签状态。
+            // 早先这里另写了一份分支，漏了 WebView 背景那一行，导致两条路径行为
+            // 不一致 —— 改背景模式后主页仍是不透明白底，表现为"设了没生效、
+            // 得手动按一下主页按钮"。
+            loadHomeOrRefresh(tab.id, obtainWebView(tab.id))
         }
         // 阅读视图同样是原生渲染的自包含页面，也必须跟着重新配色 ——
         // 否则在阅读模式里切换夜间模式时，页面会停在旧配色。
@@ -739,19 +756,28 @@ class WebTabManager(private val context: Context) {
         }
     }
 
-    /** 主页原地刷新的 JS：主题变量 + 快捷入口，见 [HomePage.themeUpdateJs]。 */
+    /**
+     * 主页 HTML 该用的背景色。
+     *
+     * 自定义图片模式返回 [HomePage.TRANSPARENT_BG]，让主页让出背景给原生背景层；
+     * 纯色模式返回主题背景色。抽成一个取值点，保证"完整渲染"（[loadHome]）
+     * 与"原地刷新"（[homeThemeJs]）用的是同一个背景，不会一处透明、一处不透明。
+     */
+    private fun homeBackgroundColor(): String =
+        if (homeColors.transparent) HomePage.TRANSPARENT_BG else homeColors.background
+
+    /** 主页原地刷新的 JS：只改主题变量，见 [HomePage.themeUpdateJs]。 */
     private fun homeThemeJs(): String = HomePage.themeUpdateJs(
-        background = homeColors.background,
+        background = homeBackgroundColor(),
         onBackground = homeColors.onBackground,
         primary = homeColors.primary,
         onPrimary = homeColors.onPrimary,
         primaryContainer = homeColors.primaryContainer,
         onPrimaryContainer = homeColors.onPrimaryContainer,
         dark = homeColors.dark,
-        linksHtml = HomePage.linksHtml(homeColors.links),
     )
 
-    /** 阅读视图原地刷新的 JS：只改主题变量（快捷入口传空）。 */
+    /** 阅读视图原地刷新的 JS：与主页共用同一份脚本，见 [HomePage.themeUpdateJs]。 */
     private fun readerThemeJs(): String = HomePage.themeUpdateJs(
         background = homeColors.background,
         onBackground = homeColors.onBackground,
@@ -760,11 +786,39 @@ class WebTabManager(private val context: Context) {
         primaryContainer = homeColors.primaryContainer,
         onPrimaryContainer = homeColors.onPrimaryContainer,
         dark = homeColors.dark,
-        linksHtml = "",
     )
 
+    /** 当前时间文本（`HH:mm`），供主页时钟使用。 */
+    private fun clockText(): String =
+        java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
+            .format(java.util.Date())
+
+    /**
+     * 刷新显示中主页的时钟。
+     *
+     * 由 UI 层每分钟调用一次（见 BrowserScreen 的定时器）。主页是**零脚本** HTML，
+     * 时间不能自己走，只能由原生侧把文本注入回去 —— 只改那一个文本节点，
+     * 不碰 DOM 结构、不触发导航、不压历史。
+     */
+    fun updateHomeClock() {
+        val js = HomePage.clockJs(clockText())
+        _tabs.value.filter { HomePage.isHomeUrl(it.url) }.forEach { tab ->
+            val wv = webViews[tab.id] ?: return@forEach
+            if (isHomeRendered(wv)) wv.evaluateJavascript(js, null)
+        }
+    }
+
     fun reload(id: String = _activeId.value) {
-        obtainWebView(id).reload()
+        val wv = obtainWebView(id)
+        // 主页是原生拼接的 HTML：`--bg` 是 [loadHome] 时按当时的背景模式注入的
+        // 内联变量。若直接 reload，会重新解析那份**旧** HTML，把背景变量拉回
+        // 切换前的值（切了壁纸/图片后再点刷新，主页会退回纯色底）。
+        // 对主页改用重新渲染，保证背景与当前设置一致；普通网页照常 reload。
+        if (isHomeRendered(wv)) {
+            loadHomeOrRefresh(id, wv)
+        } else {
+            wv.reload()
+        }
     }
 
     fun stopLoading(id: String = _activeId.value) {
@@ -903,7 +957,12 @@ class WebTabManager(private val context: Context) {
                             },
                             isLoading = !isInternal,
                             errorText = null,
-                            canGoBack = canGoBack(),
+                            // 主页是历史起点：任何一次回调都不能把返回键点亮。
+                            // loadDataWithBaseURL 每次调用都会往历史栈压条目，
+                            // 之后 onPageStarted/Finished 读到 wv.canGoBack() 是 true，
+                            // 会覆盖掉 loadHome/loadHomeOrRefresh 写下的 false ——
+                            // 这里显式再挡一次，保证"停在主页 ⟺ 不可返回"始终成立。
+                            canGoBack = if (isHome) false else canGoBack(),
                             canGoForward = canGoForward(),
                         )
                     }
@@ -927,7 +986,8 @@ class WebTabManager(private val context: Context) {
                             title = if (isHome) it.title else title.ifBlank { it.title },
                             isLoading = false,
                             progress = 100,
-                            canGoBack = canGoBack(),
+                            // 主页同 onPageStarted：绝不让返回键在主页上点亮。
+                            canGoBack = if (isHome) false else canGoBack(),
                             canGoForward = canGoForward(),
                         )
                     }
@@ -1031,6 +1091,7 @@ class WebTabManager(private val context: Context) {
         // 所有"把实时地址写回状态"的地方都先过 InternalPage 归一化。
         val live = wv.url?.trim().orEmpty()
         val internalPage = InternalPage.isInternal(live)
+        val isHomePage = HomePage.isHomeUrl(live)
         updateTab(id) {
             it.copy(
                 url = InternalPage.logicalUrl(live) ?: it.url,
@@ -1042,7 +1103,9 @@ class WebTabManager(private val context: Context) {
                 } else {
                     wv.title?.takeIf { t -> t.isNotBlank() } ?: it.title
                 },
-                canGoBack = wv.canGoBack(),
+                // 主页是历史起点：切回主页标签时返回键同样必须不可用（与
+                // loadHome / 页面回调三处保持一致）。
+                canGoBack = if (isHomePage) false else wv.canGoBack(),
                 canGoForward = wv.canGoForward(),
             )
         }

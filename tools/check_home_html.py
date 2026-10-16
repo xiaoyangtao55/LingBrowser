@@ -20,20 +20,14 @@ KOTLIN = os.path.join(
 SAMPLE = {
     "background": "#FFFBFE",
     "onBackground": "#1C1B1F",
-    "primary": "#1B6C4B",
-    "onPrimary": "#FFFFFF",
     "primaryContainer": "#A8F2CB",
     "onPrimaryContainer": "#00210F",
     "dark": "false",
     # 与 Kotlin 的 HomePage.SEARCH_URL 必须一致：下面有专门的漂移检查
     "SEARCH_URL": "ling://search",
-    "quickLinks": (
-        '<div class="links" id="ling-quick-links">'
-        '<a class="link" href="https://www.baidu.com">'
-        '<span class="avatar">百</span>'
-        '<span class="link-label">百度</span></a>'
-        "</div>"
-    ),
+    # 时钟节点 id 与初始时间（由原生侧生成，主页是零脚本 HTML）
+    "CLOCK_ID": "ling-clock",
+    "clock": "12:00",
 }
 
 
@@ -135,11 +129,13 @@ def main():
         problems.append(f"(提示) 定义了但未使用的 CSS 变量: {sorted(unused)}")
 
     # 5) 关键元素存在
+    #    主页已极简到只有「时钟 + 搜索框」：既检查该在的在，
+    #    也（见第 7 节）确认不该在的（logo / 品牌标题 / 快捷入口）不在。
     for need, desc in [
         ('<meta charset="utf-8">', "字符集声明"),
         ("viewport", "viewport 声明"),
-        ("<h1>翎</h1>", "品牌标题"),
-        ('class="mark"', "品牌图标容器"),
+        ('class="clock"', "时钟节点"),
+        ('id="ling-clock"', "时钟 DOM id"),
         ('class="search"', "主页搜索框"),
         ('name="q"', "搜索框参数名"),
         ("env(safe-area-inset-bottom)", "刘海屏安全区适配"),
@@ -168,25 +164,32 @@ def main():
 
     # 6) 布局：内容高于视口时顶部不能被裁掉。
     #    body 固定 height:100% + flex 的 justify-content:center 时，溢出的内容会被
-    #    顶到滚动区**上方**，滚不上去 —— logo 与「翎」直接看不见（横屏 / 分屏 /
-    #    小屏 + 8 个快捷入口都会触发）。必须用 min-height 让 body 随内容长高。
+    #    顶到滚动区**上方**，滚不上去 —— 时钟与搜索框直接看不见（横屏 / 分屏 /
+    #    小屏 + 大号时钟都会触发）。必须用 min-height 让 body 随内容长高。
     if re.search(r"body\s*\{[^}]*?(?<!min-)height:\s*100%", body):
         problems.append("body 固定了 height:100% —— 内容高于视口时顶部会被裁掉且滚不上去")
     if "min-height: 100%" not in body:
         problems.append("body 缺少 min-height:100% —— 内容高于视口时布局会出问题")
 
-    # 7) 快捷入口只能靠 **id** 定位。
-    #    主题刷新脚本（themeUpdateJs）也会跑在阅读视图上，而阅读视图的正文来自
-    #    第三方网页，里面完全可能有 class="links" 的元素（"相关链接"这类）——
-    #    用 class 选择器会把正文里那个元素当成快捷入口删掉，直接损坏文章内容。
-    if 'const val QUICK_LINKS_ID = "ling-quick-links"' not in src:
-        problems.append("快捷入口缺少固定的 DOM id 常量（QUICK_LINKS_ID）")
-    if 'id="$QUICK_LINKS_ID"' not in src:
-        problems.append("快捷入口区块没有带上 QUICK_LINKS_ID")
-    if "getElementById('$QUICK_LINKS_ID')" not in src:
-        problems.append("主题刷新脚本没有用 id 定位快捷入口")
-    if "querySelector('.links')" in src:
-        problems.append("主题刷新脚本用了 class 选择器 —— 会误删阅读视图正文里的 class=links 元素")
+    # 7) 极简约束的反向检查：主页只该有「时钟 + 搜索框」。
+    #    早期版本有一堆 logo / 品牌标题 / 书签快捷入口，重构后已移除；
+    #    这里立项防止它们日后被"顺手加回来"。
+    #    注意：快捷入口曾用固定 DOM id（QUICK_LINKS_ID）做主题刷新，那段逻辑
+    #    随快捷入口一并删除 —— 若 src 里又出现 QUICK_LINKS_ID，说明被加回来了。
+    for bad, desc in [
+        ("<h1", "品牌标题"),
+        ('class="mark"', "品牌图标容器"),
+        ('class="links"', "快捷入口区块"),
+        ('class="link-label"', "快捷入口文字"),
+        ("QUICK_LINKS_ID", "快捷入口的 DOM id 常量"),
+        ("linksHtml", "快捷入口 HTML 片段生成器"),
+    ]:
+        if bad in body or bad in src:
+            problems.append(f"主页已极简，不应再有{desc}（{bad}）")
+
+    # 7b) 主页是**零脚本** HTML：不能自带 <script>，时钟由原生侧注入刷新。
+    if "<script" in body:
+        problems.append("主页不应内嵌 <script> —— 时钟等动态内容由原生侧注入")
 
     print(f"模板 {len(tpl)} 字符，实例化后 {len(body)} 字符")
     print(f"标签总数 {len(c.tags)}：{', '.join(sorted(set(c.tags)))}")

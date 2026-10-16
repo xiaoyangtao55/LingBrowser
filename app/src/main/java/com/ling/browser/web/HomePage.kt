@@ -10,6 +10,13 @@ package com.ling.browser.web
  *  - 不联网、不请求任何外部资源，打开即显示；
  *  - 主题色由原生侧通过 CSS 变量注入，跟随 Material You 动态取色；
  *  - 深色模式同步切换，不会白屏闪一下。
+ *
+ * 页面内容刻意保持极简 —— **只有一个时钟 + 一个搜索框**（参照 OnyxBrowser 起始页
+ * 的极简形态做了取舍，没有 logo、标题、快捷入口）：
+ *  - 时钟由原生侧生成文本、并用 [clockJs] 每分钟原地刷新：主页是**零脚本** HTML
+ *    （见 `tools/check_home_html.py` 对 `<script>` 的禁令），不能自带 setInterval；
+ *  - 搜索框提交到内部地址 [SEARCH_URL]，由原生用同一套 UrlUtils 判定
+ *    「网址还是搜索词」，不在网页里重写一遍判定逻辑。
  */
 object HomePage {
 
@@ -39,22 +46,6 @@ object HomePage {
     private const val LEGACY_URL = "about:home"
 
     /**
-     * 快捷入口区块的 DOM id。
-     *
-     * 主题刷新脚本必须用它（而不是 `class="links"` 选择器）来定位**自己**的快捷入口：
-     * 同一份脚本也会跑在阅读视图上，而那边的正文来自第三方网页，
-     * 里面完全可能有 `class="links"` 的元素（"相关链接"这类），
-     * 用 class 选择器会把正文里那个元素当成快捷入口删掉。
-     */
-    const val QUICK_LINKS_ID = "ling-quick-links"
-
-    /** 该 URL 是否指向内置主页。 */
-    fun isHomeUrl(url: String?): Boolean {
-        val u = url?.trim().orEmpty()
-        return u.isEmpty() || u == URL || u == BASE_URL || u == LEGACY_URL
-    }
-
-    /**
      * 主页搜索框提交到的内部地址（表单 action）。
      *
      * 为什么不是真正的搜索地址：输入可能是**网址**也可能是**搜索词**，而判定逻辑
@@ -65,6 +56,30 @@ object HomePage {
      * 明令不许 `<script>`），而一次普通表单提交同样会走 `shouldOverrideUrlLoading`。
      */
     const val SEARCH_URL = "ling://search"
+
+    /**
+     * 透明背景的 CSS 颜色值。
+     *
+     * 非纯色背景模式（自定义图片）下，[html] 的 `background` 传这个值，
+     * 主页便不再自绘背景，从而让原生层画在 WebView **之下**的背景透出来。
+     * 抽成常量是为了让"透明"这个字符串只有一个来源 —— 散落的字面量一旦
+     * 有一处写错（比如拼成 `none`），主页就会突然变成白底，很难查。
+     */
+    const val TRANSPARENT_BG = "transparent"
+
+    /**
+     * 时钟元素的 DOM id。
+     *
+     * 原生侧原地刷新时间（[clockJs]）时用它定位；抽成常量避免 HTML 与 JS 两处
+     * 各写一份字符串，改了一处漏一处会导致"时间不走了"且不报任何错。
+     */
+    const val CLOCK_ID = "ling-clock"
+
+    /** 该 URL 是否指向内置主页。 */
+    fun isHomeUrl(url: String?): Boolean {
+        val u = url?.trim().orEmpty()
+        return u.isEmpty() || u == URL || u == BASE_URL || u == LEGACY_URL
+    }
 
     /**
      * 从主页搜索框提交的地址里取出查询串；不是这个地址就返回 null。
@@ -90,27 +105,21 @@ object HomePage {
     /**
      * 生成主页 HTML。
      *
-     * @param background      页面背景色（CSS 颜色）
-     * @param onBackground    正文颜色
-     * @param primary         强调色（品牌标记背景）
-     * @param onPrimary       强调色上的文字颜色
-     * @param primaryContainer 次级强调色（快捷入口背景）
-     * @param onPrimaryContainer 其次级上的文字颜色
-     * @param dark            是否深色模式
-     * @param links           常用站点（书签），最多取 8 个
+     * @param background          页面背景色（CSS 颜色）
+     * @param onBackground        正文颜色
+     * @param primaryContainer    搜索框底色
+     * @param onPrimaryContainer  搜索框上的文字颜色
+     * @param dark                是否深色模式
+     * @param clock               初始时间文本（`HH:mm`），之后由 [clockJs] 原地刷新
      */
     fun html(
         background: String,
         onBackground: String,
-        primary: String,
-        onPrimary: String,
         primaryContainer: String,
         onPrimaryContainer: String,
         dark: Boolean,
-        links: List<Pair<String, String>> = emptyList(),
+        clock: String = "",
     ): String {
-        val quickLinks = linksHtml(links)
-
         return """
 <!DOCTYPE html>
 <html lang="zh-CN">
@@ -127,16 +136,14 @@ object HomePage {
     color-scheme: ${if (dark) "dark" else "light"};
     --bg: $background;
     --fg: $onBackground;
-    --primary: $primary;
-    --on-primary: $onPrimary;
     --pc: $primaryContainer;
     --on-pc: $onPrimaryContainer;
   }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   /* html 占满视口，body 只给 min-height、**不**固定 height：
-     内容比视口高时（横屏 / 分屏 / 小屏 + 8 个快捷入口），height:100% 会把
+     内容比视口高时（横屏 / 分屏 / 小屏 + 大号时钟），height:100% 会把
      body 固死在视口高度，flex 的 justify-content:center 就把溢出的那部分
-     顶到滚动区**上方** —— 滚不上去，logo 和「翎」直接被裁掉看不到。
+     顶到滚动区**上方** —— 滚不上去，时钟和搜索框直接被裁掉看不到。
      用 min-height 让 body 随内容长高：装得下才居中，装不下就从头排、正常滚动。 */
   html { height: 100%; }
   html, body {
@@ -145,6 +152,8 @@ object HomePage {
     font-family: -apple-system, "Noto Sans SC", "PingFang SC",
                  "Microsoft YaHei", Roboto, sans-serif;
   }
+  /* 垂直居中：键盘弹出时 WebView 视口被原生侧的 imePadding 压矮，
+     flex 居中会让时钟与搜索框一起上移，正好实现"搜索框跟随输入法"。 */
   body {
     min-height: 100%;
     display: flex; flex-direction: column;
@@ -152,28 +161,15 @@ object HomePage {
     padding: 32px 24px calc(32px + env(safe-area-inset-bottom));
     text-align: center;
   }
-  .mark {
-    width: 76px; height: 76px; border-radius: 50%;
-    background: var(--pc);
-    display: flex; align-items: center; justify-content: center;
-    margin-bottom: 18px;
-  }
-  .mark svg { width: 40px; height: 40px; display: block; }
-  /* SVG 的 stroke 作为"表现属性"不解析 var()，必须走 CSS 才能拿到主题色 */
-  .mark svg path { stroke: var(--on-pc); }
-  h1 {
-    font-size: 40px; font-weight: 600; margin: 0;
-    letter-spacing: 8px; text-indent: 8px;
-    color: var(--fg);
-  }
-  .tagline {
-    margin-top: 8px; font-size: 14px;
-    color: var(--fg); opacity: .6; letter-spacing: 1px;
+  .clock {
+    font-size: 64px; font-weight: 300; line-height: 1;
+    letter-spacing: 2px; color: var(--fg);
+    /* 等宽数字：分钟跳动时各位不会左右抖 */
+    font-variant-numeric: tabular-nums;
   }
   /* 搜索框：提交到内部地址 ling://search?q=…（见 HomePage.SEARCH_URL），
-     由原生用同一套 UrlUtils 判定「网址还是搜索词」。配色只用 --pc / --on-pc，
-     与 logo 圆底保持同一套。 */
-  .search { width: 100%; max-width: 320px; margin-top: 26px; }
+     由原生用同一套 UrlUtils 判定「网址还是搜索词」。 */
+  .search { width: 100%; max-width: 320px; margin-top: 28px; }
   .search input {
     width: 100%; padding: 12px 16px;
     border: none; border-radius: 24px;
@@ -183,63 +179,12 @@ object HomePage {
   }
   .search input:focus { outline: none; }
   .search input::placeholder { color: var(--on-pc); opacity: .6; }
-  .links {
-    display: flex; flex-wrap: wrap; gap: 14px 10px;
-    justify-content: center; margin-top: 22px;
-    max-width: 320px;
-  }
-  .link {
-    width: 62px; text-decoration: none; color: inherit;
-    display: flex; flex-direction: column; align-items: center;
-    border-radius: 12px; padding: 6px 0;
-    transition: background .15s;
-  }
-  /* 用主色做极轻的按压反馈，保持"干净"的观感 */
-  .link:active { background: var(--pc); }
-  .avatar {
-    width: 48px; height: 48px; border-radius: 50%;
-    background: var(--primary); color: var(--on-primary);
-    display: flex; align-items: center; justify-content: center;
-    font-size: 20px; font-weight: 600;
-  }
-  .link-label {
-    margin-top: 6px; font-size: 11px;
-    color: var(--fg); opacity: .7;
-    max-width: 62px; overflow: hidden;
-    text-overflow: ellipsis; white-space: nowrap;
-  }
-  .hint {
-    position: fixed; left: 0; right: 0;
-    bottom: calc(16px + env(safe-area-inset-bottom));
-    font-size: 12px; color: var(--fg); opacity: .45;
-    text-align: center; padding: 0 24px;
-  }
 </style>
 </head>
 <body>
-  <div class="mark">
-    <!--
-      羽毛：与启动图标同一造型（裸羽柄 + 弯曲羽轴 + 朝根部斜切的羽枝缝）。
-      描边色走上面的 CSS 规则 —— 写成 stroke="var(--on-pc)" 表现属性是无效的。
-    -->
-    <svg viewBox="0 0 24 24" fill="none"
-         stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-      <!-- 羽片：凸侧（右下）饱满 -->
-      <path d="M21.27 5.21 C20.17 7.27 19.61 8.3 19.23 8.98 C18.86 9.65 18.47 10.33 18.08 10.99 C17.69 11.66 17.3 12.32 16.89 12.96 C16.48 13.6 16.07 14.25 15.63 14.86 C15.19 15.47 14.78 16.12 14.24 16.63 C13.7 17.14 13.04 17.6 12.38 17.91 C11.73 18.21 11.04 18.38 10.32 18.44 C9.59 18.49 8.42 18.25 8.05 18.22"/>
-      <!-- 羽片：平侧（左上）近直，根部比凸侧收得早，形成斜切 -->
-      <path d="M21.27 5.21 C18.9 5.96 17.74 6.35 16.99 6.64 C16.23 6.93 15.49 7.23 14.77 7.55 C14.04 7.86 13.33 8.19 12.64 8.54 C11.95 8.9 11.26 9.25 10.62 9.66 C9.98 10.06 9.33 10.45 8.79 10.96 C8.24 11.47 7.75 12.12 7.37 12.7 C6.98 13.28 6.68 13.85 6.47 14.44 C6.26 15.02 6.17 15.91 6.1 16.2"/>
-      <!-- 羽轴：从羽尖穿过羽片，伸出成一段裸羽柄 -->
-      <path d="M21.27 5.21 C18.95 6.83 17.58 7.82 16.69 8.5 C15.8 9.19 14.92 9.89 14.06 10.61 C13.2 11.32 12.35 12.06 11.52 12.8 C10.68 13.54 9.8 14.35 9.04 15.06 C8.28 15.77 7.58 16.45 6.94 17.06 C6.29 17.68 5.46 18.49 5.17 18.77 L4.2 19.7"/>
-      <!-- 羽枝缝：凸侧 3 道，从边缘向内、朝根部斜切，止于羽轴 -->
-      <path d="M15.18 15.47 L11.28 13.28"/>
-      <path d="M16.99 12.8 L13.66 11.21"/>
-      <path d="M18.66 9.99 L16.11 9.21"/>
-    </svg>
-  </div>
-  <h1>翎</h1>
-  <div class="tagline">轻巧 · 干净 · 快</div>
+  <div class="clock" id="$CLOCK_ID">$clock</div>
   <!--
-    主页搜索框（在快捷入口**上面**）。提交到内部地址 ling://search?q=…，
+    主页搜索框。提交到内部地址 ling://search?q=…，
     由原生侧用 UrlUtils 判定「网址还是搜索词」（与地址栏同一套逻辑，不在网页里再写一份）。
     隐藏的 submit 按钮是为了保证回车一定触发提交。
   -->
@@ -247,75 +192,24 @@ object HomePage {
     <input type="text" name="q" placeholder="搜索或输入网址" enterkeyhint="go">
     <button type="submit" hidden aria-hidden="true"></button>
   </form>
-  $quickLinks
 </body>
 </html>
 """.trimIndent()
     }
 
-    /** HTML 属性/文本转义，避免书签标题里的引号破坏结构。 */
-    private fun escape(raw: String): String = raw
-        .replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace("\"", "&quot;")
-        .replace("'", "&#39;")
-
     /**
-     * 生成快捷入口的 `.links` HTML 片段（书签为空时返回空串）。
-     *
-     * 从 [html] 里抽出来，供"完整渲染"与"原地刷新（[themeUpdateJs]）"两处复用 ——
-     * 两处各写一份迟早会不同步，快捷入口就会在重绘时丢一半。
-     */
-    internal fun linksHtml(links: List<Pair<String, String>>): String {
-        if (links.isEmpty()) return ""
-        return buildString {
-            append("""<div class="links" id="$QUICK_LINKS_ID">""")
-            links.take(8).forEach { (title, url) ->
-                val label = title.ifBlank { url }
-                append(
-                    """<a class="link" href="${escape(url)}">""" +
-                        """<span class="avatar">${escape(avatarInitial(title, url))}</span>""" +
-                        """<span class="link-label">${escape(label)}</span></a>"""
-                )
-            }
-            append("</div>")
-        }
-    }
-
-    /**
-     * 快捷入口头像里的那个字。
-     *
-     * 标题为空时取**主机名**首字母，而不是整串 URL 的首字母 —— 后者对每个
-     * 空标题书签都是 "H"（https 的 h），既没有区分度也没信息量。
-     * 口径与标签页列表的 [TabState.initial] 保持一致（跳 www.，无站点时用中性符号）。
-     */
-    internal fun avatarInitial(title: String, url: String): String {
-        val label = title.trim()
-        if (label.isNotEmpty()) return label.take(1).uppercase()
-        val host = runCatching { java.net.URI(url).host }.getOrNull().orEmpty()
-        return host.removePrefix("www.").firstOrNull()?.uppercase()
-            ?: TabState.NEUTRAL_INITIAL
-    }
-
-    /**
-     * 生成"原地刷新主页主题与快捷入口"的 JS。
+     * 生成"原地刷新主页主题"的 JS。
      *
      * 为什么需要这个：主页是用 `loadDataWithBaseURL` 渲染的，每次调用都会
-     * 往 WebView 历史里**压入一个新条目**。若主题切换时也走完整重渲染，
+     * 往 WebView 历史里**压入一个新条目**。若主题/背景变化时也走完整重渲染，
      * 用户按返回键就会回到"切换前那个浅色主页"（历史里残留的旧条目）。
      *
-     * 原地刷新直接改 `:root` 上的 CSS 变量和快捷入口区块的内容，不触发导航、
-     * 不压历史，深浅色切换即时生效且返回键行为不变。
+     * 原地刷新直接改 `:root` 上的 CSS 变量，不触发导航、不压历史，
+     * 深浅色切换即时生效且返回键行为不变。
      *
-     * 快捷入口用 **id**（[QUICK_LINKS_ID]）而不是 class 选择器定位：
-     * 这段脚本也会跑在**阅读视图**上（[WebTabManager.readerThemeJs] 传空的
-     * `linksHtml` 复用同一份脚本），而阅读视图的正文来自第三方网页，里面完全
-     * 可能有 `class="links"` 的元素（"相关链接"这类）。用 class 选择器会把
-     * 正文里的那个元素当成快捷入口**删掉** —— 直接损坏文章内容。
-     *
-     * @param linksHtml 快捷入口的 HTML（由 [linksHtml] 生成，可能为空）。
-     *   用 JSON 编码后注入，避免 HTML 里的引号破坏 JS 字符串。
+     * 这一份脚本**也被阅读视图复用**（[WebTabManager.readerThemeJs]），
+     * 因此 `--primary` / `--on-primary` 仍然要写入：主页 HTML 已不再使用
+     * 这两个变量，但阅读视图的标题等元素还在用。
      */
     internal fun themeUpdateJs(
         background: String,
@@ -325,11 +219,8 @@ object HomePage {
         primaryContainer: String,
         onPrimaryContainer: String,
         dark: Boolean,
-        linksHtml: String,
     ): String {
         val scheme = if (dark) "dark" else "light"
-        // JSON 编码：把 linksHtml 安全地塞进 JS 字符串字面量
-        val linksJson = jsonString(linksHtml)
         return """
 (function () {
   var r = document.documentElement;
@@ -341,32 +232,24 @@ object HomePage {
   r.style.setProperty('--pc', '$primaryContainer');
   r.style.setProperty('--on-pc', '$onPrimaryContainer');
   r.style.colorScheme = '$scheme';
-  var old = document.getElementById('$QUICK_LINKS_ID');
-  if ($linksJson) {
-    var t = document.createElement('div');
-    t.innerHTML = $linksJson;
-    var node = t.firstChild;
-    if (old) old.parentNode.replaceChild(node, old);
-    else (document.body || r).appendChild(node);
-  } else if (old) {
-    old.parentNode.removeChild(old);
-  }
 })();
         """.trimIndent()
     }
 
-    /** 极简 JSON 字符串编码（只处理本场景需要的转义：反斜杠、引号、换行、回车）。 */
-    private fun jsonString(raw: String): String = buildString {
-        append('"')
-        raw.forEach { c ->
-            when (c) {
-                '\\' -> append("\\\\")
-                '"' -> append("\\\"")
-                '\n' -> append("\\n")
-                '\r' -> append("\\r")
-                else -> append(c)
-            }
-        }
-        append('"')
-    }
+    /**
+     * 生成"原地刷新时钟"的 JS。
+     *
+     * 主页是零脚本 HTML，时间只能由原生侧交回来：`WebTabManager` 每分钟
+     * 把当前 `HH:mm` 传进来，这里只改那一个文本节点 —— 不碰 DOM 结构、
+     * 不触发导航、不压历史。
+     *
+     * [clock] 由原生侧用固定格式生成（`HH:mm`，纯数字与冒号），不含引号等
+     * 会破坏 JS 字符串字面量的字符，因此直接内插即可。
+     */
+    internal fun clockJs(clock: String): String = """
+(function () {
+  var el = document.getElementById('$CLOCK_ID');
+  if (el) el.textContent = '$clock';
+})();
+    """.trimIndent()
 }

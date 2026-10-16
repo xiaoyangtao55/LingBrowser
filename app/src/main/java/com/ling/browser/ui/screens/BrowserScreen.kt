@@ -10,48 +10,60 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.ling.browser.data.prefs.NightMode
+import com.ling.browser.data.prefs.TabsHeight
 import com.ling.browser.ui.BrowserViewModel
 import com.ling.browser.ui.PendingDownload
 import com.ling.browser.ui.components.AddressBar
 import com.ling.browser.ui.components.BottomToolbar
 import com.ling.browser.ui.components.DesktopModeBanner
+import com.ling.browser.ui.components.HomeBackgroundLayer
 import com.ling.browser.ui.components.IncognitoBanner
 import com.ling.browser.util.UrlUtils
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /**
  * 浏览器主界面：地址栏 + WebView 容器 + 底部工具栏。
@@ -61,15 +73,16 @@ import com.ling.browser.util.UrlUtils
  *
  * 布局分工：
  *  - 地址栏右侧常驻「刷新/停止」——最高频操作，放在触手可及处；
- *  - 底部工具栏只留 5 个动作，低频项收进「更多」（菜单锚定在按钮自身，对齐右侧）；
+ *  - 底部工具栏只留 5 个动作，低频项收进「更多」；「更多」与「标签页」
+ *    都以 BottomSheet（[ModalBottomSheet]）形式自底部升起；
  *  - 内置主页由 WebView 直接渲染（见 [com.ling.browser.web.HomePage]），不再是覆盖层，
  *    因此主页也能正常参与前进/后退历史。
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 fun BrowserScreen(
     viewModel: BrowserViewModel,
-    onOpenTabs: () -> Unit,
     onOpenBookmarks: () -> Unit,
     onOpenHistory: () -> Unit,
     onOpenDownloads: () -> Unit,
@@ -95,16 +108,44 @@ fun BrowserScreen(
     val isBookmarked by viewModel.isBookmarked.collectAsStateWithLifecycle()
 
     val activeTab = tabs.firstOrNull { it.id == activeId }
-    // 主页的快捷入口来自书签，必须在这里无条件收集 ——
-    // 放进 when 分支里会形成条件式 composable 调用，破坏重组时的槽位稳定性。
-    val bookmarks by viewModel.bookmarks.collectAsStateWithLifecycle()
+
+    // 主页原生背景层是否**绘制**：仅当「当前标签停在内置主页」且「背景模式非纯色」。
+    // 两者都满足才画，切到普通网页后必须停止绘制 —— 否则网页自身的透明区域
+    // 会露出下面的背景图，观感不对。（组件本身仍无条件调用，见下面 Box 里的说明。）
+    val activeUrl = activeTab?.url
+    val homeBackgroundVisible = settings.homeBackground.transparent &&
+        activeUrl != null && UrlUtils.isHome(activeUrl)
     val pendingDownload by viewModel.pendingDownload.collectAsStateWithLifecycle()
     // 阅读模式是否开启。必须 collect（而不是直接读 viewModel.readerActive），
     // 否则进入/退出后菜单文案不会刷新。
     val readerActive by viewModel.readerActive.collectAsStateWithLifecycle()
 
-    var showMoreMenu by remember { mutableStateOf(false) }
+    // 两个 BottomSheet 的展开状态：「更多」与「标签页」。
+    // 面板本体是 ModalBottomSheet（自屏幕底部升起），这里只留一个布尔开关。
+    var showMoreSheet by remember { mutableStateOf(false) }
+    var showTabsSheet by remember { mutableStateOf(false) }
     var exitConfirm by remember { mutableStateOf(false) }
+
+    // 收起面板时先播完退场动画再卸载组件：直接把开关置 false 会让面板
+    // "啪"地消失，跳过 ModalBottomSheet 自带的收起动画。
+    val scope = rememberCoroutineScope()
+    val moreSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val tabsSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+    // 关闭「更多」面板。
+    val closeMoreSheet: () -> Unit = {
+        scope.launch { moreSheetState.hide() }.invokeOnCompletion {
+            if (!moreSheetState.isVisible) showMoreSheet = false
+        }
+        Unit
+    }
+    // 关闭「标签页」面板。
+    val closeTabsSheet: () -> Unit = {
+        scope.launch { tabsSheetState.hide() }.invokeOnCompletion {
+            if (!tabsSheetState.isVisible) showTabsSheet = false
+        }
+        Unit
+    }
 
     // WebView 宿主容器
     val host = remember {
@@ -159,12 +200,14 @@ fun BrowserScreen(
         viewModel.refreshBookmarkState()
     }
 
-    // 把 Material You 配色与书签快捷入口同步给内置主页，并重绘正在显示的主页。
-    // 这样切换深浅色或增删书签后，主页会立即跟着变。
+    // 把 Material You 配色同步给内置主页，并重绘正在显示的主页。
+    // 这样切换深浅色后，主页会立即跟着变。
     val colorScheme = MaterialTheme.colorScheme
     // 界面当前的明暗：既喂给主页配色，也当作"网页要不要重算暗化"的触发器。
     val uiDark = colorScheme.background.luminance() < 0.5f
-    LaunchedEffect(colorScheme, bookmarks) {
+    // settings.homeBackground 也作为 key：背景模式（纯色 ↔ 自定义图片）变化时
+    // 主页要重新渲染成透明/不透明，这一步不经过配色变化，必须显式触发。
+    LaunchedEffect(colorScheme, settings.homeBackground) {
         viewModel.applyHomeTheme(
             background = colorScheme.background,
             onBackground = colorScheme.onBackground,
@@ -173,8 +216,19 @@ fun BrowserScreen(
             primaryContainer = colorScheme.primaryContainer,
             onPrimaryContainer = colorScheme.onPrimaryContainer,
             dark = uiDark,
-            links = bookmarks.map { it.title.ifBlank { it.url } to it.url },
+            transparent = settings.homeBackground.transparent,
         )
+    }
+
+    // 主页时钟：主页是**零脚本** HTML（见 tools/check_home_html.py 对 <script> 的禁令），
+    // 时间不会自己走，只能由原生侧每分钟把当前 HH:mm 注入回那个文本节点。
+    // 对齐到**下一个整分**再刷新，而不是固定 sleep 60s：后者会让显示的时间
+    // 比真实时间慢将近一整分钟（效果上等于时钟一直慢一拍）。
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(CLOCK_PERIOD_MS - System.currentTimeMillis() % CLOCK_PERIOD_MS)
+            viewModel.updateHomeClock()
+        }
     }
 
     // 「跟随系统」时，运行中切换系统明暗**不经过设置流**（settings.collect 不触发），
@@ -242,7 +296,32 @@ fun BrowserScreen(
         )
 
         // ---- 网页内容区 ----
-        Box(modifier = Modifier.weight(1f)) {
+        // imePadding：键盘弹出时把内容区从底部压矮，WebView 视口随之变短，
+        // 主页 HTML 的 flex 垂直居中就会把时钟与搜索框一起**上移** ——
+        // 这正是"搜索框跟随输入法上下移动"。没有它时（windowSoftInputMode
+        // 已是 adjustResize，但 edge-to-edge 下窗口本身不缩放），搜索框会
+        // 被键盘整块盖住。
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .imePadding(),
+        ) {
+            // 原生背景层（自定义图片 + 顶部遮罩）：画在 WebView **之下**。
+            // 主页 HTML 此时背景透明（见 WebTabManager.homeBackgroundColor），
+            // 因此能透出这一层。
+            //
+            // ⚠️ 必须**无条件**调用、用 visible 参数控制是否绘制，不能写成
+            // `if (homeBackgroundVisible) { HomeBackgroundLayer(…) }`：
+            // 条件式挂载会改变同一 Box 里后续子项（下面的 AndroidView）的槽位，
+            // WebView 因此被重建，而重建后的 WebView 会带回一层默认白底把背景层
+            // 整个盖住 —— 表现为"改了背景模式要手动按一下主页按钮才生效"。
+            HomeBackgroundLayer(
+                mode = settings.homeBackground,
+                imageUri = settings.homeBackgroundImageUri,
+                visible = homeBackgroundVisible,
+                modifier = Modifier.fillMaxSize(),
+            )
+
             // WebView 宿主始终挂载：错误页以覆盖层的形式盖在上面。
             // 主页现在由 WebView 自己渲染（见 HomePage），不再是覆盖层 ——
             // 这样主页也能正常参与前进/后退历史。
@@ -285,140 +364,171 @@ fun BrowserScreen(
         }
 
         // ---- 底部工具栏 ----
+        // 「更多」与「标签页」只把点击转出去，具体面板由下面的 ModalBottomSheet 承载。
         BottomToolbar(
             canGoBack = activeTab?.canGoBack == true,
             canGoForward = activeTab?.canGoForward == true,
             tabCount = tabs.size,
             isIncognito = activeTab?.isIncognito == true,
-            moreExpanded = showMoreMenu,
             onBack = { viewModel.goBack() },
             onForward = { viewModel.goForward() },
             onHome = { viewModel.goHome() },
-            onTabs = onOpenTabs,
-            onMoreToggle = { showMoreMenu = !showMoreMenu },
-            onMoreDismiss = { showMoreMenu = false },
+            onTabs = { showTabsSheet = true },
+            onMore = { showMoreSheet = true },
+        )
+    }
+
+    // ---- 「标签页」面板 ----
+    // 用 ModalBottomSheet 自屏幕底部升起：遮罩、圆角、拖动关闭、入场/退场动画
+    // 都由组件提供，TabsScreen 只负责面板内容（见其文件头说明）。
+    if (showTabsSheet) {
+        ModalBottomSheet(
+            onDismissRequest = { showTabsSheet = false },
+            sheetState = tabsSheetState,
+            // 半屏档位用半透明色，透出背后的网页（"标签页是临时面板而非独立页面"）；
+            // 全屏档位回退为不透明色，否则整屏半透明会让网页文字与列表标题互相干扰。
+            containerColor = if (settings.tabsHeight == TabsHeight.FULL) {
+                MaterialTheme.colorScheme.surface
+            } else {
+                MaterialTheme.colorScheme.surface.copy(alpha = TABS_SHEET_ALPHA)
+            },
         ) {
-            // 菜单内容由工具栏内的「更多」按钮锚定，因此对齐在右侧
-            DropdownMenuItem(
-                text = { Text(if (isBookmarked) "取消收藏" else "添加书签") },
-                leadingIcon = {
-                    // 三种图标各司其职，不要混用：
-                    //   未收藏 -> bookmark              空心书签
-                    //   已收藏 -> bookmark_added_fill   **实心**书签（收好了）
-                    //   动  作 -> bookmark_add          空心书签 + 加号
-                    //
-                    // 本项是一个**动作**（添加/取消），所以未收藏时用带加号的
-                    // bookmark_add；否则它和下面那个「书签」入口图标完全相同
-                    // （都只是空心书签），用户分不出哪个是动作、哪个是跳转。
-                    // 已收藏时用实心图标，一眼看出当前状态。
-                    Icon(
-                        when {
-                            isBookmarked -> LingIcons.Bookmark
-                            else -> LingIcons.BookmarkAdd
-                        },
-                        contentDescription = null,
-                    )
+            TabsScreen(
+                tabs = tabs,
+                activeId = activeId,
+                onSelect = {
+                    viewModel.switchTab(it)
+                    closeTabsSheet()
                 },
-                onClick = {
-                    viewModel.toggleBookmark()
-                    showMoreMenu = false
+                onClose = viewModel::closeTab,
+                onNewTab = {
+                    viewModel.newTab()
+                    closeTabsSheet()
                 },
-            )
-            DropdownMenuItem(
-                text = { Text("书签") },
-                leadingIcon = { Icon(LingIcons.BookmarkBorder, contentDescription = null) },
-                onClick = {
-                    onOpenBookmarks()
-                    showMoreMenu = false
-                },
-            )
-            DropdownMenuItem(
-                text = { Text("历史记录") },
-                leadingIcon = { Icon(LingIcons.History, contentDescription = null) },
-                onClick = {
-                    onOpenHistory()
-                    showMoreMenu = false
-                },
-            )
-            DropdownMenuItem(
-                text = { Text("下载") },
-                leadingIcon = { Icon(LingIcons.Download, contentDescription = null) },
-                onClick = {
-                    onOpenDownloads()
-                    showMoreMenu = false
-                },
-            )
-            DropdownMenuItem(
-                text = { Text("新建无痕标签页") },
-                leadingIcon = { Icon(LingIcons.PrivacyTip, contentDescription = null) },
-                onClick = {
+                onNewIncognitoTab = {
                     viewModel.newIncognitoTab()
-                    showMoreMenu = false
+                    closeTabsSheet()
                 },
+                onCloseAll = { tabs.forEach { viewModel.closeTab(it.id) } },
+                onMoveTab = viewModel::moveTab,
+                tabsHeight = settings.tabsHeight,
+                onTabsHeightChange = viewModel::setTabsHeight,
+                // 高度档位由 settings 决定（全屏 / 一半）：把它落在**内容**的高度上，
+                // 而不是依赖 sheet 自带的"半展开"锚点 —— 后者记不住用户的档位选择。
+                modifier = Modifier.fillMaxHeight(settings.tabsHeight.fraction),
             )
-            DropdownMenuItem(
-                text = {
-                    Text(if (settings.desktopMode) "关闭电脑模式" else "开启电脑模式")
-                },
-                leadingIcon = { Icon(LingIcons.DesktopWindows, contentDescription = null) },
-                onClick = {
-                    viewModel.setDesktopMode(!settings.desktopMode)
-                    showMoreMenu = false
-                },
-            )
-            DropdownMenuItem(
-                text = {
-                    Text(
-                        when (settings.nightMode) {
-                            NightMode.FOLLOW_SYSTEM -> "夜间模式：跟随系统"
-                            NightMode.ALWAYS_ON -> "夜间模式：已开启"
-                            NightMode.ALWAYS_OFF -> "夜间模式：已关闭"
-                        }
-                    )
-                },
-                leadingIcon = { Icon(LingIcons.Nightlight, contentDescription = null) },
-                onClick = {
-                    viewModel.setNightMode(
-                        when (settings.nightMode) {
-                            NightMode.FOLLOW_SYSTEM -> NightMode.ALWAYS_ON
-                            NightMode.ALWAYS_ON -> NightMode.ALWAYS_OFF
-                            NightMode.ALWAYS_OFF -> NightMode.FOLLOW_SYSTEM
-                        }
-                    )
-                    showMoreMenu = false
-                },
-            )
-            // 阅读模式。文案随状态切换，让用户一眼看出点下去是进还是出
-            // （与上面的电脑模式同一种写法）。
-            DropdownMenuItem(
-                text = {
-                    Text(if (readerActive) "退出阅读模式" else "阅读模式")
-                },
-                leadingIcon = { Icon(LingIcons.Article, contentDescription = null) },
-                onClick = {
-                    viewModel.toggleReaderMode()
-                    showMoreMenu = false
-                },
-            )
-            // 资源嗅探：先触发嗅探（写结果），再进二级页展示。
-            // 嗅探是异步的，但页面会 collect sniffResults，结果回来后自动刷新。
-            DropdownMenuItem(
-                text = { Text("资源嗅探") },
-                leadingIcon = { Icon(LingIcons.Movie, contentDescription = null) },
-                onClick = {
-                    viewModel.sniffResources()
-                    onOpenSniff()
-                    showMoreMenu = false
-                },
-            )
-            DropdownMenuItem(
-                text = { Text("设置") },
-                leadingIcon = { Icon(LingIcons.Settings, contentDescription = null) },
-                onClick = {
-                    onOpenSettings()
-                    showMoreMenu = false
-                },
-            )
+        }
+    }
+
+    // ---- 「更多」面板 ----
+    // 原来锚定在工具栏「更多」按钮上的下拉菜单，现在同样改为自底部升起的面板。
+    if (showMoreSheet) {
+        ModalBottomSheet(
+            onDismissRequest = { showMoreSheet = false },
+            sheetState = moreSheetState,
+        ) {
+            // 条目较多：加一层 verticalScroll，小屏 / 横屏时也能滚到底。
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(bottom = 12.dp),
+            ) {
+                MoreMenuItem(
+                    icon = if (isBookmarked) LingIcons.Bookmark else LingIcons.BookmarkAdd,
+                    label = if (isBookmarked) "取消收藏" else "添加书签",
+                    onClick = {
+                        viewModel.toggleBookmark()
+                        closeMoreSheet()
+                    },
+                )
+                MoreMenuItem(
+                    icon = LingIcons.BookmarkBorder,
+                    label = "书签",
+                    onClick = {
+                        onOpenBookmarks()
+                        closeMoreSheet()
+                    },
+                )
+                MoreMenuItem(
+                    icon = LingIcons.History,
+                    label = "历史记录",
+                    onClick = {
+                        onOpenHistory()
+                        closeMoreSheet()
+                    },
+                )
+                MoreMenuItem(
+                    icon = LingIcons.Download,
+                    label = "下载",
+                    onClick = {
+                        onOpenDownloads()
+                        closeMoreSheet()
+                    },
+                )
+                MoreMenuItem(
+                    icon = LingIcons.PrivacyTip,
+                    label = "新建无痕标签页",
+                    onClick = {
+                        viewModel.newIncognitoTab()
+                        closeMoreSheet()
+                    },
+                )
+                MoreMenuItem(
+                    icon = LingIcons.DesktopWindows,
+                    label = if (settings.desktopMode) "关闭电脑模式" else "开启电脑模式",
+                    onClick = {
+                        viewModel.setDesktopMode(!settings.desktopMode)
+                        closeMoreSheet()
+                    },
+                )
+                MoreMenuItem(
+                    icon = LingIcons.Nightlight,
+                    label = when (settings.nightMode) {
+                        NightMode.FOLLOW_SYSTEM -> "夜间模式：跟随系统"
+                        NightMode.ALWAYS_ON -> "夜间模式：已开启"
+                        NightMode.ALWAYS_OFF -> "夜间模式：已关闭"
+                    },
+                    onClick = {
+                        viewModel.setNightMode(
+                            when (settings.nightMode) {
+                                NightMode.FOLLOW_SYSTEM -> NightMode.ALWAYS_ON
+                                NightMode.ALWAYS_ON -> NightMode.ALWAYS_OFF
+                                NightMode.ALWAYS_OFF -> NightMode.FOLLOW_SYSTEM
+                            }
+                        )
+                        closeMoreSheet()
+                    },
+                )
+                // 阅读模式。文案随状态切换，让用户一眼看出点下去是进还是出。
+                MoreMenuItem(
+                    icon = LingIcons.Article,
+                    label = if (readerActive) "退出阅读模式" else "阅读模式",
+                    onClick = {
+                        viewModel.toggleReaderMode()
+                        closeMoreSheet()
+                    },
+                )
+                // 资源嗅探：先触发嗅探（写结果），再进二级页展示。
+                // 嗅探是异步的，但页面会 collect sniffResults，结果回来后自动刷新。
+                MoreMenuItem(
+                    icon = LingIcons.Movie,
+                    label = "资源嗅探",
+                    onClick = {
+                        viewModel.sniffResources()
+                        onOpenSniff()
+                        closeMoreSheet()
+                    },
+                )
+                MoreMenuItem(
+                    icon = LingIcons.Settings,
+                    label = "设置",
+                    onClick = {
+                        onOpenSettings()
+                        closeMoreSheet()
+                    },
+                )
+            }
         }
     }
 
@@ -489,6 +599,14 @@ fun BrowserScreen(
 }
 
 /**
+ * 主页时钟的刷新周期（毫秒）。
+ *
+ * 一分钟一次：主页时钟只显示 `HH:mm`，粒度就是分钟，再密没有意义、
+ * 反而白白唤醒 WebView 执行一次 JS。
+ */
+private const val CLOCK_PERIOD_MS = 60_000L
+
+/**
  * 确认框里的大小文案。
  *
  * 三种状态分开写：探测中、探测失败（大小未知）、已知大小。
@@ -538,4 +656,24 @@ private fun ErrorScreen(    message: String,
             TextButton(onClick = onRetry) { Text("重试") }
         }
     }
+}
+
+/**
+ * 「更多」面板里的单个条目。
+ *
+ * 用 [ListItem] 而不是下拉菜单项：面板改成 BottomSheet 后条目要更大、更好点
+ * （贴合单手操作），ListItem 的默认内边距与排版正合适。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun MoreMenuItem(
+    icon: ImageVector,
+    label: String,
+    onClick: () -> Unit,
+) {
+    ListItem(
+        headlineContent = { Text(label) },
+        leadingContent = { Icon(icon, contentDescription = null) },
+        modifier = Modifier.clickable(onClick = onClick),
+    )
 }
