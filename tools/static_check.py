@@ -38,7 +38,7 @@ SIGNATURES = {
     "BottomToolbar": ["canGoBack", "onTabs", "onMore"],
     "AddressBar": ["onReloadOrStop", "suggestions", "onSuggestionClick"],
     "TabsScreen": ["onMoveTab", "onCloseAll"],
-    "SettingsScreen": ["onReaderFontSize"],
+    "SettingsScreen": ["onOpenGroup", "onBack"],
 }
 
 

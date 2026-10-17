@@ -47,6 +47,13 @@ import com.ling.browser.ui.screens.BrowserScreen
 import com.ling.browser.ui.screens.DownloadsScreen
 import com.ling.browser.ui.screens.HistoryScreen
 import com.ling.browser.ui.screens.SettingsScreen
+import com.ling.browser.ui.screens.AboutScreen
+import com.ling.browser.ui.screens.AppearanceSettingsScreen
+import com.ling.browser.ui.screens.BrowsingSettingsScreen
+import com.ling.browser.ui.screens.DownloadSettingsScreen
+import com.ling.browser.ui.screens.PrivacySettingsScreen
+import com.ling.browser.ui.screens.SearchHomeSettingsScreen
+import com.ling.browser.ui.screens.SettingsGroup
 import com.ling.browser.ui.theme.LingTheme
 
 /**
@@ -359,28 +366,66 @@ private fun LingApp(viewModel: BrowserViewModel) {
                     onBack = pop,
                 )
 
+                // 设置首页只列分组，具体设置项在各自的子页里。
                 Route.Settings -> SettingsScreen(
+                    settings = settings,
+                    onOpenGroup = { group ->
+                        push(
+                            when (group) {
+                                SettingsGroup.SEARCH_HOME -> Route.SettingsSearchHome
+                                SettingsGroup.APPEARANCE -> Route.SettingsAppearance
+                                SettingsGroup.BROWSING -> Route.SettingsBrowsing
+                                SettingsGroup.DOWNLOAD -> Route.SettingsDownload
+                                SettingsGroup.PRIVACY -> Route.SettingsPrivacy
+                                SettingsGroup.ABOUT -> Route.About
+                            },
+                        )
+                    },
+                    onBack = pop,
+                )
+
+                Route.SettingsSearchHome -> SearchHomeSettingsScreen(
                     settings = settings,
                     onSearchEngine = viewModel::setSearchEngine,
                     onHomepage = viewModel::setCustomHomepage,
                     onHomeBackground = viewModel::setHomeBackground,
                     onHomeBackgroundImage = viewModel::setHomeBackgroundImageUri,
+                    onBack = pop,
+                )
+
+                Route.SettingsAppearance -> AppearanceSettingsScreen(
+                    settings = settings,
                     onNightMode = viewModel::setNightMode,
-                    onDesktopMode = viewModel::setDesktopMode,
                     onDynamicColor = viewModel::setDynamicColor,
+                    onReaderFontSize = viewModel::setReaderFontSize,
+                    onRestoreSession = viewModel::setRestoreSession,
+                    onBack = pop,
+                )
+
+                Route.SettingsBrowsing -> BrowsingSettingsScreen(
+                    settings = settings,
                     onForceDark = viewModel::setForceDark,
                     onBlockImages = viewModel::setBlockImages,
                     onJavaScript = viewModel::setJavaScript,
                     onAdBlock = viewModel::setAdBlockEnabled,
                     onOpenAdBlockRules = { push(Route.AdBlockRules) },
-                    onReaderFontSize = viewModel::setReaderFontSize,
                     onOpenLinksExternal = viewModel::setOpenLinksInExternalApp,
-                    onRestoreSession = viewModel::setRestoreSession,
+                    onBack = pop,
+                )
+
+                Route.SettingsDownload -> DownloadSettingsScreen(
+                    settings = settings,
                     onDownloaderType = viewModel::setDownloaderType,
                     onDownloadLocation = viewModel::setDownloadLocation,
+                    onBack = pop,
+                )
+
+                Route.SettingsPrivacy -> PrivacySettingsScreen(
                     onClearData = viewModel::clearAllData,
                     onBack = pop,
                 )
+
+                Route.About -> AboutScreen(onBack = pop)
 
                 Route.AdBlockRules -> AdBlockRulesScreen(
                     rules = settings.adBlockRules,
@@ -414,6 +459,13 @@ private sealed interface Route {
     data object History : Route
     data object Downloads : Route
     data object Settings : Route
+    // 设置分组子页：每个分组一个二级页面
+    data object SettingsSearchHome : Route
+    data object SettingsAppearance : Route
+    data object SettingsBrowsing : Route
+    data object SettingsDownload : Route
+    data object SettingsPrivacy : Route
+    data object About : Route
     data object AdBlockRules : Route
     data object SniffedResources : Route
 }
