@@ -272,6 +272,7 @@ fun BrowserScreen(
             text = addressText,
             isEditing = addressEditing,
             isLoading = activeTab?.isLoading == true,
+            progress = activeTab?.progress,
             isSecure = activeTab?.url?.startsWith("https") == true,
             suggestions = suggestions,
             onTextChange = viewModel::onAddressChanged,

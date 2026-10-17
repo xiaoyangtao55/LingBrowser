@@ -64,6 +64,8 @@ fun AddressBar(
     text: String,
     isEditing: Boolean,
     isLoading: Boolean,
+    /** 加载进度 0..100，传给进度条；不确定态（进度未知）传 null。 */
+    progress: Int?,
     isSecure: Boolean,
     suggestions: List<Suggestion>,
     onTextChange: (String) -> Unit,
@@ -248,13 +250,28 @@ fun AddressBar(
                     enter = fadeIn(),
                     exit = fadeOut(),
                 ) {
-                    LinearProgressIndicator(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(2.dp),
-                        color = MaterialTheme.colorScheme.primary,
-                        trackColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0f),
-                    )
+                    // 有确定进度值（>0）时走确定态，否则回退不确定态：
+                    // WebView 刚触发加载时 progress 还是 0，此时还不知道要多久，
+                    // 用不确定态更符合直觉；拿到第一个 >0 的进度后切确定态。
+                    val p = progress
+                    if (p != null && p > 0) {
+                        LinearProgressIndicator(
+                            progress = { p / 100f },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(2.dp),
+                            color = MaterialTheme.colorScheme.primary,
+                            trackColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0f),
+                        )
+                    } else {
+                        LinearProgressIndicator(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(2.dp),
+                            color = MaterialTheme.colorScheme.primary,
+                            trackColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0f),
+                        )
+                    }
                 }
             }
         }
