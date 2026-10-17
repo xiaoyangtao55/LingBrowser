@@ -840,7 +840,13 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
      * 把当前主题配色同步给内置主页。
      *
      * 主页是 WebView 渲染的 HTML，拿不到 Compose 的 ColorScheme，
-     * 因此这里把颜色转成 CSS 十六进制串传过去；配色没变时直接跳过，避免无谓重绘。
+     * 因此这里把颜色转成 CSS 十六进制串传过去。
+     *
+     * ⚠️ 不能在「配色没变」时提前 return：背景模式（纯色 ↔ 自定义图片）
+     * 变化时配色不变，但 WebView 自身的透明度需要由 [WebTabManager.ensureHomeRendered]
+     * 重新保障（普通网页会把 WebView 底设回不透明白色，见 WebTabManager.loadUrl）。
+     * 若只靠配色变化驱动，切换背景模式后主页会停在不透明白底、原生背景层被盖住，
+     * 表现为"改了背景模式要手动刷新才生效"。
      */
     fun applyHomeTheme(
         background: Color,
@@ -860,8 +866,12 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
             onPrimaryContainer = onPrimaryContainer.toCssHex(),
             dark = dark,
         )
-        if (colors == tabManager.homeColors) return
-        tabManager.homeColors = colors
+        // homeColors 只在真正变化时才写：StateFlow 结构化去重依赖字段值变化，
+        // 无谓赋值会让下游 collect 多跑一轮。但 ensureHomeRendered 必须每次都调
+        // —— 背景模式切换不改变配色，却要靠它把 WebView 底重新设回透明。
+        if (colors != tabManager.homeColors) {
+            tabManager.homeColors = colors
+        }
         // 用 ensureHomeRendered 而不是 refreshHome：冷启动时主页 WebView
         // 可能还没建出来，refreshHome 会静默跳过，导致主页停在默认浅色。
         tabManager.ensureHomeRendered()

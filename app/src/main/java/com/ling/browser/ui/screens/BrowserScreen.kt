@@ -206,9 +206,13 @@ fun BrowserScreen(
     val colorScheme = MaterialTheme.colorScheme
     // 界面当前的明暗：既喂给主页配色，也当作"网页要不要重算暗化"的触发器。
     val uiDark = colorScheme.background.luminance() < 0.5f
-    // 背景模式（纯色 ↔ 自定义图片）不再需要作为 key：它现在只决定原生背景层
-    // 画什么，而那一层直接跟着 settings 重组，与主页 HTML 的重绘无关。
-    LaunchedEffect(colorScheme) {
+    // settings.homeBackground / homeBackgroundImageUri 也作为 key：背景模式
+    // （纯色 ↔ 自定义图片）变化时，原生背景层虽然会跟着 settings 重组，
+    // 但 WebView 自身的透明度需要由 applyHomeTheme → ensureHomeRendered 重新保障
+    // （见 BrowserViewModel.applyHomeTheme 的说明）。这一步不经过配色变化，
+    // 必须显式触发，否则切换后主页仍停在不透明白底、原生背景层被盖住，
+    // 表现为"改了背景模式要手动刷新才生效"。
+    LaunchedEffect(colorScheme, settings.homeBackground, settings.homeBackgroundImageUri) {
         viewModel.applyHomeTheme(
             background = colorScheme.background,
             onBackground = colorScheme.onBackground,

@@ -1018,6 +1018,12 @@ class WebTabManager(private val context: Context) {
                     // 重建、历史前进/后退到旧条目都会走到这里。
                     // 原地刷新只改 :root 上的 CSS 变量，不触发导航、不压历史。
                     if (isInternal) {
+                        // 主页的 WebView 底必须保持透明：背景由原生层供色
+                        // （见 HomeBackgroundLayer）。若上一页是普通网页，WebView 底
+                        // 已被 loadUrl 设回不透明白色，这里必须重置，否则原生背景层
+                        // 会被白底盖住 —— 表现为"从网页退回主页后背景发白"。
+                        // 阅读视图自带不透明底色（renderReader 设的），保持原样即可。
+                        if (isHome) wv.setOpaqueBackground(false)
                         wv.evaluateJavascript(
                             if (isHome) homeThemeJs() else readerThemeJs(),
                             null,

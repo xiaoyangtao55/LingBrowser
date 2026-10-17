@@ -173,6 +173,14 @@ object HomePage {
     letter-spacing: 2px; color: var(--fg);
     /* 等宽数字：分钟跳动时各位不会左右抖 */
     font-variant-numeric: tabular-nums;
+    /* 描边 + 阴影：自定义图片背景上文字可能与图片颜色重合，
+       叠一层浅色光晕 + 一层深色投影，兼顾亮/暗文字两种情况，
+       纯色背景上只呈现轻微立体感，不突兀。 */
+    -webkit-text-stroke: 0.6px rgba(0, 0, 0, 0.18);
+    text-shadow:
+        0 0 2px rgba(255, 255, 255, 0.55),
+        0 1px 4px rgba(0, 0, 0, 0.35),
+        0 0 10px rgba(0, 0, 0, 0.2);
   }
   /* 搜索框：提交到内部地址 ling://search?q=…（见 HomePage.SEARCH_URL），
      由原生用同一套 UrlUtils 判定「网址还是搜索词」。 */
