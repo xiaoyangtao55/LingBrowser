@@ -3,7 +3,6 @@ package com.ling.browser.data.prefs
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -64,49 +63,22 @@ class LingSettingsTest {
     }
 
     @Test
-    fun `标签页高度默认是一半`() {
-        assertEquals(TabsHeight.HALF, LingSettings().tabsHeight)
-    }
-
-    @Test
-    fun `标签页高度只有两档且比例正确`() {
-        // 1/4 档已移除：面板太矮时列表显示不全，滚动起来就失去总览意义
-        assertEquals(2, TabsHeight.entries.size)
-        assertEquals(1.0f, TabsHeight.FULL.fraction, 0.001f)
-        assertEquals(0.5f, TabsHeight.HALF.fraction, 0.001f)
-    }
-
-    @Test
-    fun `已移除的四分之一档位名会安全降级`() {
-        // 老版本可能往 DataStore 里存过 "QUARTER"。升级后枚举里没有它，
-        // 读取路径必须能兜住而不是抛异常导致闪退。
-        // 注意 JUnit 的参数顺序是 (message, object)，写反了会报类型不匹配。
-        assertNull(
-            "QUARTER 应已从枚举中移除",
-            runCatching { TabsHeight.valueOf("QUARTER") }.getOrNull(),
-        )
-    }
-
-    @Test
-    fun `标签页高度比例都在合法区间`() {
-        TabsHeight.entries.forEach { h ->
-            assertTrue("${h.label} 比例应 > 0", h.fraction > 0f)
-            assertTrue("${h.label} 比例应 <= 1", h.fraction <= 1f)
-            assertTrue("${h.label} 应有非空标签", h.label.isNotBlank())
-        }
-    }
-
-    @Test
-    fun `标签页高度枚举名可安全往返`() {
+    fun `枚举名可安全往返`() {
         // DataStore 以枚举名持久化，改名前必须保证 valueOf 能解析回来
-        TabsHeight.entries.forEach { h ->
-            assertNotNull(TabsHeight.valueOf(h.name))
-        }
         NightMode.entries.forEach { m ->
             assertNotNull(NightMode.valueOf(m.name))
         }
         SearchEngine.entries.forEach { e ->
             assertNotNull(SearchEngine.valueOf(e.name))
+        }
+        HomeBackground.entries.forEach { b ->
+            assertNotNull(HomeBackground.valueOf(b.name))
+        }
+        DownloaderType.entries.forEach { d ->
+            assertNotNull(DownloaderType.valueOf(d.name))
+        }
+        DownloadLocation.entries.forEach { l ->
+            assertNotNull(DownloadLocation.valueOf(l.name))
         }
     }
 

@@ -12,11 +12,12 @@
   的 ModalBottomSheet（自屏幕底部升起）。本脚本逐条校验新结构：
     1. 标签页不再是独立路由；BrowserScreen 常驻（when 之外）
     2. BrowserScreen 内有两个 ModalBottomSheet（标签页 / 更多）
-    3. 标签页半屏档位用半透明容器色，全屏档位回退为不透明
-    4. 高度档位落在**内容**高度（fillMaxHeight(fraction)），不依赖 sheet 锚点
+    3. 标签页面板恒定用半透明容器色，透出背后的网页
+    4. 面板高度是个固定比例常量，落在**内容**高度（fillMaxHeight），
+       不依赖 sheet 锚点 —— 「全屏」档位与设置项已一并移除
     5. 半透明常量仍在 TabsScreen 导出（TABS_SHEET_ALPHA），且落在合理区间
     6. 旧叠加层的残留（自绘整屏遮罩 / 位移动画）已清除
-    7. 标签排序、favicon、设置档位等既有约束不回退
+    7. 标签排序、favicon 等既有约束不回退
 """
 import os
 import re
@@ -111,7 +112,7 @@ else:
     ok("已移除 DropdownMenuItem")
 
 # ---------- 3. 标签页面板透明度 ----------
-print("\n3. 标签页面板透明度（半屏透出网页，全屏不透明）")
+print("\n3. 标签页面板透明度（半透明，透出网页）")
 m = re.search(r"TABS_SHEET_ALPHA\s*=\s*([0-9.]+)f", tabs)
 if not m:
     bad("TabsScreen 没有定义 TABS_SHEET_ALPHA")
@@ -136,26 +137,35 @@ if re.search(
     r"\s*MaterialTheme\.colorScheme\.surface\s*\n",
     browser,
 ):
-    ok("全屏档位回退为不透明 surface（避免透出浏览页干扰阅读）")
+    bad("仍残留「全屏档位回退不透明」的分支，档位设置未清理干净")
+elif re.search(r"\bTabsHeight\b|\btabsHeight\b", browser):
+    bad("BrowserScreen 仍出现高度档位符号，设置项未移除干净")
 else:
-    bad("全屏档位未做不透明回退（半透明会透出浏览页干扰阅读）")
+    ok("容器色恒定半透明，不再有档位分支")
 
-# ---------- 4. 高度档位落在内容高度上 ----------
-print("\n4. 高度档位如何落地")
-if re.search(r"fillMaxHeight\(settings\.tabsHeight\.fraction\)", browser):
-    ok("标签页内容高度 = settings.tabsHeight.fraction（全屏 / 一半）")
+# ---------- 4. 面板高度落在内容高度上 ----------
+print("\n4. 面板高度如何落地（固定一半，档位设置已移除）")
+if re.search(r"fillMaxHeight\(TABS_SHEET_HEIGHT_FRACTION\)", browser):
+    ok("标签页内容高度 = TABS_SHEET_HEIGHT_FRACTION")
 else:
-    bad("标签页高度未绑定 tabsHeight.fraction，档位切换不会生效")
+    bad("标签页高度未绑定常量，面板高度失去单一来源")
 
-if "tabsHeight = settings.tabsHeight" in browser:
-    ok("TabsScreen 收到当前档位")
+m_h = re.search(r"TABS_SHEET_HEIGHT_FRACTION\s*=\s*([0-9.]+)f", tabs)
+if m_h and abs(float(m_h.group(1)) - 0.5) < 0.001:
+    ok("TABS_SHEET_HEIGHT_FRACTION = 0.5（一半）")
 else:
-    bad("TabsScreen 未收到 tabsHeight")
+    bad("TABS_SHEET_HEIGHT_FRACTION 未在 TabsScreen 定义，或不再是 0.5")
 
-if "onTabsHeightChange = viewModel::setTabsHeight" in browser:
-    ok("档位切换已接线到 viewModel.setTabsHeight")
+# 高度档位设置已随「全屏」一并移除：两个 composable 都不该再收/传高度参数
+if re.search(r"tabsHeight|onTabsHeightChange", browser):
+    bad("BrowserScreen 仍透传高度档位参数（设置项已移除）")
 else:
-    bad("档位切换未接线到 viewModel")
+    ok("BrowserScreen 不再透传高度档位")
+
+if re.search(r"tabsHeight|onTabsHeightChange|HeightToggle", tabs):
+    bad("TabsScreen 仍残留高度档位参数或切换 UI")
+else:
+    ok("TabsScreen 已无高度档位参数与切换 UI")
 
 # ---------- 5. 不能再有旧叠加层残留 ----------
 print("\n5. 旧叠加层残留")
@@ -192,50 +202,50 @@ if re.search(r"Column\(modifier = modifier\.fillMaxWidth\(\)\)", tabs):
 else:
     bad("TabsScreen 根节点结构不符（应为 Column）")
 
-# ---------- 6. 高度档位枚举（1/4 已移除） ----------
-print("\n6. 高度档位（1/4 已移除）")
+# ---------- 6. 高度档位枚举已全链路移除 ----------
+print("\n6. 高度档位枚举已全链路移除（含「全屏」档）")
 store = read("app/src/main/java/com/ling/browser/data/prefs/SettingsStore.kt")
-# 排除注释：老数据兼容的那段说明里会提到 "QUARTER" 这个字符串字面量，
-# 那是解释文字，不是残留的枚举条目。
-store_code = "\n".join(
-    ln for ln in store.split("\n") if not ln.strip().startswith("//")
-)
-if "QUARTER" in store_code:
-    bad("SettingsStore 里仍有 QUARTER，1/4 档位未移除干净")
-else:
-    ok("TabsHeight 已无 QUARTER（仅注释中作为历史说明提及）")
+vm = read("app/src/main/java/com/ling/browser/ui/BrowserViewModel.kt")
+settings_screen = read("app/src/main/java/com/ling/browser/ui/screens/SettingsScreen.kt")
 
-m_enum = re.search(r"enum class TabsHeight.*?\{(.*?)\n\}", store, re.S)
-if m_enum:
-    names = re.findall(r"([A-Z_]+)\(", m_enum.group(1))
-    if names == ["FULL", "HALF"]:
-        ok(f"TabsHeight 只有两档：{names}")
-    else:
-        bad(f"TabsHeight 档位应为 [FULL, HALF]，实际 {names}")
+# 数据模型 / 持久化：枚举、字段、键、写入函数一个都不该留
+if re.search(r"enum class TabsHeight", store):
+    bad("SettingsStore 仍定义 TabsHeight 枚举，未移除干净")
 else:
-    bad("没找到 TabsHeight 枚举定义")
+    ok("SettingsStore 已无 TabsHeight 枚举")
 
-if re.search(r"val tabsHeight: TabsHeight = TabsHeight\.HALF", store):
-    ok("默认档位是 HALF")
+if "tabsHeight" in store:
+    bad("SettingsStore 仍出现 tabsHeight（字段/解析/写入未清理）")
 else:
-    bad("默认档位不是 HALF")
+    ok("SettingsStore 已无 tabsHeight 字段与读写逻辑")
 
-# 老数据兼容：valueOf 必须被 runCatching 包住
-if re.search(r"runCatching \{ TabsHeight\.valueOf\(it\) \}", store):
-    ok("读取时用 runCatching 兜住已移除的枚举名（老数据不会闪退）")
+if "TABS_HEIGHT" in store:
+    bad("SettingsStore 仍残留持久化键 TABS_HEIGHT")
 else:
-    bad("读取 tabsHeight 未做异常兜底，老版本存过 QUARTER 会崩")
+    ok("SettingsStore 已无 TABS_HEIGHT 持久化键")
 
-if re.search(r"\?\: TabsHeight\.HALF", store):
-    ok("解析失败时回退到 HALF")
+if re.search(r"fun setTabsHeight", store):
+    bad("SettingsStore 仍保留 setTabsHeight 写入函数")
 else:
-    bad("解析失败未回退到 HALF")
+    ok("SettingsStore 已移除 setTabsHeight")
 
-# 面板内的高度切换 UI 用的是 entries，因此天然支持两档
-if "TabsHeight.entries.forEach" in tabs:
-    ok("高度切换 UI 遍历 entries，档位增删无需改代码")
+# 视图模型层
+if re.search(r"\bTabsHeight\b|setTabsHeight|\btabsHeight\b", vm):
+    bad("BrowserViewModel 仍残留高度档位符号")
 else:
-    bad("高度切换 UI 未遍历 entries，改档位时容易漏改")
+    ok("BrowserViewModel 已无高度档位符号")
+
+# 设置页：设置项与弹窗
+if re.search(r"\bTabsHeight\b|tabsHeight|onTabsHeight|showTabsHeightDialog", settings_screen):
+    bad("SettingsScreen 仍残留高度档位设置项 / 弹窗 / 回调")
+else:
+    ok("SettingsScreen 已移除高度档位设置项与弹窗")
+
+# 根 Activity 透传
+if re.search(r"onTabsHeight|\bTabsHeight\b|tabsHeight", main):
+    bad("MainActivity 仍透传高度档位参数")
+else:
+    ok("MainActivity 已移除 onTabsHeight 接线")
 
 # ---------- 7. WebView 宿主生命周期 ----------
 print("\n7. WebView 宿主生命周期（关键是别被卸载）")

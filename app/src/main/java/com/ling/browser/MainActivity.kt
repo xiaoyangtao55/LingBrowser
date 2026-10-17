@@ -11,6 +11,13 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -21,9 +28,12 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.IntOffset
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -168,12 +178,26 @@ private fun LingApp(viewModel: BrowserViewModel) {
     val context = LocalContext.current
     // 返回栈：栈底始终是 Browser，只有二级页面才会入栈
     val backStack = remember { mutableStateListOf<Route>(Route.Browser) }
-    val route = backStack.last()
+    // 当前栈顶路由。名字让给下面 AnimatedContent 的内容参数 ——
+    // 过渡内容里仍写 when(route)，读起来与原来一致。
+    val stackRoute = backStack.last()
+
+    // 出入栈方向，供过渡动画判断滑动朝向：
+    // 前进（push）新页面自右滑入，返回（pop）当前页面整体向右滑出。
+    // 不能只凭目标路由推断 —— 同一个路由既可能前进也可能返回
+    // （设置 → 广告拦截规则 → 返回设置），只有 push/pop 知道真实方向。
+    var navForward by remember { mutableStateOf(true) }
 
     // 统一的入栈/出栈
-    val push: (Route) -> Unit = { backStack.add(it) }
+    val push: (Route) -> Unit = {
+        navForward = true
+        backStack.add(it)
+    }
     val pop: () -> Unit = {
-        if (backStack.size > 1) backStack.removeAt(backStack.lastIndex)
+        if (backStack.size > 1) {
+            navForward = false
+            backStack.removeAt(backStack.lastIndex)
+        }
     }
 
     // 返回键的归属，由下面两处**显式**划分，不依赖 BackHandler 的注册顺序：
@@ -238,6 +262,8 @@ private fun LingApp(viewModel: BrowserViewModel) {
     val showBrowser by viewModel.showBrowser.collectAsStateWithLifecycle()
     LaunchedEffect(showBrowser) {
         if (showBrowser > 0) {
+            // 回到浏览页属于"返回"：让上层页面按返回动画向右滑出。
+            navForward = false
             backStack.clear()
             backStack.add(Route.Browser)
         }
@@ -262,97 +288,121 @@ private fun LingApp(viewModel: BrowserViewModel) {
         )
 
         // 上层：二级页面。这些页面自己是不透明的，会盖住底层浏览页。
-        when (route) {
-            Route.Browser -> Unit
+        //
+        // 用 AnimatedContent 给"打开二级界面"补过渡动画：此前 when(route) 直接
+        // 换内容，新页面是瞬间出现 —— 从「更多」面板点进去时面板还在收起、下面
+        // 已经"啪"地换了张脸，观感很生硬。现在前进时新页面自右滑入、旧页面向左
+        // 退让；返回时反向。modifier 必须填满整屏：否则 Route.Browser 分支为空
+        // 会量出 0 尺寸，AnimatedContent 的尺寸过渡会把旧页面一起越缩越小。
+        AnimatedContent(
+            targetState = stackRoute,
+            modifier = Modifier.fillMaxSize(),
+            transitionSpec = {
+                val slideSpec = tween<IntOffset>(durationMillis = 300)
+                val fadeSpec = tween<Float>(durationMillis = 220)
+                if (navForward) {
+                    // 前进：新页面整屏自右滑入，旧页面向左退 1/4 并淡出。
+                    (slideInHorizontally(animationSpec = slideSpec) { it } + fadeIn(fadeSpec)) togetherWith
+                        (slideOutHorizontally(animationSpec = slideSpec) { -it / 4 } + fadeOut(fadeSpec))
+                } else {
+                    // 返回：当前页面向右滑出，下层页面自左轻入。
+                    (slideInHorizontally(animationSpec = slideSpec) { -it / 4 } + fadeIn(fadeSpec)) togetherWith
+                        (slideOutHorizontally(animationSpec = slideSpec) { it } + fadeOut(fadeSpec))
+                }
+            },
+            label = "route",
+        ) { route ->
+            when (route) {
+                Route.Browser -> Unit
 
-            Route.Bookmarks -> {
-                // 进书签页时补一次图标。放在这里而不是 setContent 里：
-                // 图标是进入这个页面才有意义的后台工作，没必要每次
-                // 重建组合都触发一遍。
-                LaunchedEffect(Unit) { viewModel.fetchMissingFavicons() }
-                BookmarksScreen(
-                    bookmarks = bookmarks,
-                    folders = bookmarkFolders,
+                Route.Bookmarks -> {
+                    // 进书签页时补一次图标。放在这里而不是 setContent 里：
+                    // 图标是进入这个页面才有意义的后台工作，没必要每次
+                    // 重建组合都触发一遍。
+                    LaunchedEffect(Unit) { viewModel.fetchMissingFavicons() }
+                    BookmarksScreen(
+                        bookmarks = bookmarks,
+                        folders = bookmarkFolders,
+                        onOpen = {
+                            viewModel.navigate(it)
+                            pop()
+                        },
+                        onRename = viewModel::renameBookmark,
+                        onDelete = viewModel::deleteBookmark,
+                        onMoveToFolder = viewModel::moveBookmarkToFolder,
+                        onRenameFolder = viewModel::renameBookmarkFolder,
+                        onDeleteFolder = viewModel::deleteBookmarkFolder,
+                        onBack = pop,
+                    )
+                }
+
+                Route.History -> HistoryScreen(
+                    history = history,
                     onOpen = {
                         viewModel.navigate(it)
                         pop()
                     },
-                    onRename = viewModel::renameBookmark,
-                    onDelete = viewModel::deleteBookmark,
-                    onMoveToFolder = viewModel::moveBookmarkToFolder,
-                    onRenameFolder = viewModel::renameBookmarkFolder,
-                    onDeleteFolder = viewModel::deleteBookmarkFolder,
+                    onDelete = viewModel::deleteHistory,
+                    onClearAll = viewModel::clearHistory,
                     onBack = pop,
                 )
-            }
 
-            Route.History -> HistoryScreen(
-                history = history,
-                onOpen = {
-                    viewModel.navigate(it)
-                    pop()
-                },
-                onDelete = viewModel::deleteHistory,
-                onClearAll = viewModel::clearHistory,
-                onBack = pop,
-            )
-
-            Route.Downloads -> DownloadsScreen(
-                downloads = downloads,
-                onRefresh = viewModel::refreshDownloads,
-                onCancel = viewModel::cancelDownload,
-                onPause = viewModel::pauseDownload,
-                onResume = viewModel::resumeDownload,
-                onRemove = { entry, deleteFile -> viewModel.removeDownload(entry, deleteFile) },
-                onClearAll = viewModel::clearDownloads,
-                onOpen = { entry -> openDownloadedFile(context, entry) },
-                onBack = pop,
-            )
-
-            Route.Settings -> SettingsScreen(
-                settings = settings,
-                onSearchEngine = viewModel::setSearchEngine,
-                onHomepage = viewModel::setCustomHomepage,
-                onHomeBackground = viewModel::setHomeBackground,
-                onHomeBackgroundImage = viewModel::setHomeBackgroundImageUri,
-                onNightMode = viewModel::setNightMode,
-                onDesktopMode = viewModel::setDesktopMode,
-                onDynamicColor = viewModel::setDynamicColor,
-                onForceDark = viewModel::setForceDark,
-                onBlockImages = viewModel::setBlockImages,
-                onJavaScript = viewModel::setJavaScript,
-                onAdBlock = viewModel::setAdBlockEnabled,
-                onOpenAdBlockRules = { push(Route.AdBlockRules) },
-                onTabsHeight = viewModel::setTabsHeight,
-                onReaderFontSize = viewModel::setReaderFontSize,
-                onOpenLinksExternal = viewModel::setOpenLinksInExternalApp,
-                onRestoreSession = viewModel::setRestoreSession,
-                onDownloaderType = viewModel::setDownloaderType,
-                onDownloadLocation = viewModel::setDownloadLocation,
-                onClearData = viewModel::clearAllData,
-                onBack = pop,
-            )
-
-            Route.AdBlockRules -> AdBlockRulesScreen(
-                rules = settings.adBlockRules,
-                onAdd = viewModel::addAdBlockRule,
-                onRemove = viewModel::removeAdBlockRule,
-                onBack = pop,
-            )
-
-            Route.SniffedResources -> {
-                val sniff by viewModel.sniffResults.collectAsStateWithLifecycle()
-                SniffedResourcesScreen(
-                    result = sniff,
-                    // 打开资源后自动回浏览页：新标签页已就位，留在嗅探页
-                    // 没有意义，用户还得手动按返回 —— 多一步操作。
-                    onOpen = { url ->
-                        viewModel.openInNewTab(url)
-                        pop()
-                    },
-                    onDownload = viewModel::downloadResource,
+                Route.Downloads -> DownloadsScreen(
+                    downloads = downloads,
+                    onRefresh = viewModel::refreshDownloads,
+                    onCancel = viewModel::cancelDownload,
+                    onPause = viewModel::pauseDownload,
+                    onResume = viewModel::resumeDownload,
+                    onRemove = { entry, deleteFile -> viewModel.removeDownload(entry, deleteFile) },
+                    onClearAll = viewModel::clearDownloads,
+                    onOpen = { entry -> openDownloadedFile(context, entry) },
                     onBack = pop,
                 )
+
+                Route.Settings -> SettingsScreen(
+                    settings = settings,
+                    onSearchEngine = viewModel::setSearchEngine,
+                    onHomepage = viewModel::setCustomHomepage,
+                    onHomeBackground = viewModel::setHomeBackground,
+                    onHomeBackgroundImage = viewModel::setHomeBackgroundImageUri,
+                    onNightMode = viewModel::setNightMode,
+                    onDesktopMode = viewModel::setDesktopMode,
+                    onDynamicColor = viewModel::setDynamicColor,
+                    onForceDark = viewModel::setForceDark,
+                    onBlockImages = viewModel::setBlockImages,
+                    onJavaScript = viewModel::setJavaScript,
+                    onAdBlock = viewModel::setAdBlockEnabled,
+                    onOpenAdBlockRules = { push(Route.AdBlockRules) },
+                    onReaderFontSize = viewModel::setReaderFontSize,
+                    onOpenLinksExternal = viewModel::setOpenLinksInExternalApp,
+                    onRestoreSession = viewModel::setRestoreSession,
+                    onDownloaderType = viewModel::setDownloaderType,
+                    onDownloadLocation = viewModel::setDownloadLocation,
+                    onClearData = viewModel::clearAllData,
+                    onBack = pop,
+                )
+
+                Route.AdBlockRules -> AdBlockRulesScreen(
+                    rules = settings.adBlockRules,
+                    onAdd = viewModel::addAdBlockRule,
+                    onRemove = viewModel::removeAdBlockRule,
+                    onBack = pop,
+                )
+
+                Route.SniffedResources -> {
+                    val sniff by viewModel.sniffResults.collectAsStateWithLifecycle()
+                    SniffedResourcesScreen(
+                        result = sniff,
+                        // 打开资源后自动回浏览页：新标签页已就位，留在嗅探页
+                        // 没有意义，用户还得手动按返回 —— 多一步操作。
+                        onOpen = { url ->
+                            viewModel.openInNewTab(url)
+                            pop()
+                        },
+                        onDownload = viewModel::downloadResource,
+                        onBack = pop,
+                    )
+                }
             }
         }
     }

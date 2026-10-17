@@ -37,8 +37,8 @@ IMPORT_WHITELIST_SUFFIX = (
 SIGNATURES = {
     "BottomToolbar": ["canGoBack", "onTabs", "onMore"],
     "AddressBar": ["onReloadOrStop", "suggestions", "onSuggestionClick"],
-    "TabsScreen": ["tabsHeight", "onTabsHeightChange"],
-    "SettingsScreen": ["onTabsHeight"],
+    "TabsScreen": ["onMoveTab", "onCloseAll"],
+    "SettingsScreen": ["onReaderFontSize"],
 }
 
 

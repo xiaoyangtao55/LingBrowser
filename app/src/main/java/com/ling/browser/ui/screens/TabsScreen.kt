@@ -45,21 +45,31 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
-import com.ling.browser.data.prefs.TabsHeight
 import com.ling.browser.web.TabState
 import kotlin.math.roundToInt
 
 /**
- * 半屏档位下面板的底色透明度。
+ * 标签页面板底色的透明度。
  *
  * 取值理由：太低（< 0.6）面板上的文字会与网页内容互相干扰、读不清；
  * 太高（> 0.9）就等于不透明，"能看到后面的网页"这个设计意图就没了。
  *
  * 0.92 是实机调过的值：半屏面板里要读标签标题，更透时背后的网页文字会透上来
  * 干扰阅读；0.92 仍能看出背后"有内容"，但不再和标题抢注意力 ——
- * 可读性优先于通透感。全屏档位不用它（见 BrowserScreen 的容器色回退）。
+ * 可读性优先于通透感。
  */
 internal const val TABS_SHEET_ALPHA = 0.92f
+
+/**
+ * 标签页面板占屏幕的高度比例。
+ *
+ * 固定一半：既能扫到若干个标签，又能透出后面的网页，符合"标签页是临时面板
+ * 而非独立页面"的直觉。
+ *
+ * 曾经还有「全屏」一档（更早还有 1/4）：全屏时面板不再透出网页，与一个独立
+ * 页面无异，还要额外做不透明回退，收益不抵复杂度，已随设置项一并移除。
+ */
+internal const val TABS_SHEET_HEIGHT_FRACTION = 0.5f
 
 /**
  * 标签页 BottomSheet 的**内容**。
@@ -85,8 +95,6 @@ fun TabsScreen(
     onNewIncognitoTab: () -> Unit,
     onCloseAll: () -> Unit,
     onMoveTab: (Int, Int) -> Unit,
-    tabsHeight: TabsHeight,
-    onTabsHeightChange: (TabsHeight) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val listState = rememberLazyListState()
@@ -111,7 +119,7 @@ fun TabsScreen(
     tabsRef.value = tabs
 
     Column(modifier = modifier.fillMaxWidth()) {
-        // ---- 头部：标题 + 高度档位 + 关闭全部 ----
+        // ---- 头部：标题 + 关闭全部 ----
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -122,11 +130,6 @@ fun TabsScreen(
                 text = "标签页 (${tabs.size})",
                 style = MaterialTheme.typography.titleMedium,
                 modifier = Modifier.weight(1f),
-            )
-            // 高度档位切换
-            HeightToggle(
-                current = tabsHeight,
-                onChange = onTabsHeightChange,
             )
             if (tabs.size > 1) {
                 TextButton(onClick = onCloseAll) { Text("关闭全部") }
@@ -247,68 +250,31 @@ fun TabsScreen(
         }
 
         // ---- 底部动作：新建 / 无痕 ----
-        Surface(color = MaterialTheme.colorScheme.surfaceContainer) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                PillButton(
-                    icon = LingIcons.Add,
-                    label = "新建标签页",
-                    container = MaterialTheme.colorScheme.primaryContainer,
-                    content = MaterialTheme.colorScheme.onPrimaryContainer,
-                    onClick = onNewTab,
-                    modifier = Modifier.weight(1f),
-                )
-                PillButton(
-                    icon = LingIcons.PrivacyTip,
-                    label = "无痕",
-                    container = MaterialTheme.colorScheme.tertiaryContainer,
-                    content = MaterialTheme.colorScheme.onTertiaryContainer,
-                    onClick = onNewIncognitoTab,
-                    modifier = Modifier.weight(1f),
-                )
-            }
-        }
-    }
-}
-
-/** 高度档位切换：全屏 / 一半。 */
-@Composable
-private fun HeightToggle(
-    current: TabsHeight,
-    onChange: (TabsHeight) -> Unit,
-) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(2.dp),
-    ) {
-        TabsHeight.entries.forEach { h ->
-            val selected = h == current
-            Surface(
-                shape = RoundedCornerShape(10.dp),
-                color = if (selected) {
-                    MaterialTheme.colorScheme.secondaryContainer
-                } else {
-                    Color.Transparent
-                },
-                modifier = Modifier
-                    .clip(RoundedCornerShape(10.dp))
-                    .clickable { onChange(h) },
-            ) {
-                Text(
-                    text = h.label,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (selected) {
-                        MaterialTheme.colorScheme.onSecondaryContainer
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    },
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
-                )
-            }
+        // 这里不再自带底色。半屏档位下面板是半透明的，若再铺一层不透明的
+        // surfaceContainer，底部就会与面板上方分成两种颜色，半透明的设计也
+        // 在这里断掉。两个胶囊按钮自己有容器色，不需要额外衬底。
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            PillButton(
+                icon = LingIcons.Add,
+                label = "新建标签页",
+                container = MaterialTheme.colorScheme.primaryContainer,
+                content = MaterialTheme.colorScheme.onPrimaryContainer,
+                onClick = onNewTab,
+                modifier = Modifier.weight(1f),
+            )
+            PillButton(
+                icon = LingIcons.PrivacyTip,
+                label = "无痕",
+                container = MaterialTheme.colorScheme.tertiaryContainer,
+                content = MaterialTheme.colorScheme.onTertiaryContainer,
+                onClick = onNewIncognitoTab,
+                modifier = Modifier.weight(1f),
+            )
         }
     }
 }

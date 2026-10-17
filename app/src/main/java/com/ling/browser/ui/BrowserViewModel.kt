@@ -16,7 +16,6 @@ import com.ling.browser.data.prefs.LingSettings
 import com.ling.browser.data.prefs.NightMode
 import com.ling.browser.data.prefs.ReaderFontSize
 import com.ling.browser.data.prefs.SearchEngine
-import com.ling.browser.data.prefs.TabsHeight
 import com.ling.browser.util.FaviconFetcher
 import com.ling.browser.util.UrlUtils
 import com.ling.browser.web.InternalPage
@@ -814,7 +813,6 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
         io { container.settings.setAdBlockRules(current - rule) }
     }
     fun setDynamicColor(on: Boolean) = io { container.settings.setDynamicColor(on) }
-    fun setTabsHeight(height: TabsHeight) = io { container.settings.setTabsHeight(height) }
 
     /**
      * 切换"恢复上次浏览页面"。

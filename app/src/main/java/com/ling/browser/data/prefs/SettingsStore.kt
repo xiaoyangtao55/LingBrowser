@@ -46,28 +46,13 @@ enum class HomeBackground(val key: String, val label: String) {
         /**
          * 从持久化的 key 还原。
          *
-         * 与 [TabsHeight] 同款兜底：老版本/脏数据里可能出现未知的 key
+         * 兜底写法与其它枚举一致：老版本/脏数据里可能出现未知的 key
          * （例如已移除的 `"wallpaper"`），直接 valueOf 会抛异常导致启动闪退，
          * 这里退回默认 [SOLID]。
          */
         fun fromKey(key: String?): HomeBackground =
             entries.firstOrNull { it.key == key } ?: SOLID
     }
-}
-
-/**
- * 标签页管理页的高度档位。
- *
- * 只有两档。原先还有个 1/4 档，但配合半透明面板后，1/4 的高度连两三个
- * 标签都显示不全，列表一滚动就失去"总览"的意义 —— 面板太矮时反而不如
- * 直接看网页，所以去掉了。
- *
- * 默认 [HALF]：既能扫到若干个标签，又能透出后面的网页，
- * 符合"标签页是临时面板而非独立页面"的直觉。
- */
-enum class TabsHeight(val label: String, val fraction: Float) {
-    FULL("全屏", 1.0f),
-    HALF("一半", 0.5f),
 }
 
 /** 搜索引擎。 */
@@ -175,8 +160,6 @@ data class LingSettings(
     val blockImages: Boolean = false,
     /** 是否启用 JavaScript。 */
     val javaScriptEnabled: Boolean = true,
-    /** 标签页管理页的高度档位，默认占下半屏。 */
-    val tabsHeight: TabsHeight = TabsHeight.HALF,
     /**
      * 启动时是否恢复上次的标签页。
      *
@@ -267,7 +250,6 @@ class SettingsStore(private val context: Context) {
         val FORCE_DARK = booleanPreferencesKey("force_dark_web")
         val BLOCK_IMAGES = booleanPreferencesKey("block_images")
         val JS_ENABLED = booleanPreferencesKey("js_enabled")
-        val TABS_HEIGHT = stringPreferencesKey("tabs_height")
         val TAB_COUNT = intPreferencesKey("tab_count")
         val RESTORE_SESSION = booleanPreferencesKey("restore_session")
         val READER_FONT_SIZE = stringPreferencesKey("reader_font_size")
@@ -295,18 +277,12 @@ class SettingsStore(private val context: Context) {
             forceDarkWebPages = p[Keys.FORCE_DARK] ?: true,
             blockImages = p[Keys.BLOCK_IMAGES] ?: false,
             javaScriptEnabled = p[Keys.JS_ENABLED] ?: true,
-            // valueOf 用 runCatching 兜底：老版本存过 "QUARTER"，
-            // 该档位已移除，valueOf 会抛 IllegalArgumentException，
-            // 这里捕获后回退到默认值，用户不会因为升级而闪退。
-            tabsHeight = p[Keys.TABS_HEIGHT]
-                ?.let { runCatching { TabsHeight.valueOf(it) }.getOrNull() }
-                ?: TabsHeight.HALF,
             restoreSession = p[Keys.RESTORE_SESSION] ?: true,
             openLinksInExternalApp = p[Keys.OPEN_LINKS_EXTERNAL] ?: false,
             adBlockEnabled = p[Keys.AD_BLOCK] ?: true,
             adBlockRules = p[Keys.AD_BLOCK_RULES] ?: emptySet(),
-            // 与 tabsHeight 同理：用 runCatching 兜底，
-            // 万一将来删掉某个档位，老用户不会因为 valueOf 抛异常而闪退。
+            // 枚举名入库、读回时用 runCatching 兜底：万一将来删掉某个档位，
+            // 老用户不会因为 valueOf 抛异常而闪退。
             readerFontSize = p[Keys.READER_FONT_SIZE]
                 ?.let { runCatching { ReaderFontSize.valueOf(it) }.getOrNull() }
                 ?: ReaderFontSize.MEDIUM,
@@ -355,9 +331,6 @@ class SettingsStore(private val context: Context) {
 
     suspend fun setJavaScriptEnabled(enabled: Boolean) =
         context.dataStore.edit { it[Keys.JS_ENABLED] = enabled }
-
-    suspend fun setTabsHeight(height: TabsHeight) =
-        context.dataStore.edit { it[Keys.TABS_HEIGHT] = height.name }
 
     suspend fun setRestoreSession(enabled: Boolean) =
         context.dataStore.edit { it[Keys.RESTORE_SESSION] = enabled }

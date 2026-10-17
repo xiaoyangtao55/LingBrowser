@@ -47,7 +47,6 @@ import com.ling.browser.data.prefs.LingSettings
 import com.ling.browser.data.prefs.NightMode
 import com.ling.browser.data.prefs.SearchEngine
 import com.ling.browser.data.prefs.ReaderFontSize
-import com.ling.browser.data.prefs.TabsHeight
 
 /**
  * 设置页。沿用 Material You 的列表结构：分组标题 + 开关/单选行。
@@ -68,7 +67,6 @@ fun SettingsScreen(
     onJavaScript: (Boolean) -> Unit,
     onAdBlock: (Boolean) -> Unit,
     onOpenAdBlockRules: () -> Unit,
-    onTabsHeight: (TabsHeight) -> Unit,
     onReaderFontSize: (ReaderFontSize) -> Unit,
     onOpenLinksExternal: (Boolean) -> Unit,
     onRestoreSession: (Boolean) -> Unit,
@@ -106,7 +104,6 @@ fun SettingsScreen(
         }
         // 用户取消时什么都不改：保持原模式，不会把主页切成一个没有图的"自定义"。
     }
-    var showTabsHeightDialog by remember { mutableStateOf(false) }
     var showReaderFontDialog by remember { mutableStateOf(false) }
     var confirmClear by remember { mutableStateOf(false) }
 
@@ -189,14 +186,6 @@ fun SettingsScreen(
                     subtitle = "Android 12+ 从壁纸提取配色",
                     checked = settings.dynamicColor,
                     onCheckedChange = onDynamicColor,
-                )
-            }
-            item {
-                SettingRow(
-                    icon = LingIcons.Layers,
-                    title = "标签页面板高度",
-                    subtitle = settings.tabsHeight.label,
-                    onClick = { showTabsHeightDialog = true },
                 )
             }
             item {
@@ -533,46 +522,6 @@ fun SettingsScreen(
             },
             confirmButton = {
                 TextButton(onClick = { showHomeBackgroundDialog = false }) { Text("完成") }
-            },
-        )
-    }
-
-    // ---- 标签页面板高度 ----
-    if (showTabsHeightDialog) {
-        AlertDialog(
-            onDismissRequest = { showTabsHeightDialog = false },
-            title = { Text("标签页面板高度") },
-            text = {
-                Column {
-                    TabsHeight.entries.forEach { h ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    onTabsHeight(h)
-                                    showTabsHeightDialog = false
-                                }
-                                .padding(vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            RadioButton(
-                                selected = settings.tabsHeight == h,
-                                onClick = {
-                                    onTabsHeight(h)
-                                    showTabsHeightDialog = false
-                                },
-                            )
-                            Spacer(Modifier.width(8.dp))
-                            Text(
-                                text = "${h.label}（${(h.fraction * 100).toInt()}%）",
-                                style = MaterialTheme.typography.bodyLarge,
-                            )
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { showTabsHeightDialog = false }) { Text("完成") }
             },
         )
     }
