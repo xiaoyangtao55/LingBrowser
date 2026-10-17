@@ -121,6 +121,35 @@ object LingIcons {
         }
     }
 
+    /** Pause（Material Symbols Outlined: pause，官方）。 */
+    val Pause: ImageVector by lazy {
+        materialIcon("Pause") {
+            moveTo(280f, 800f)
+            lineTo(280f, 160f)
+            lineTo(400f, 160f)
+            lineTo(400f, 800f)
+            lineTo(280f, 800f)
+            close()
+            moveTo(560f, 800f)
+            lineTo(560f, 160f)
+            lineTo(680f, 160f)
+            lineTo(680f, 800f)
+            lineTo(560f, 800f)
+            close()
+        }
+    }
+
+    /** PlayArrow（Material Symbols Outlined: play_arrow，官方）。 */
+    val PlayArrow: ImageVector by lazy {
+        materialIcon("PlayArrow") {
+            moveTo(240f, 800f)
+            lineTo(240f, 160f)
+            lineTo(720f, 480f)
+            lineTo(240f, 800f)
+            close()
+        }
+    }
+
     /** Refresh（Material Symbols Outlined: refresh，官方）。 */
     val Refresh: ImageVector by lazy {
         materialIcon("Refresh") {

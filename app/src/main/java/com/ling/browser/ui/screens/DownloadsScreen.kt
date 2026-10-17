@@ -27,8 +27,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -39,14 +37,14 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.ling.browser.data.db.DownloadEntry
 import com.ling.browser.data.db.DownloadStatus
-import kotlinx.coroutines.delay
+import com.ling.browser.data.repo.DownloadSource
+import com.ling.browser.data.repo.source
 
 /**
  * 下载管理页。
  *
- * 列表内容来自 [DownloadEntry]（本地表 + 向系统 DownloadManager 回查的结果）。
- * DownloadManager 没有进度回调，只能轮询 —— 这里在页面可见时每秒刷新一次，
- * 离开页面立即停止，不在后台空转耗电。
+ * 列表内容来自内建下载引擎（[DownloadEntry]），进度是推送式的实时更新，
+ * 不再需要轮询系统 DownloadManager。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -54,6 +52,8 @@ fun DownloadsScreen(
     downloads: List<DownloadEntry>,
     onRefresh: () -> Unit,
     onCancel: (DownloadEntry) -> Unit,
+    onPause: (DownloadEntry) -> Unit,
+    onResume: (DownloadEntry) -> Unit,
     onRemove: (DownloadEntry, Boolean) -> Unit,
     onClearAll: (Boolean) -> Unit,
     onOpen: (DownloadEntry) -> Unit,
@@ -61,20 +61,6 @@ fun DownloadsScreen(
     modifier: Modifier = Modifier,
 ) {
     var clearDialog by remember { mutableStateOf(false) }
-
-    // 轮询进度：只在页面可见时跑。
-    // 即使没有进行中的任务也保持轮询 —— 用户可能刚好从网页触发了一个下载。
-    // 每秒一次的开销极小（一次 binder 查询），换来进度条的实时感。
-    LaunchedEffect(Unit) {
-        while (true) {
-            onRefresh()
-            delay(POLL_INTERVAL_MS)
-        }
-    }
-    // 离开页面时再刷一次，保证退出前的最终状态落库
-    DisposableEffect(Unit) {
-        onDispose { onRefresh() }
-    }
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
@@ -119,6 +105,8 @@ fun DownloadsScreen(
                 DownloadRow(
                     entry = entry,
                     onCancel = { onCancel(entry) },
+                    onPause = { onPause(entry) },
+                    onResume = { onResume(entry) },
                     onRemove = { deleteFile -> onRemove(entry, deleteFile) },
                     onOpen = { onOpen(entry) },
                 )
@@ -157,11 +145,17 @@ fun DownloadsScreen(
 private fun DownloadRow(
     entry: DownloadEntry,
     onCancel: () -> Unit,
+    onPause: () -> Unit,
+    onResume: () -> Unit,
     onRemove: (Boolean) -> Unit,
     onOpen: () -> Unit,
 ) {
     var confirmRemove by remember { mutableStateOf(false) }
     val canOpen = entry.status == DownloadStatus.SUCCESS && entry.localPath != null
+    // 进行中（RUNNING）或已暂停（PAUSED）都需要操作按钮：
+    // RUNNING → 暂停 + 取消；PAUSED → 恢复 + 取消
+    val hasActiveControls = entry.status == DownloadStatus.RUNNING ||
+        entry.status == DownloadStatus.PAUSED
 
     Column(
         modifier = Modifier
@@ -203,29 +197,65 @@ private fun DownloadRow(
                 )
             }
             Spacer(Modifier.width(8.dp))
-            if (entry.isRunning) {
-                IconButton(onClick = onCancel) {
-                    Icon(
-                        LingIcons.Close,
-                        contentDescription = "取消下载",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(20.dp),
-                    )
+            // 系统下载器（DownloadManager）不支持应用内暂停/恢复，
+            // 只提供「取消」；内建引擎才显示暂停/恢复按钮。
+            val isBuiltIn = entry.source == DownloadSource.BUILT_IN
+            when (entry.status) {
+                DownloadStatus.RUNNING -> {
+                    if (isBuiltIn) {
+                        IconButton(onClick = onPause) {
+                            Icon(
+                                LingIcons.Pause,
+                                contentDescription = "暂停",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(20.dp),
+                            )
+                        }
+                    }
+                    IconButton(onClick = onCancel) {
+                        Icon(
+                            LingIcons.Close,
+                            contentDescription = "取消并删除文件",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
                 }
-            } else {
-                IconButton(onClick = { confirmRemove = true }) {
-                    Icon(
-                        LingIcons.DeleteOutline,
-                        contentDescription = "删除记录",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(20.dp),
-                    )
+                DownloadStatus.PAUSED -> {
+                    if (isBuiltIn) {
+                        IconButton(onClick = onResume) {
+                            Icon(
+                                LingIcons.PlayArrow,
+                                contentDescription = "恢复",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(20.dp),
+                            )
+                        }
+                    }
+                    IconButton(onClick = onCancel) {
+                        Icon(
+                            LingIcons.Close,
+                            contentDescription = "取消并删除文件",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
+                }
+                else -> {
+                    IconButton(onClick = { confirmRemove = true }) {
+                        Icon(
+                            LingIcons.DeleteOutline,
+                            contentDescription = "删除记录",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
                 }
             }
         }
 
-        // 进度条只在下载中显示：已完成/失败的条目不需要这条线占地方
-        if (entry.isRunning) {
+        // 进度条在下载中或已暂停时显示：暂停时让用户看到已下载的部分
+        if (hasActiveControls) {
             Spacer(Modifier.height(8.dp))
             if (entry.totalBytes > 0) {
                 LinearProgressIndicator(
@@ -261,9 +291,10 @@ private fun DownloadRow(
     }
 }
 
-/** 副标题：状态 + 大小/进度。 */
+/** 副标题：状态 + 大小/进度/速度/剩余时间。 */
 private fun subtitleOf(entry: DownloadEntry): String = when {
-    entry.status == DownloadStatus.RUNNING && entry.totalBytes > 0 ->
+    entry.status == DownloadStatus.RUNNING -> runningSubtitle(entry)
+    entry.status == DownloadStatus.PAUSED && entry.totalBytes > 0 ->
         "${entry.status.label} ${(entry.progress * 100).toInt()}%  ·  ${formatBytes(entry.totalBytes)}"
     entry.status == DownloadStatus.SUCCESS ->
         buildString {
@@ -271,8 +302,49 @@ private fun subtitleOf(entry: DownloadEntry): String = when {
             val size = if (entry.totalBytes > 0) entry.totalBytes else entry.downloadedBytes
             if (size > 0) append("  ·  ${formatBytes(size)}")
         }
-    entry.isRunning -> entry.status.label
     else -> entry.status.label
+}
+
+/**
+ * 下载中的副标题：进度 + 速度 + 剩余时间。
+ *
+ * 速度/剩余时间依赖引擎推送的 [DownloadEntry.speedBytesPerSec]；刚开始下载
+ * 的头几百毫秒还没采样到速度，或服务器不给 Content-Length 时，对应片段会被
+ * 自动省略，而不是显示 "0 B/s"。
+ */
+private fun runningSubtitle(entry: DownloadEntry): String = buildString {
+    append(entry.status.label)
+    if (entry.totalBytes > 0) {
+        append(" ${(entry.progress * 100).toInt()}%  ·  ${formatBytes(entry.totalBytes)}")
+    } else if (entry.downloadedBytes > 0) {
+        append("  ·  ${formatBytes(entry.downloadedBytes)}")
+    }
+    val speed = formatSpeed(entry.speedBytesPerSec)
+    if (speed.isNotEmpty()) append("  ·  $speed")
+    entry.etaSeconds?.let { append("  ·  剩余 ${formatDuration(it)}") }
+}
+
+/**
+ * 下载速度。
+ *
+ * 复用体积口径再加 "/s"，不另立一套单位 —— 否则列表里会出现
+ * "1.0 MB / 1048576 B/s" 这种对不上的观感。速度为 0（未采样到）时返回空串，
+ * 由调用方决定是否显示。
+ */
+internal fun formatSpeed(bytesPerSec: Long): String =
+    if (bytesPerSec <= 0) "" else formatBytes(bytesPerSec) + "/s"
+
+/**
+ * 剩余时间：秒 → `mm:ss`，超过一小时用 `h:mm:ss`。
+ *
+ * 负数（算不出剩余量）返回 "--"，与界面上的占位口径一致。
+ */
+internal fun formatDuration(seconds: Long): String {
+    if (seconds < 0) return "--"
+    val h = seconds / 3600
+    val m = seconds % 3600 / 60
+    val s = seconds % 60
+    return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%02d:%02d".format(m, s)
 }
 
 /**
@@ -294,6 +366,3 @@ internal fun formatBytes(bytes: Long): String {
     return if (value < 10) "%.1f %s".format(value, units[idx])
     else "%.0f %s".format(value, units[idx])
 }
-
-/** 轮询间隔。1 秒足够跟手，又不会让 binder 查询显得频繁。 */
-private const val POLL_INTERVAL_MS = 1000L

@@ -1,12 +1,15 @@
 package com.ling.browser
 
 import android.content.Intent
+import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
@@ -186,6 +189,32 @@ private fun LingApp(viewModel: BrowserViewModel) {
     val hasOverlay = backStack.size > 1
     BackHandler(enabled = hasOverlay) { pop() }
 
+    // 存储权限申请器（仅 Android 9 及以下选公共目录时用到）。
+    // 结果回传给 ViewModel，由它决定继续下载还是提示用户。
+    val storagePermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted -> viewModel.onStoragePermissionResult(granted) }
+
+    val requestStoragePermission by viewModel.requestStoragePermission.collectAsStateWithLifecycle()
+    LaunchedEffect(requestStoragePermission) {
+        if (requestStoragePermission > 0) {
+            storagePermissionLauncher.launch(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        }
+    }
+
+    // 通知权限申请器（Android 13+，内建下载器展示进度通知时需要）。
+    // 结果不影响下载本身，无需回传处理。
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { /* 授权与否都不改变下载流程，授权后通知会自动出现 */ }
+
+    val requestNotificationPermission by viewModel.requestNotificationPermission.collectAsStateWithLifecycle()
+    LaunchedEffect(requestNotificationPermission) {
+        if (requestNotificationPermission > 0 && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
     val bookmarks by viewModel.bookmarks.collectAsStateWithLifecycle()
     val bookmarkFolders by viewModel.bookmarkFolders.collectAsStateWithLifecycle()
     val history by viewModel.history.collectAsStateWithLifecycle()
@@ -272,6 +301,8 @@ private fun LingApp(viewModel: BrowserViewModel) {
                 downloads = downloads,
                 onRefresh = viewModel::refreshDownloads,
                 onCancel = viewModel::cancelDownload,
+                onPause = viewModel::pauseDownload,
+                onResume = viewModel::resumeDownload,
                 onRemove = { entry, deleteFile -> viewModel.removeDownload(entry, deleteFile) },
                 onClearAll = viewModel::clearDownloads,
                 onOpen = { entry -> openDownloadedFile(context, entry) },
@@ -296,6 +327,8 @@ private fun LingApp(viewModel: BrowserViewModel) {
                 onReaderFontSize = viewModel::setReaderFontSize,
                 onOpenLinksExternal = viewModel::setOpenLinksInExternalApp,
                 onRestoreSession = viewModel::setRestoreSession,
+                onDownloaderType = viewModel::setDownloaderType,
+                onDownloadLocation = viewModel::setDownloadLocation,
                 onClearData = viewModel::clearAllData,
                 onBack = pop,
             )

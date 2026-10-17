@@ -5,6 +5,7 @@ import android.content.Context
 import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import com.ling.browser.data.prefs.DownloadLocation
 
 /**
  * 手写的 SQLite 存储层。
@@ -75,6 +76,7 @@ class LingDatabase(context: Context) : SQLiteOpenHelper(
                 mime_type TEXT,
                 status TEXT NOT NULL,
                 local_path TEXT,
+                download_location TEXT NOT NULL DEFAULT 'APP_PRIVATE',
                 created_at INTEGER NOT NULL
             )
             """.trimIndent()
@@ -101,17 +103,27 @@ class LingDatabase(context: Context) : SQLiteOpenHelper(
             // 存库能让书签列表离线也显示图标，且卸载即清理、不留残 file。
             runCatching { db.execSQL("ALTER TABLE bookmarks ADD COLUMN favicon BLOB") }
         }
+        if (oldVersion < 4) {
+            // 下载保存位置（应用私有 / 公共目录）。老记录默认为应用私有目录，
+            // 与此前 DownloadManager 落到 getExternalFilesDir 的行为一致。
+            runCatching {
+                db.execSQL(
+                    "ALTER TABLE downloads ADD COLUMN download_location TEXT NOT NULL DEFAULT 'APP_PRIVATE'"
+                )
+            }
+        }
     }
 
     companion object {
         const val DB_NAME = "ling.db"
 
         /**
+         * 4：downloads 增加 download_location 列（下载保存位置）。
          * 3：bookmarks 增加 favicon 列（书签图标）。
          * 2：新增 downloads 表。
          * 1：初版（bookmarks / history / tabs）。
          */
-        const val VERSION = 3
+        const val VERSION = 4
     }
 }
 
@@ -162,6 +174,12 @@ internal fun Cursor.toDownload(): DownloadEntry = DownloadEntry(
     localPath = getColumnIndex("local_path").let {
         if (it >= 0 && !isNull(it)) getString(it) else null
     },
+    downloadLocation = getColumnIndex("download_location").let {
+        if (it >= 0 && !isNull(it)) {
+            DownloadLocation.entries.firstOrNull { loc -> loc.name == getString(it) }
+                ?: DownloadLocation.APP_PRIVATE
+        } else DownloadLocation.APP_PRIVATE
+    },
     createdAt = getLong(getColumnIndexOrThrow("created_at")),
 )
 
@@ -174,6 +192,7 @@ internal fun downloadValues(
     mimeType: String?,
     status: DownloadStatus,
     localPath: String?,
+    downloadLocation: DownloadLocation,
     createdAt: Long,
 ) = ContentValues().apply {
     put("download_id", downloadId)
@@ -184,6 +203,7 @@ internal fun downloadValues(
     if (mimeType == null) putNull("mime_type") else put("mime_type", mimeType)
     put("status", status.name)
     if (localPath == null) putNull("local_path") else put("local_path", localPath)
+    put("download_location", downloadLocation.name)
     put("created_at", createdAt)
 }
 

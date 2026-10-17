@@ -9,9 +9,12 @@
     <uses-permission
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28" />
-    <!-- 下载完成后在通知栏提示（Android 13+ 需运行时授权；未授权则静默下载，
-         功能不受影响，因此不主动申请，少一次打扰） -->
+    <!-- 内建下载器的进度通知（Android 13+ 需运行时授权）。
+         首次使用内建下载器时申请；未授权则通知栏无显示，下载本身不受影响。 -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 内建下载器的前台服务：下载进行中时常驻保活，防止进程被杀导致断流 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
     <uses-feature
         android:name="android.hardware.touchscreen"
@@ -68,6 +71,12 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+
+        <!-- 内建下载器前台服务：下载进行中时保活并展示通知栏进度 -->
+        <service
+            android:name=".download.DownloadService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
     </application>
 
 </manifest>

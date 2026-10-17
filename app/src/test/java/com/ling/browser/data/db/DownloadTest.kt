@@ -2,6 +2,7 @@ package com.ling.browser.data.db
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -101,6 +102,59 @@ class DownloadTest {
         val huge = 1024L * 1024 * 1024 * 1024 * 1024
         val text = format(huge)
         assertTrue("超大体积应仍以 TB 结尾，实际：$text", text.endsWith("TB"))
+    }
+
+    // ------------------------------------------------------------ 剩余时间估算
+
+    @Test
+    fun `剩余时间按剩余字节与速度计算`() {
+        val e = DownloadEntry(
+            downloadId = 1, fileName = "a", url = "u",
+            status = DownloadStatus.RUNNING,
+            totalBytes = 10_000_000, downloadedBytes = 2_000_000, speedBytesPerSec = 1_000_000,
+        )
+        // (10MB - 2MB) / 1MB per s = 8s
+        assertEquals(8L, e.etaSeconds)
+    }
+
+    @Test
+    fun `速度或总大小未知时算不出剩余时间`() {
+        // 头几百毫秒还没采样到速度
+        val noSpeed = DownloadEntry(
+            downloadId = 1, fileName = "a", url = "u",
+            status = DownloadStatus.RUNNING,
+            totalBytes = 1000, downloadedBytes = 100, speedBytesPerSec = 0,
+        )
+        assertNull(noSpeed.etaSeconds)
+
+        // 服务器不给 Content-Length
+        val noTotal = noSpeed.copy(speedBytesPerSec = 100, totalBytes = 0)
+        assertNull(noTotal.etaSeconds)
+    }
+
+    @Test
+    fun `非下载中状态没有剩余时间`() {
+        // 暂停时速度已归零，界面不该继续倒计时
+        val paused = DownloadEntry(
+            downloadId = 1, fileName = "a", url = "u",
+            status = DownloadStatus.PAUSED,
+            totalBytes = 1000, downloadedBytes = 100, speedBytesPerSec = 100,
+        )
+        assertNull(paused.etaSeconds)
+    }
+
+    @Test
+    fun `已下完时剩余时间为零而不是负数`() {
+        // 下载收尾瞬间已下载可能等于甚至略大于总大小
+        val done = DownloadEntry(
+            downloadId = 1, fileName = "a", url = "u",
+            status = DownloadStatus.RUNNING,
+            totalBytes = 1000, downloadedBytes = 1000, speedBytesPerSec = 100,
+        )
+        assertEquals(0L, done.etaSeconds)
+
+        val over = done.copy(downloadedBytes = 1200)
+        assertEquals(0L, over.etaSeconds)
     }
 
     private fun statusOf(status: DownloadStatus) = DownloadEntry(

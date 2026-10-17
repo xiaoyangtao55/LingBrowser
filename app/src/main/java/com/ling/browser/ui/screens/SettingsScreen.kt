@@ -40,6 +40,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import com.ling.browser.data.prefs.DownloadLocation
+import com.ling.browser.data.prefs.DownloaderType
 import com.ling.browser.data.prefs.HomeBackground
 import com.ling.browser.data.prefs.LingSettings
 import com.ling.browser.data.prefs.NightMode
@@ -70,6 +72,8 @@ fun SettingsScreen(
     onReaderFontSize: (ReaderFontSize) -> Unit,
     onOpenLinksExternal: (Boolean) -> Unit,
     onRestoreSession: (Boolean) -> Unit,
+    onDownloaderType: (DownloaderType) -> Unit,
+    onDownloadLocation: (DownloadLocation) -> Unit,
     onClearData: () -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
@@ -78,6 +82,8 @@ fun SettingsScreen(
     var showHomepageDialog by remember { mutableStateOf(false) }
     var showHomeBackgroundDialog by remember { mutableStateOf(false) }
     var showNightModeDialog by remember { mutableStateOf(false) }
+    var showDownloaderTypeDialog by remember { mutableStateOf(false) }
+    var showDownloadLocationDialog by remember { mutableStateOf(false) }
 
     // 选主页背景图。用 OpenDocument 而不是 GetContent：OpenDocument 支持持久化
     // 读权限，选一次后重启 App 仍读得到；GetContent 的授权只在本次会话有效。
@@ -272,6 +278,30 @@ fun SettingsScreen(
                         "关掉则忽略这类链接（推荐：本机没装该 App 时更稳定）",
                     checked = settings.openLinksInExternalApp,
                     onCheckedChange = onOpenLinksExternal,
+                )
+            }
+
+            // ---------------- 下载 ----------------
+            item { SectionHeader("下载") }
+            item {
+                SettingRow(
+                    icon = LingIcons.Download,
+                    title = "下载器",
+                    subtitle = settings.downloaderType.label,
+                    onClick = { showDownloaderTypeDialog = true },
+                )
+            }
+            item {
+                SettingRow(
+                    icon = LingIcons.Folder,
+                    title = "保存位置",
+                    subtitle = when (settings.downloadLocation) {
+                        DownloadLocation.APP_PRIVATE ->
+                            "应用私有目录（无需存储权限，卸载时清理）"
+                        DownloadLocation.PUBLIC_DOWNLOADS ->
+                            "公共下载目录（其它应用可见，Android 9 及以下需存储权限）"
+                    },
+                    onClick = { showDownloadLocationDialog = true },
                 )
             }
 
@@ -587,6 +617,105 @@ fun SettingsScreen(
             },
             confirmButton = {
                 TextButton(onClick = { showReaderFontDialog = false }) { Text("完成") }
+            },
+        )
+    }
+
+    // ---- 下载器类型选择 ----
+    if (showDownloaderTypeDialog) {
+        AlertDialog(
+            onDismissRequest = { showDownloaderTypeDialog = false },
+            title = { Text("下载器") },
+            text = {
+                Column {
+                    DownloaderType.entries.forEach { type ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    onDownloaderType(type)
+                                    showDownloaderTypeDialog = false
+                                }
+                                .padding(vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RadioButton(
+                                selected = settings.downloaderType == type,
+                                onClick = {
+                                    onDownloaderType(type)
+                                    showDownloaderTypeDialog = false
+                                },
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(type.label, style = MaterialTheme.typography.bodyLarge)
+                                Text(
+                                    text = when (type) {
+                                        DownloaderType.BUILT_IN ->
+                                            "实时进度、暂停/恢复、断点续传"
+                                        DownloaderType.SYSTEM ->
+                                            "稳定省心，进度靠轮询，不支持应用内暂停"
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showDownloaderTypeDialog = false }) { Text("完成") }
+            },
+        )
+    }
+
+    // ---- 下载保存位置选择 ----
+    if (showDownloadLocationDialog) {
+        AlertDialog(
+            onDismissRequest = { showDownloadLocationDialog = false },
+            title = { Text("保存位置") },
+            text = {
+                Column {
+                    DownloadLocation.entries.forEach { loc ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    onDownloadLocation(loc)
+                                    showDownloadLocationDialog = false
+                                }
+                                .padding(vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RadioButton(
+                                selected = settings.downloadLocation == loc,
+                                onClick = {
+                                    onDownloadLocation(loc)
+                                    showDownloadLocationDialog = false
+                                },
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(loc.label, style = MaterialTheme.typography.bodyLarge)
+                                Text(
+                                    text = when (loc) {
+                                        DownloadLocation.APP_PRIVATE ->
+                                            "无需存储权限，卸载时随应用一起清理"
+                                        DownloadLocation.PUBLIC_DOWNLOADS ->
+                                            "其它应用可见；Android 10+ 无需权限，" +
+                                                "Android 9 及以下需存储权限"
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showDownloadLocationDialog = false }) { Text("完成") }
             },
         )
     }

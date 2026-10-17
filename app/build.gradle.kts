@@ -164,6 +164,9 @@ dependencies {
     // 偏好设置持久化
     implementation(libs.androidx.datastore.preferences)
 
+    // 内建下载器
+    implementation(libs.okhttp)
+
     // 书签 / 历史 / 标签页持久化：直接用平台自带的 SQLiteOpenHelper，零额外依赖
 
     // Compose：版本由 BOM 决定

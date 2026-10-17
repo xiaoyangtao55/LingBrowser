@@ -79,6 +79,38 @@ enum class SearchEngine(val label: String, val queryUrl: String, val homepage: S
 }
 
 /**
+ * 下载器类型。
+ *
+ *  - [BUILT_IN] 内建下载器：自己掌握下载过程，支持实时进度、暂停/恢复、断点续传；
+ *  - [SYSTEM]   系统下载器：交给 Android DownloadManager，稳定省心但进度靠轮询、
+ *               不支持应用内暂停。
+ *
+ * 默认 [BUILT_IN]：这是「翎」自己实现的能力，用户装上来就能用上，
+ * 不必先去设置里翻。需要系统下载器特性的用户可以切回去。
+ */
+enum class DownloaderType(val label: String) {
+    BUILT_IN("内建下载器"),
+    SYSTEM("系统下载器"),
+}
+
+/**
+ * 下载保存位置。
+ *
+ *  - [APP_PRIVATE]       应用私有目录（Android/data/<pkg>/files/Download）：
+ *                        无需任何存储权限，卸载时随之清理；
+ *  - [PUBLIC_DOWNLOADS]  公共下载目录（/storage/emulated/0/Download）：
+ *                        其它应用也能看到，需要存储权限（Android 9 及以下运行时申请，
+ *                        Android 10+ 走 MediaStore，无需权限）。
+ *
+ * 默认 [APP_PRIVATE]：零权限、零打扰，符合「翎」轻量取向。
+ * 需要把文件分享给其它 App 的用户可以切到公共目录。
+ */
+enum class DownloadLocation(val label: String) {
+    APP_PRIVATE("应用私有目录"),
+    PUBLIC_DOWNLOADS("公共下载目录"),
+}
+
+/**
  * 阅读模式的字号档位。
  *
  * 直接复用 [com.ling.browser.web.ReaderPage.FontSize]，不再另立一份定义 ——
@@ -201,6 +233,10 @@ data class LingSettings(
      * 有个明确目标，也避免用户把字号调到一个荒谬的值后无法回到常规。
      */
     val readerFontSize: ReaderFontSize = ReaderFontSize.MEDIUM,
+    /** 下载器类型，默认内建下载器。 */
+    val downloaderType: DownloaderType = DownloaderType.BUILT_IN,
+    /** 下载保存位置，默认应用私有目录（无需存储权限）。 */
+    val downloadLocation: DownloadLocation = DownloadLocation.APP_PRIVATE,
 ) {
     /**
      * 用户实际要打开的主页。
@@ -238,6 +274,8 @@ class SettingsStore(private val context: Context) {
         val OPEN_LINKS_EXTERNAL = booleanPreferencesKey("open_links_external")
         val AD_BLOCK = booleanPreferencesKey("ad_block")
         val AD_BLOCK_RULES = stringSetPreferencesKey("ad_block_rules")
+        val DOWNLOADER_TYPE = stringPreferencesKey("downloader_type")
+        val DOWNLOAD_LOCATION = stringPreferencesKey("download_location")
     }
 
     val settings: Flow<LingSettings> = context.dataStore.data.map { p ->
@@ -272,6 +310,12 @@ class SettingsStore(private val context: Context) {
             readerFontSize = p[Keys.READER_FONT_SIZE]
                 ?.let { runCatching { ReaderFontSize.valueOf(it) }.getOrNull() }
                 ?: ReaderFontSize.MEDIUM,
+            downloaderType = p[Keys.DOWNLOADER_TYPE]
+                ?.let { runCatching { DownloaderType.valueOf(it) }.getOrNull() }
+                ?: DownloaderType.BUILT_IN,
+            downloadLocation = p[Keys.DOWNLOAD_LOCATION]
+                ?.let { runCatching { DownloadLocation.valueOf(it) }.getOrNull() }
+                ?: DownloadLocation.APP_PRIVATE,
         )
     }
 
@@ -336,6 +380,12 @@ class SettingsStore(private val context: Context) {
      */
     suspend fun setAdBlockRules(rules: Set<String>) =
         context.dataStore.edit { it[Keys.AD_BLOCK_RULES] = rules.filter { r -> r.isNotBlank() }.toSet() }
+
+    suspend fun setDownloaderType(type: DownloaderType) =
+        context.dataStore.edit { it[Keys.DOWNLOADER_TYPE] = type.name }
+
+    suspend fun setDownloadLocation(location: DownloadLocation) =
+        context.dataStore.edit { it[Keys.DOWNLOAD_LOCATION] = location.name }
 
     suspend fun setTabCount(count: Int) =
         context.dataStore.edit { it[Keys.TAB_COUNT] = count }

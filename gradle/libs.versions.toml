@@ -17,6 +17,8 @@ swipeRefresh = "1.1.0"
 webkit = "1.12.1"
 junit = "4.13.2"
 coroutines = "1.9.0"
+# 内建下载器用：流式写盘、断点续传（Range）、连接复用都比 HttpURLConnection 省心
+okhttp = "4.12.0"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -32,6 +34,7 @@ androidx-datastore-preferences = { group = "androidx.datastore", name = "datasto
 
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 kotlinx-coroutines-test = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test", version.ref = "coroutines" }
+okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
 
 # 以下 Compose 模块不写版本号，由 BOM 统一解析
 androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }

@@ -9,6 +9,8 @@ import com.ling.browser.data.db.Bookmark
 import com.ling.browser.data.db.DownloadEntry
 import com.ling.browser.data.db.HistoryEntry
 import com.ling.browser.data.repo.deriveFolders
+import com.ling.browser.data.prefs.DownloadLocation
+import com.ling.browser.data.prefs.DownloaderType
 import com.ling.browser.data.prefs.HomeBackground
 import com.ling.browser.data.prefs.LingSettings
 import com.ling.browser.data.prefs.NightMode
@@ -511,6 +513,40 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
     val pendingDownload: StateFlow<PendingDownload?> = _pendingDownload.asStateFlow()
 
     /**
+     * 「去申请存储权限」的信号，值只增不减。
+     *
+     * 当用户选择公共下载目录且系统是 Android 9 及以下时，下载前需要
+     * `WRITE_EXTERNAL_STORAGE` 运行时权限。权限申请必须由 Activity 发起，
+     * 因此 ViewModel 在这里发信号，UI（MainActivity）收到后用
+     * ActivityResultContracts.RequestPermission 拉起系统弹窗，结果再通过
+     * [onStoragePermissionResult] 回传。
+     *
+     * 用递增计数而不是 Boolean：连续两次下载都要各触发一次（Boolean 第二次变化不了）。
+     */
+    private val _requestStoragePermission = MutableStateFlow(0)
+    val requestStoragePermission: StateFlow<Int> = _requestStoragePermission.asStateFlow()
+
+    /**
+     * 「去申请通知权限」的信号，值只增不减（理由同上）。
+     *
+     * 内建下载器靠前台服务的常驻通知展示进度；Android 13 起没有
+     * `POST_NOTIFICATIONS` 授权时，通知栏不会出现任何东西 —— 前台服务照跑，
+     * 用户却什么都看不到。申请同样必须由 Activity 发起，这里发信号，
+     * 授权结果不影响下载，因此无需回传处理。
+     */
+    private val _requestNotificationPermission = MutableStateFlow(0)
+    val requestNotificationPermission: StateFlow<Int> = _requestNotificationPermission.asStateFlow()
+
+    /**
+     * 等待存储权限结果的下载请求。
+     *
+     * 用户点确认后若发现需要权限，先把请求存在这里，权限结果回来后
+     * 再决定是真正入队还是提示失败。期间 [_pendingDownload] 已被清空，
+     * 避免确认框残留。
+     */
+    private var pendingAfterPermission: PendingDownload? = null
+
+    /**
      * 网页请求下载：先摆出确认框，并尽力探测文件大小。
      *
      * 大小探测是「尽力而为」：发一个 HEAD 请求读 Content-Length。
@@ -542,10 +578,82 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
     fun confirmPendingDownload() {
         val req = _pendingDownload.value ?: return
         _pendingDownload.value = null
+
+        // 内建下载器的进度靠常驻通知呈现，Android 13+ 需要通知权限。
+        // 不阻塞下载：弹窗与下载并行，授权后通知随即出现。
+        maybeRequestNotificationPermission()
+
+        // 公共下载目录在 Android 9 及以下需要 WRITE_EXTERNAL_STORAGE 运行时权限。
+        // 应用私有目录与 Android 10+ 的 MediaStore 路径都不需要权限，直接入队。
+        val loc = settings.value.downloadLocation
+        val needPermission = loc == DownloadLocation.PUBLIC_DOWNLOADS &&
+            android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q
+
+        if (needPermission) {
+            val granted = checkSelfHasStoragePermission()
+            if (!granted) {
+                pendingAfterPermission = req
+                _requestStoragePermission.update { it + 1 }
+                return
+            }
+        }
+        enqueueDownload(req)
+    }
+
+    /**
+     * 存储权限申请结果回调。
+     *
+     * 由 MainActivity 在权限弹窗返回后调用。
+     *  - 已授权：继续之前挂起的下载；
+     *  - 拒绝：提示用户无法下载到公共目录，可在设置里切到私有目录。
+     */
+    fun onStoragePermissionResult(granted: Boolean) {
+        val req = pendingAfterPermission ?: return
+        pendingAfterPermission = null
+        if (granted) {
+            enqueueDownload(req)
+        } else {
+            _message.value = "没有存储权限，无法下载到公共目录。可在设置里选择「应用私有目录」。"
+        }
+    }
+
+    /**
+     * 真正把下载交给仓库。
+     *
+     * 抽出成单独方法：权限申请前后都要走这一步，避免复制粘贴。
+     * 注意参数顺序是 (url, fileName, mimeType)，与 [com.ling.browser.data.repo.DownloadRepository.enqueue] 一致。
+     */
+    private fun enqueueDownload(req: PendingDownload) {
         viewModelScope.launch {
-            val ok = container.downloads.enqueue(req.url, req.mimeType, req.fileName)
+            val ok = container.downloads.enqueue(req.url, req.fileName, req.mimeType)
             _message.value = if (ok) "已开始下载" else "无法下载该文件"
         }
+    }
+
+    /** 同步检查应用是否已持有 WRITE_EXTERNAL_STORAGE。 */
+    private fun checkSelfHasStoragePermission(): Boolean {
+        val ctx = getApplication<Application>()
+        return androidx.core.content.ContextCompat.checkSelfPermission(
+            ctx,
+            android.Manifest.permission.WRITE_EXTERNAL_STORAGE,
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+    }
+
+    /**
+     * 内建下载器下载时申请通知权限（Android 13+）。
+     *
+     * 系统下载器由 DownloadManager 自己发通知，与我们的通知权限无关，故跳过。
+     * 已授权或系统版本不需要时也不打扰用户。
+     */
+    private fun maybeRequestNotificationPermission() {
+        if (settings.value.downloaderType != DownloaderType.BUILT_IN) return
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.TIRAMISU) return
+        val ctx = getApplication<Application>()
+        val granted = androidx.core.content.ContextCompat.checkSelfPermission(
+            ctx,
+            android.Manifest.permission.POST_NOTIFICATIONS,
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (!granted) _requestNotificationPermission.update { it + 1 }
     }
 
     /** 用户取消下载。 */
@@ -603,8 +711,18 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
     fun cancelDownload(entry: DownloadEntry) {
         viewModelScope.launch {
             container.downloads.cancel(entry)
-            _message.value = "已取消下载"
+            _message.value = "已取消下载并删除文件"
         }
+    }
+
+    /** 暂停下载（保留已下载部分，可后续恢复）。 */
+    fun pauseDownload(entry: DownloadEntry) {
+        viewModelScope.launch { container.downloads.pause(entry) }
+    }
+
+    /** 恢复已暂停的下载（自动用 Range 续传）。 */
+    fun resumeDownload(entry: DownloadEntry) {
+        viewModelScope.launch { container.downloads.resume(entry) }
     }
 
     fun removeDownload(entry: DownloadEntry, deleteFile: Boolean = false) {
@@ -720,6 +838,22 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun setOpenLinksInExternalApp(enabled: Boolean) =
         io { container.settings.setOpenLinksInExternalApp(enabled) }
+
+    /**
+     * 选择下载器类型（内建 / 系统）。
+     *
+     * 改完立即生效：下次下载就会走新的后端；已在进行中的下载不受影响
+     * （已经交给对应后端了，中途切换只会让记录来源混乱）。
+     */
+    fun setDownloaderType(type: DownloaderType) = io { container.settings.setDownloaderType(type) }
+
+    /**
+     * 选择下载保存位置（应用私有目录 / 公共下载目录）。
+     *
+     * 同样只影响**之后**的下载；已下载/进行中的文件仍在原位置。
+     */
+    fun setDownloadLocation(location: DownloadLocation) =
+        io { container.settings.setDownloadLocation(location) }
 
     // ------------------------------------------------------------ 阅读模式
 

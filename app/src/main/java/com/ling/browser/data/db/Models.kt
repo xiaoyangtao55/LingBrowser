@@ -1,5 +1,7 @@
 package com.ling.browser.data.db
 
+import com.ling.browser.data.prefs.DownloadLocation
+
 /** 书签。 */
 data class Bookmark(
     val id: Long = 0,
@@ -98,12 +100,36 @@ data class DownloadEntry(
     val status: DownloadStatus = DownloadStatus.PENDING,
     /** 本地文件绝对路径，完成后才有意义。 */
     val localPath: String? = null,
+    /** 下载保存位置，决定文件落在应用私有目录还是公共下载目录。 */
+    val downloadLocation: DownloadLocation = DownloadLocation.APP_PRIVATE,
     val createdAt: Long = System.currentTimeMillis(),
+    /**
+     * 瞬时下载速度（字节/秒）。
+     *
+     * 只在内存里用于界面展示，**不落库**：速度是易失的显示值，写进数据库
+     * 既没意义，进程重启后也会变成过期数字。非下载中状态恒为 0。
+     */
+    val speedBytesPerSec: Long = 0,
 ) {
     /** 进度 0f..1f；总大小未知时返回 0。 */
     val progress: Float
         get() = if (totalBytes <= 0L) 0f
         else (downloadedBytes.toFloat() / totalBytes).coerceIn(0f, 1f)
+
+    /**
+     * 预计剩余秒数；无法估算时返回 null。
+     *
+     * 只有「下载中 + 总大小已知 + 速度为正」才有意义：暂停/完成时速度归零，
+     * 总大小未知（服务器不给 Content-Length）时也算不出剩余量。
+     */
+    val etaSeconds: Long?
+        get() {
+            if (status != DownloadStatus.RUNNING) return null
+            if (speedBytesPerSec <= 0L || totalBytes <= 0L) return null
+            val remaining = totalBytes - downloadedBytes
+            if (remaining <= 0L) return 0L
+            return remaining / speedBytesPerSec
+        }
 
     /** 是否还在进行中（可以取消）。 */
     val isRunning: Boolean

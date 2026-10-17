@@ -278,10 +278,17 @@ if m_up and "DROP TABLE" in m_up.group(0):
 else:
     ok("onUpgrade 不再 DROP 重建（用户数据不会因升级丢失）")
 
-if re.search(r"VERSION = 3", store):
-    ok("版本号已升到 3")
+if re.search(r"VERSION = 4", store):
+    ok("版本号已升到 4")
 else:
-    bad("版本号未升到 3，迁移不会触发")
+    bad("版本号未升到 4，迁移不会触发")
+
+# 4 是「下载保存位置」这次迁移带来的：必须同时看到对应的 ALTER。
+if re.search(r"if \(oldVersion < 4\)", store) and \
+        re.search(r"ALTER TABLE downloads ADD COLUMN download_location", store):
+    ok("4 -> 5 之前的下载位置迁移已就位（downloads 增列 download_location）")
+else:
+    bad("缺少 download_location 的增量迁移")
 
 if re.search(r"favicon BLOB", store):
     ok("建表语句含 favicon BLOB")

@@ -8,7 +8,13 @@ import com.ling.browser.data.repo.BookmarkRepository
 import com.ling.browser.data.repo.DownloadRepository
 import com.ling.browser.data.repo.HistoryRepository
 import com.ling.browser.data.repo.SessionRepository
+import com.ling.browser.download.DownloadEngine
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 
 /**
@@ -43,11 +49,32 @@ class AppContainer(context: Context) {
      */
     val initialSettings: LingSettings = runBlocking { settings.settings.first() }
 
+    /**
+     * 当前设置的热缓存。
+     *
+     * 下载仓库在 `enqueue` 时需要同步知道「用哪个下载器、存到哪里」，
+     * 不能等 Flow 异步发射。这里订阅设置流，把最新值存在 StateFlow 里，
+     * 仓库通过 [settingsProvider] 直接读 `.value`，零等待。
+     */
+    private val latestSettings = MutableStateFlow(initialSettings)
+
+    init {
+        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+            settings.settings.collect { latestSettings.value = it }
+        }
+    }
+
     val bookmarks: BookmarkRepository = BookmarkRepository(database)
 
     val history: HistoryRepository = HistoryRepository(database)
 
-    val downloads: DownloadRepository = DownloadRepository(appContext, database)
+    /** 内建下载引擎：真正执行下载、进度推送、断点续传。 */
+    val downloadEngine: DownloadEngine = DownloadEngine(appContext, database)
+
+    val downloads: DownloadRepository = DownloadRepository(
+        appContext, database, downloadEngine,
+        settingsProvider = { latestSettings.value },
+    )
 
     val session: SessionRepository = SessionRepository(database)
 }
