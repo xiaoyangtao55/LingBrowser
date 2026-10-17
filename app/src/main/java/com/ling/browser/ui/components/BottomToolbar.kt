@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -35,6 +36,10 @@ import androidx.compose.ui.unit.dp
  * ModalBottomSheet）：面板自屏幕底部升起，单手可及、条目更大更好点，
  * 比锚定式下拉菜单更贴合 Material 3 的交互范式。
  * 因此这里只把点击转出去，不再自己持有菜单锚点与展开状态。
+ *
+ * 底部手势条（小白条）：系统栏内边距由**工具栏自己**吃，而不是在 [Surface]
+ * 外面留。这样工具栏的底色一路铺到屏幕最下沿，只有按钮内容被顶到手势条之上
+ * —— 否则手势区会露出页面背景色，工具栏与屏幕底部之间裂开一条缝。
  */
 @Composable
 fun BottomToolbar(
@@ -56,6 +61,9 @@ fun BottomToolbar(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                // 内边距在内、高度在外：Surface 高度 = 52dp + 手势条高度，
+                // 底色铺满，按钮行仍保持 52dp。
+                .navigationBarsPadding()
                 .height(52.dp)
                 .padding(horizontal = 8.dp),
             verticalAlignment = Alignment.CenterVertically,

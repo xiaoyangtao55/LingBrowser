@@ -24,7 +24,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -254,10 +253,10 @@ fun BrowserScreen(
         }
     }
 
+    // 底部手势条的内边距不在这里留，交给 BottomToolbar 自己吃：
+    // 工具栏底色要铺到屏幕最下沿（见其文件头说明）。
     Column(
-        modifier = modifier
-            .fillMaxSize()
-            .navigationBarsPadding(),
+        modifier = modifier.fillMaxSize(),
     ) {
         // ---- 顶部提示条 ----
         AnimatedVisibility(visible = activeTab?.isIncognito == true) {
