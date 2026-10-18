@@ -340,6 +340,14 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
 
     fun refresh() = tabManager.reload()
 
+    /**
+     * 证书错误页的「继续访问」：放行当前站点的证书错误并重新加载。
+     *
+     * 只对**当前标签、当前主机**生效，关标签即失效（见 [WebTabManager.proceedInsecure]）。
+     * 放行后地址栏仍标「证书错误」—— 用户点的是"我知道风险"，不是"这很安全"。
+     */
+    fun proceedInsecure() = tabManager.proceedInsecure()
+
     fun stopLoading() = tabManager.stopLoading()
 
     fun goBack() = tabManager.goBack()

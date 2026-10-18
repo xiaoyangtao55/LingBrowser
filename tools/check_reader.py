@@ -65,6 +65,25 @@ def extract_js(src, name):
     return None
 
 
+def parse_stdout(out):
+    """从 harness 的输出里取出 (result JSON, 真身快照状态)。
+
+    harness 打两行：`__RESULT__<json>` 和 `__PAGE__INTACT|CHANGED`。
+    两个标记都要先剥掉再解析 JSON，否则尾部那个标记会让 json.loads 直接报错
+    （表现为"返回值不是合法 JSON"，把真正的原因盖掉）。
+    """
+    if "__RESULT__" not in out:
+        return None, ""
+    payload = out.split("__RESULT__", 1)[1]
+    state = ""
+    if "__PAGE__" in payload:
+        payload, state = payload.split("__PAGE__", 1)
+    try:
+        return json.loads(payload.strip()), state.strip()
+    except Exception:
+        return None, state.strip()
+
+
 src = open(KT, encoding="utf-8").read()
 
 print("1. 能取出 JS 常量")
@@ -126,7 +145,10 @@ function mkNode(tag, cls, text) {
     t = String(t).toUpperCase();
     var out = [];
     (function walk(m) {
-      if (m.tagName === t) out.push(m);
+      // '*' 分支不能省：真实的 element.getElementsByTagName('*') 返回**全部后代元素**。
+      // 桩里漏了它，`tags('*')` 会恒为空 —— 语义淘汰整段静默失效，
+      // 而算法照样能提取出正文，检查根本看不出来（踩过）。
+      if (t === '*' || m.tagName === t) out.push(m);
       (m.childNodes || []).forEach(walk);
     })(n);
     return out;
@@ -140,6 +162,23 @@ function mkNode(tag, cls, text) {
     return c;
   };
   n.appendChild = function (c) { c.parentNode = n; n.childNodes.push(c); return c; };
+  // cloneNode(true)：提取脚本在 body 的**克隆体**上做删除，避免失败时把原页面删坏。
+  // 桩必须实现它，否则算法会抛 TypeError 并被脚本自己的 try/catch 吞成
+  // {status:'error'} —— 那看起来像"没提取到正文"，实际是**桩的问题**。
+  //
+  // textContent 用赋值而不是靠 append 冒泡累加：桩里的文本是**预计算**的字符串
+  // （append 只往祖先上累），若先设了文本再 append 子节点就会把子节点文本算两遍。
+  // 直接沿用源节点的值同时也是真实 cloneNode 的语义 —— 克隆体在克隆那一刻的
+  // textContent 就等于源节点的 textContent。
+  n.cloneNode = function () {
+    var c = mkNode(n.tagName, n.className, '');
+    c.id = n.id;
+    for (var k in n.attrs) c.attrs[k] = n.attrs[k];
+    if (n.rawHtml !== undefined) c.rawHtml = n.rawHtml;
+    (n.childNodes || []).forEach(function (ch) { c.appendChild(ch.cloneNode(true)); });
+    c.textContent = n.textContent;
+    return c;
+  };
   // 真实的 innerHTML 会**序列化子树**；桩里如果只存文本，
   // 算法最后取 article.innerHTML 就永远是空的，
   // 会让"提取成功但 html 为空"看起来像 bug（踩过）。
@@ -226,8 +265,23 @@ var document = {
 var window = {};
 var location = { href: 'https://example.com/post/1' };
 
+// 真身结构快照：提取脚本必须只在克隆体上删节点，跑完真身要一模一样。
+//
+// 这条断言就是用来自动守住"失败时页面被改坏"那个 bug 的 ——
+// 只要有人把删除又挪回 document 上，before/after 立刻不相等。
+function snapshot(root) {
+  var out = [];
+  (function walk(n) {
+    out.push(n.tagName + '#' + (n.className || ''));
+    (n.childNodes || []).forEach(walk);
+  })(root);
+  return out.join(',');
+}
+var PAGE_BEFORE = snapshot(body);
 var RESULT = eval(__SCRIPT__);
+var PAGE_AFTER = snapshot(body);
 console.log('__RESULT__' + RESULT);
+console.log('__PAGE__' + (PAGE_BEFORE === PAGE_AFTER ? 'INTACT' : 'CHANGED'));
 """
     harness = harness.replace("__SCRIPT__", json.dumps(script))
     tmp2 = os.path.join(tempfile.gettempdir(), "ling_reader_harness.js")
@@ -238,13 +292,10 @@ console.log('__RESULT__' + RESULT);
     if "__RESULT__" not in out:
         bad("算法运行失败（无返回值）: " + (r2.stderr or out).strip()[:500])
     else:
-        payload = out.split("__RESULT__", 1)[1]
-        try:
-            res = json.loads(payload)
-        except Exception as e:
-            bad("返回值不是合法 JSON: %s / %r" % (e, payload[:200]))
-            res = None
-        if res:
+        res, page_state = parse_stdout(out)
+        if res is None:
+            bad("返回值不是合法 JSON: %r" % out[:200])
+        else:
             if res.get("status") == "ok":
                 ok("成功提取正文（%d 字）" % res.get("textLength", 0))
             else:
@@ -261,6 +312,12 @@ console.log('__RESULT__' + RESULT);
                 ok("保留了全部正文段落")
             else:
                 bad("正文段落丢失")
+
+            # 真身必须原样保留：删除全部发生在克隆体上
+            if page_state == "INTACT":
+                ok("提取不改动原页面结构（删除都发生在克隆体上）")
+            else:
+                bad("提取动到了原页面结构（%s）—— 失败时页面会被删坏" % (page_state or "无快照"))
 
         # ---- 原文地址（canonical）----
         #
@@ -305,12 +362,8 @@ console.log('__RESULT__' + RESULT);
                 f.write(h2)
             rr = subprocess.run([node, p2], capture_output=True, text=True)
             o = (rr.stdout or "").strip()
-            if "__RESULT__" not in o:
-                return None
-            try:
-                return json.loads(o.split("__RESULT__", 1)[1]).get("url")
-            except Exception:
-                return None
+            parsed, _ = parse_stdout(o)
+            return parsed.get("url") if parsed else None
 
         canonical_url = "https://www.zhihu.com/question/1/answer/2090101772673085808"
         evil = "zhihu://answers/2090101772673085808?mcid=c58f0c59&callback_source=search_main"
@@ -352,6 +405,56 @@ console.log('__RESULT__' + RESULT);
         else:
             bad("普通地址被改动：实际 %r" % (got,))
 
+        # ---- 失败路径：绝不能改坏原页面 ----
+        #
+        # 用户报的 bug：点了阅读模式，吐司说"这个页面没有可提取的正文"，
+        # 可页面已经被删得七零八落（导航、页眉页脚、评论区、表单控件全没了，
+        # 排版也散架），只能手动刷新才恢复。
+        #
+        # 根因是提取脚本直接在**真身 DOM** 上做删除，而"有没有正文"要到
+        # 很后面才判定 —— 判定失败时页面早就被删过了。
+        #
+        # 所以这里真的跑一遍"提取失败"的页面，并比对真身结构快照。
+        print("\n4c. 提取失败时原页面必须原样保留（真身不被改动）")
+
+        # 一个典型的"没有正文"页面：导航/页眉/评论区/表单齐全，
+        # 但只有一个短段落 —— 达不到进阅读模式的门槛。
+        bad_page = (
+            "var hdr  = mk('header', 'site-header', '示例站点 登录 注册');\n"
+            "var nav  = mk('nav', 'site-nav', '首页 分类 关于 联系');\n"
+            "var art  = mk('article', 'post-content', '');\n"
+            "append(art, N('p', '', '这是一小段说明文字，不足以进入阅读模式。'));\n"
+            "var side = mk('div', 'sidebar-related', '相关阅读 另一篇文章');\n"
+            "var com  = mk('div', 'comments', '评论区：用户甲说好');\n"
+            "var frm  = mk('form', 'search-box', '站内搜索');\n"
+            "var foot = mk('div', 'site-footer', '版权所有 备案号 联系方式');\n"
+        )
+        h3 = re.sub(
+            r"var nav  = mk\('nav', 'site-nav'[\s\S]*?联系方式'\);\n",
+            bad_page, harness, count=1,
+        )
+        if "site-header" not in h3:
+            bad("构造'提取失败'用的页面失败：页面块没被替换掉")
+        else:
+            h3 = h3.replace("__SCRIPT__", json.dumps(script))
+            p3 = os.path.join(tempfile.gettempdir(), "ling_reader_fail.js")
+            with open(p3, "w", encoding="utf-8") as f:
+                f.write(h3)
+            r3 = subprocess.run([node, p3], capture_output=True, text=True)
+            o3 = (r3.stdout or "").strip()
+            res3, state3 = parse_stdout(o3)
+            if res3 is None:
+                bad("失败路径运行失败（无返回值）: " + (r3.stderr or o3).strip()[:400])
+            else:
+                if res3.get("status") == "no_content":
+                    ok("无正文的页面被正确判成 no_content（%s）" % res3.get("reason"))
+                else:
+                    bad("本该判成 no_content，实际是 %s" % res3.get("status"))
+                if state3 == "INTACT":
+                    ok("提示'没有可提取的正文'之后，原页面结构原样保留")
+                else:
+                    bad("提取失败却改动了原页面（%s）—— '页面异常'的根因" % (state3 or "无快照"))
+
     print("\n5. 关键常量与语义过滤（防止改坏而测试仍过）")
     # ⚠️ 第 4 节的页面是"理想页面"，把 CJK 加权去掉后它**照样**能通过 ——
     # 于是那项检查抓不到这个回归（实测确认）。这里改成直接检查源码特征，
@@ -383,11 +486,37 @@ console.log('__RESULT__' + RESULT);
     else:
         bad("语义淘汰条件不完整，可能误删正文容器")
 
-    # 必须真的从 DOM 里移除垃圾节点，而不是只打标记
+    # 必须真的把垃圾节点删掉，而不是只打标记
     if re.search(r"removeChild\(all\[q\]\)", script):
-        ok("被判定为垃圾的节点真的从 DOM 移除")
+        ok("被判定为垃圾的节点真的从文档里移除")
     else:
-        bad("垃圾节点未从 DOM 移除")
+        bad("垃圾节点未从文档里移除")
+
+    # ---------------------------------------------------- 删除必须发生在克隆体上
+    #
+    # 这一组守的是"提示没有正文、页面却已被改坏"那个 bug。
+    # 真身 DOM 一个节点都不能动：只要有人把删除挪回 document 上，
+    # 上面的 4c 快照比对与这里的源码检查会同时报错。
+    if "document.body.cloneNode(true)" in script:
+        ok("在 body 的克隆体上做提取（原页面不会被改动）")
+    else:
+        bad("提取没有在克隆体上做 —— 判定'没有正文'时页面已经被删坏")
+
+    # 正文管线的查询必须走克隆体。document 上只允许读 head 里的 meta/link
+    # （站点名、canonical），那些我们从不变更，也不在克隆的 body 里。
+    doc_reads = re.findall(
+        r"document\.getElementsByTagName\(\s*['\"]([^'\"]+)['\"]\s*\)", script
+    )
+    stray = sorted({t for t in doc_reads if t not in ("meta", "link")})
+    if stray:
+        bad("这些查询还直接读真身 document：%s —— 会删/改到原页面" % "、".join(stray))
+    else:
+        ok("正文管线的 DOM 查询全部走克隆体（document 上只剩 meta/link）")
+
+    if re.search(r"var all = tags\('\*'\)", script):
+        ok("语义淘汰的节点集合取自克隆体")
+    else:
+        bad("语义淘汰仍在真身上取节点")
 
     # 链接密度两处阈值
     if "linkDensity(para) > 0.25" in script or "ld > 0.25" in script:
@@ -623,13 +752,15 @@ if re.search(r"val isInternal = InternalPage\.isInternal\(url", mgr):
 else:
     bad("未统一判定内部页面，容易出现只处理主页、漏掉阅读视图的情况")
 
-# (3) 回调不能把逻辑地址改写成 baseUrl，也不能记下自定义协议
-#
 # 判据是"url 回写被 keep 分支挡住"。变量名会随实现调整，
 # 所以不绑定具体写法，而是检查**行为**：两处回调（onPageStarted /
-# onPageFinished）都保留 `keep -> it.url` 分支，且主页显式回写逻辑地址。
-if mgr.count("keep -> it.url") >= 2:
-    ok("onPageStarted/onPageFinished 都不会覆盖掉逻辑地址")
+# onPageFinished）都保留"保留旧地址"的分支，且主页显式回写逻辑地址。
+#
+# ⚠️ 这里不能再写成 `count("keep -> it.url")`：lambda 参数名会变
+# （写过 `it.url`，也写过 `tab.url`），拿变量名当判据会把重构误判成回归。
+keep_branches = re.findall(r"keep\s*->\s*\w+\.url", mgr)
+if len(keep_branches) >= 2:
+    ok(f"onPageStarted/onPageFinished 都不会覆盖掉逻辑地址（{len(keep_branches)} 处 keep 分支）")
 else:
     bad("有回调会把阅读视图的逻辑地址改写掉，导致返回栈与识别错乱")
 

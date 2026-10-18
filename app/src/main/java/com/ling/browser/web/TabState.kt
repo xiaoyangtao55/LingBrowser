@@ -40,6 +40,14 @@ data class TabState(
     val isIncognito: Boolean = false,
     /** 页面加载失败时的错误描述，非空表示展示错误页。 */
     val errorText: String? = null,
+    /**
+     * 连接安全状态，供地址栏展示「不安全 / 部分不安全 / 证书错误」标识。
+     *
+     * 基础值按 URL 协议算出（见 [SecurityState.baseForUrl]），随后由
+     * [WebTabManager] 在混合内容 / 证书错误回调里**升级**，因此必须存下来，
+     * 不能只靠 url 派生。
+     */
+    val security: SecurityState = SecurityState.SECURE,
 ) {
     /** 列表中展示的标题，未取到标题时退回主机名。 */
     val displayTitle: String

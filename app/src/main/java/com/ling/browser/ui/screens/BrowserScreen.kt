@@ -64,6 +64,7 @@ import com.ling.browser.ui.components.DesktopModeBanner
 import com.ling.browser.ui.components.HomeBackgroundLayer
 import com.ling.browser.ui.components.IncognitoBanner
 import com.ling.browser.util.UrlUtils
+import com.ling.browser.web.SecurityState
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -275,7 +276,7 @@ fun BrowserScreen(
             isEditing = addressEditing,
             isLoading = activeTab?.isLoading == true,
             progress = activeTab?.progress,
-            isSecure = activeTab?.url?.startsWith("https") == true,
+            security = activeTab?.security ?: SecurityState.SECURE,
             suggestions = suggestions,
             onTextChange = viewModel::onAddressChanged,
             onFocusChange = viewModel::onAddressFocusChanged,
@@ -346,6 +347,12 @@ fun BrowserScreen(
                     message = err,
                     url = activeTab.url,
                     onRetry = viewModel::refresh,
+                    // 只有证书错误才给「继续访问」逃生口；其余加载失败没有"硬闯"一说。
+                    onProceedInsecure = if (activeTab.security == SecurityState.INSECURE_CERT) {
+                        viewModel::proceedInsecure
+                    } else {
+                        null
+                    },
                     modifier = Modifier
                         .fillMaxSize()
                         .background(MaterialTheme.colorScheme.background),
@@ -632,11 +639,17 @@ private fun sizeLabel(pending: PendingDownload): String = when {
     else -> "大小未知"
 }
 
-/** 加载失败页。 */
+/**
+ * 加载失败页。
+ *
+ * @param onProceedInsecure 证书错误时的「继续访问」入口；为 null 表示该错误
+ *   不可放行（普通加载失败没有"硬闯"一说），此时不渲染这个按钮。
+ */
 @Composable
 private fun ErrorScreen(    message: String,
     url: String,
     onRetry: () -> Unit,
+    onProceedInsecure: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -668,6 +681,13 @@ private fun ErrorScreen(    message: String,
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             TextButton(onClick = onRetry) { Text("重试") }
+            // 证书错误专属逃生口。故意用低调的 TextButton、并明写「不安全」：
+            // 它是"我已知晓风险、仍要进"，不能做成显眼的推荐按钮。
+            onProceedInsecure?.let { proceed ->
+                TextButton(onClick = proceed) {
+                    Text("继续访问（不安全）", color = MaterialTheme.colorScheme.error)
+                }
+            }
         }
     }
 }

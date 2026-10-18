@@ -414,7 +414,13 @@ class DownloadEngine(
                 val buffer = ByteArray(BUFFER_SIZE)
                 var read: Int
                 var written = start
-                var lastPublish = 0L
+                // 字节进度与时间戳必须分开记：早先只有 lastPublish 一个变量，
+                // 它存的是**字节数**，却被拿去和 now 做差（now - lastPublish），
+                // 于是"每 300ms 一次"的节流永远成立 —— 实际变成每读一个 8 KiB
+                // 缓冲就刷一次进度，速度采样被拖到毫秒级窗口里算，界面上的
+                // 速度和「剩余时间」跟着乱跳。
+                var lastPublishBytes = start
+                var lastPublishAt = 0L
                 while (input.read(buffer).also { read = it } != -1) {
                     // 每次写之前显式检查取消：网络读与写盘都是阻塞调用，
                     // 协程的取消不会自动打断它们。少了这一步，「暂停」只能等
@@ -426,10 +432,11 @@ class DownloadEngine(
                     out.write(buffer, 0, read)
                     written += read
                     val now = System.currentTimeMillis()
-                    if (written - lastPublish >= PROGRESS_INTERVAL_BYTES ||
-                        now - lastPublish >= PROGRESS_INTERVAL_MS
+                    if (written - lastPublishBytes >= PROGRESS_INTERVAL_BYTES ||
+                        now - lastPublishAt >= PROGRESS_INTERVAL_MS
                     ) {
-                        lastPublish = written
+                        lastPublishBytes = written
+                        lastPublishAt = now
                         val speed = measureSpeed(taskId, written, now)
                         stateMutex.withLock {
                             tasks.value[taskId]?.let { cur ->
@@ -455,6 +462,12 @@ class DownloadEngine(
      * 单次「字节差 / 时间差」抖动很大（网络分片、磁盘刷盘都会造成忽快忽慢），
      * 所以用指数滑动平均（新样本占 1/4 权重）把它磨平，界面上的数字才不会
      * 每秒乱跳。首次采样没有参照，返回 0（界面此时不显示速度）。
+     *
+     * 采样窗口还必须够长：进度是按「每 256 KiB 或每 300ms」刷的，快网下
+     * 几百 KB 只要几十毫秒就读完，窗口内算出的"瞬时速度"是分片级的抖动
+     * （同一秒里能从 2 MB/s 跳到 500 KB/s）。窗口不足 [SPEED_SAMPLE_MIN_MS]
+     * 时直接沿用上一次的速度，既不产生新噪声，也让「剩余时间」在两个采样
+     * 点之间随已下载字节平滑下降，而不是跟着抖动上下弹。
      */
     private fun measureSpeed(taskId: Long, bytes: Long, now: Long): Long {
         val prev = speedSamples[taskId]
@@ -462,12 +475,15 @@ class DownloadEngine(
             speedSamples[taskId] = SpeedSample(bytes, now, 0)
             return 0
         }
-        val deltaBytes = bytes - prev.bytes
         val deltaMs = now - prev.time
+        // 窗口太短：不推进采样点，等下次累够时间再算，
+        // 这样窗口始终覆盖自上个**有效**采样以来的全部字节。
+        if (deltaMs < SPEED_SAMPLE_MIN_MS) return prev.speed
+        val deltaBytes = bytes - prev.bytes
         prev.bytes = bytes
         prev.time = now
         // 时间或字节没推进（同一毫秒内的极小文件）时保持上一次的速度
-        if (deltaMs <= 0 || deltaBytes <= 0) return prev.speed
+        if (deltaBytes <= 0) return prev.speed
         val instant = deltaBytes * 1000L / deltaMs
         prev.speed = if (prev.speed <= 0L) instant else (prev.speed * 3 + instant) / 4
         return prev.speed
@@ -578,5 +594,14 @@ class DownloadEngine(
 
         /** 进度刷盘时间间隔：300ms，兼顾实时感与性能。 */
         private const val PROGRESS_INTERVAL_MS = 300L
+
+        /**
+         * 速度采样的最短窗口：300ms。
+         *
+         * 比这更短的窗口算出的"瞬时速度"只是网络分片级抖动，磨平它反而会
+         * 让平均速度滞后。窗口不足时沿用上次速度，界面上的速度与剩余时间
+         * 就不会在两个采样点之间上下弹。
+         */
+        private const val SPEED_SAMPLE_MIN_MS = PROGRESS_INTERVAL_MS
     }
 }

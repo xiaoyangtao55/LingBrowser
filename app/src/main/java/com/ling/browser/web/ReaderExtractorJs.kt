@@ -47,9 +47,31 @@ object ReaderExtractorJs {
   try {
     // ---------------------------------------------------------------- 工具
 
-    /** 是否已提取过：重复提取会因 DOM 已被替换而得到空结果。 */
+    /** 是否已提取过：成功后页面已被阅读视图替换，重复提取没有意义。 */
     if (window.__lingReaderDone) {
       return JSON.stringify({ status: 'error', reason: 'already_extracted' });
+    }
+
+    // 提取过程要大量删节点（nav/aside/header/footer/script…、语义垃圾、正文里的空容器）。
+    // 这些删除**绝不能落在真身上**：一旦中途判定"没有正文"
+    // （not_readerable / no_paragraphs / low_score / too_short），
+    // 用户看到的是"这个页面没有可提取的正文"，而页面此时已经被删得七零八落 ——
+    // 导航、页眉页脚、表单控件、内联样式全没了，排版散架，只能手动刷新才能恢复。
+    //
+    // 所以在 body 的**克隆体**上做全部删除，原页面一个节点都不动。
+    // 成功时页面本来就会被阅读视图整个替换（见 WebTabManager.renderReader），
+    // 从克隆体里取出的 html 已经够用；失败时原页面原样保留。
+    var work = document.body.cloneNode(true);
+
+    /**
+     * 在克隆体里取元素。
+     *
+     * 正文管线的每一处查询都必须走它；只有 head 里的 meta/link（站点名、
+     * canonical）继续读 document —— 那些我们从不改动，也拿不到克隆体里
+     * （克隆的是 body）。
+     */
+    function tags(name) {
+      return work.getElementsByTagName(name);
     }
 
     var UNLIKELY = /combx|comment|community|disqus|extra|foot|header|menu|remark|rss|shoutbox|sidebar|sponsor|ad-break|agegate|pagination|pager|popup|tweet|twitter|social|share|related|recommend|nav|breadcrumb|copyright|footer|banner|promo|meta|masthead|byline|dateline|tags?|widget/i;
@@ -106,7 +128,7 @@ object ReaderExtractorJs {
 
     /** 是否"看起来"像正文（用于快速判断本页值不值得进阅读模式）。 */
     function isProbablyReaderable() {
-      var ps = document.getElementsByTagName('p');
+      var ps = tags('p');
       var good = 0;
       for (var i = 0; i < ps.length; i++) {
         if (weightedLength((ps[i].textContent || '').trim()) >= 100 &&
@@ -124,7 +146,7 @@ object ReaderExtractorJs {
                     'input', 'select', 'textarea', 'svg', 'canvas', 'nav',
                     'aside', 'footer', 'header'];
     for (var j = 0; j < junkTags.length; j++) {
-      var els = document.getElementsByTagName(junkTags[j]);
+      var els = tags(junkTags[j]);
       for (var k = els.length - 1; k >= 0; k--) {
         if (els[k].parentNode) els[k].parentNode.removeChild(els[k]);
       }
@@ -132,7 +154,7 @@ object ReaderExtractorJs {
 
     // 再按 class/id 语义淘汰。这条正则是 Readability 的关键经验值：
     // "comment"/"sidebar"/"related" 这类词几乎总是指向非正文区块。
-    var all = document.getElementsByTagName('*');
+    var all = tags('*');
     var candidates = [];
     for (var m = 0; m < all.length; m++) {
       var el = all[m];
@@ -195,7 +217,7 @@ object ReaderExtractorJs {
       s.score += delta;
     }
 
-    var paragraphs = document.getElementsByTagName('p');
+    var paragraphs = tags('p');
     for (var i2 = 0; i2 < paragraphs.length; i2++) {
       var para = paragraphs[i2];
       var inner = (para.textContent || '').trim();
@@ -312,8 +334,10 @@ object ReaderExtractorJs {
     }
 
     // 标题：优先 h1，其次 title。
+    // h1 从克隆体里取：真身里可能还有一个在 <header> 里的站点 logo 标题，
+    // 而那个 header 在第一步就已被淘汰，从真身取会拿到"本不该存在"的那个。
     var title = '';
-    var h1 = document.getElementsByTagName('h1')[0];
+    var h1 = tags('h1')[0];
     if (h1 && (h1.textContent || '').trim().length > 0) {
       title = h1.textContent.trim();
     } else {

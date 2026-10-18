@@ -2,6 +2,8 @@ package com.ling.browser.web
 
 import android.graphics.Bitmap
 import android.net.Uri
+import android.net.http.SslError
+import android.webkit.SslErrorHandler
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -51,7 +53,50 @@ class LingWebViewClient(
      * 这里只把查询串交出去，判定"网址还是搜索词"由 UI 层用同一套 UrlUtils 做。
      */
     private val onInternalSearch: (String) -> Unit = {},
+    /**
+     * 检测到混合内容（HTTPS 页面里混入 HTTP 子资源）时回调一次。
+     *
+     * 回调发生在 `shouldInterceptRequest` 的后台线程上，因此每个页面只会
+     * 上报一次（见 [mixedReported]），接收方需自行保证线程安全。
+     */
+    private val onMixedContent: () -> Unit = {},
+    /**
+     * 主框架证书校验失败时回调。
+     *
+     * @param reason 失败原因（人类可读，见 [certErrorReason]）
+     * @param proceeded 用户此前已明确放行该站点，本次连接被 `proceed()` 放行
+     */
+    private val onSslError: (reason: String, proceeded: Boolean) -> Unit = { _, _ -> },
+    /**
+     * 该主机是否已被用户在证书错误页明确放行（逃生口）。
+     *
+     * ⚠️ 放行**不等于**安全：页面照常加载，但地址栏仍标「证书错误」，
+     * 因为证书确实是坏的。
+     */
+    private val isCertAllowed: (host: String) -> Boolean = { false },
+    /**
+     * 当前标签的主框架 URL。
+     *
+     * 用来判定证书错误是否来自**主框架本身**：`onReceivedSslError` 没有
+     * `isForMainFrame` 参数，而主框架握手失败时 `view.url` 往往还停在上一个
+     * 页面，因此以 [TabState.url]（`loadUrl` / `onPageStarted` 已写入目标地址）
+     * 作为参照更可靠。
+     */
+    private val currentUrl: () -> String? = { null },
 ) : WebViewClient() {
+
+    /**
+     * 本页是否已经上报过混合内容。
+     *
+     * `shouldInterceptRequest` 会为**每一个**子资源（每张图、每个音频）触发一次，
+     * 不加这个闸门就会把同一次混合内容重复上报成百上千次。每次主框架开始加载
+     * （[onPageStarted]）清零。
+     *
+     * 跨线程访问：写入在 main 线程的 onPageStarted，读取在后台的
+     * shouldInterceptRequest，故用 @Volatile。
+     */
+    @Volatile
+    private var mixedReported = false
 
     /**
      * 拦截资源请求 —— 广告拦截的唯一入口。
@@ -73,6 +118,30 @@ class LingWebViewClient(
     ): WebResourceResponse? {
         if (request == null) return null
         val url = request.url?.toString() ?: return null
+
+        // 混合内容检测：主框架是 https，而这个子资源却是明文 http。
+        //
+        // WebView 没有「本页存在混合内容」的官方回调，只能在请求经过时旁路观察。
+        // 被 WebView 自己拦掉的**主动**混合内容（脚本 / iframe / XHR）不会走到
+        // 这里，能稳定观测到的是**实际发出的被动**混合内容（图片 / 音视频）——
+        // 而这恰恰是最该提醒用户的那类。
+        //
+        // ⚠️ 这里**绝不能碰 WebView 实例**：shouldInterceptRequest 跑在后台线程，
+        // 而 WebView 的方法（哪怕只是 `view.url`）内部都有 checkThread()，
+        // 在非创建线程上调用会抛 Throwable 直接把进程带走。主框架的协议因此
+        // 取自 [currentUrl]（读的是线程安全的 StateFlow），而不是 `view.url`。
+        //
+        // 这段判断必须在广告拦截的 early-return **之前**：两者互不影响，
+        // 广告拦截关掉时混合内容照样要检测。
+        if (!request.isForMainFrame &&
+            !mixedReported &&
+            url.startsWith("http://", ignoreCase = true) &&
+            currentUrl()?.startsWith("https://", ignoreCase = true) == true
+        ) {
+            mixedReported = true
+            onMixedContent()
+        }
+
         if (!adBlockEnabled()) return null
         if (AdBlocker.shouldBlock(url, request.isForMainFrame, adBlockRules())) {
             return WebResourceResponse("text/plain", "utf-8", EMPTY_STREAM)
@@ -82,6 +151,8 @@ class LingWebViewClient(
 
     override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
         super.onPageStarted(view, url, favicon)
+        // 新一次主框架导航开始：混合内容的"每页只报一次"闸门在这里清零。
+        mixedReported = false
         // WebView 在开始加载时就会把它**已知**的站点图标交出来。
         // 之前这个参数被直接丢掉了，导致标签缩略图一直没有数据 ——
         // 光实现 WebChromeClient.onReceivedIcon 是不够的：
@@ -137,6 +208,43 @@ class LingWebViewClient(
         if (code >= 400) {
             onError(request.url.toString(), "HTTP $code")
         }
+    }
+
+    /**
+     * 证书校验失败 —— 过期 / 域名不匹配 / 不受信 CA。
+     *
+     * 默认行为是取消连接，这里在取消之前多做两件事：
+     *  1. 判出失败原因、以及是否来自主框架，地址栏才能给出「证书错误」标识 ——
+     *     否则用户只看到一句泛化的「页面加载失败」，根本不知道问题出在证书上；
+     *  2. 若用户此前已在该站点的证书错误页明确选择「继续访问」，则 `proceed()` 放行 ——
+     *     这是**逃生口**（不少内网 / 自签名站点确实需要），但放行后地址栏仍标
+     *     「证书错误」，绝不假装安全。
+     *
+     * ⚠️ `onReceivedSslError` **没有** `isForMainFrame` 参数，无法区分主框架与子资源，
+     * 因此用「失败 URL 的主机名是否等于当前主框架主机名」判定：只有主框架自身的
+     * 证书问题才给「继续访问」入口，某张图片的证书问题不该把整页拦下来问用户。
+     */
+    override fun onReceivedSslError(
+        view: WebView?,
+        handler: SslErrorHandler?,
+        error: SslError?,
+    ) {
+        val failingHost = error?.url?.let { Uri.parse(it).host }
+        // 主框架握手失败时 view.url 常常还停在上一个页面，故优先看标签页记录的当前 URL。
+        val mainHost = (currentUrl() ?: view?.url)?.let { Uri.parse(it).host }
+        if (failingHost != null && failingHost == mainHost) {
+            val reason = certErrorReason(error?.primaryError ?: 0)
+            if (isCertAllowed(failingHost)) {
+                // 用户已放行过该站点：本次连接直接放行，但 proceeded=true 让
+                // 状态栏继续显示「证书错误」——放行 ≠ 安全。
+                onSslError(reason, true)
+                handler?.proceed()
+                return
+            }
+            onSslError(reason, false)
+        }
+        // 主框架未放行、或只是子资源的证书问题：一律取消，绝不放行。
+        handler?.cancel()
     }
 
     override fun shouldOverrideUrlLoading(
@@ -202,4 +310,19 @@ class LingWebViewClient(
         /** 拦截广告时返回的空输入流（空响应体）。 */
         private val EMPTY_STREAM = ByteArrayInputStream(ByteArray(0))
     }
+}
+
+/**
+ * 把 `SslError.primaryError` 翻成人类可读的失败原因。
+ *
+ * 抽成**顶层 internal 函数**而不是类的 private 成员：这是一段纯映射，
+ * 不该依赖 WebView 才能测（见 `LingWebViewClientTest`）。
+ */
+internal fun certErrorReason(primaryError: Int): String = when (primaryError) {
+    SslError.SSL_NOTYETVALID -> "证书尚未生效"
+    SslError.SSL_EXPIRED -> "证书已过期"
+    SslError.SSL_IDMISMATCH -> "证书与域名不匹配"
+    SslError.SSL_UNTRUSTED -> "证书不受信任"
+    SslError.SSL_DATE_INVALID -> "证书日期无效"
+    else -> "证书无效"
 }

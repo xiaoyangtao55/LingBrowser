@@ -11,13 +11,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
-import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInHorizontally
-import androidx.compose.animation.slideOutHorizontally
-import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -27,13 +22,15 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.zIndex
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -185,8 +182,8 @@ private fun LingApp(viewModel: BrowserViewModel) {
     val context = LocalContext.current
     // 返回栈：栈底始终是 Browser，只有二级页面才会入栈
     val backStack = remember { mutableStateListOf<Route>(Route.Browser) }
-    // 当前栈顶路由。名字让给下面 AnimatedContent 的内容参数 ——
-    // 过渡内容里仍写 when(route)，读起来与原来一致。
+    // 当前栈顶路由。作为下面过渡状态机的触发键：它一变就重算谁当静态底、
+    // 谁做水平位移。
     val stackRoute = backStack.last()
 
     // 出入栈方向，供过渡动画判断滑动朝向：
@@ -276,6 +273,46 @@ private fun LingApp(viewModel: BrowserViewModel) {
         }
     }
 
+    // ── 二级页面过渡：显式双层栈 ──────────────────────────────────────────
+    // 不用 AnimatedContent：它何时回收"退场"的旧内容不受我们控制，实测盖压
+    // 动画进行到一半旧页就被卸载，左侧露出下层（曾出现"设置列表整块消失"）。
+    // 改成自己管两层，行为完全可预期：
+    //
+    //   baseRoute  —— 静态底。整段过渡原地不动、保持不透明。
+    //   slideRoute —— 上层。带水平位移：push 从右滑入（1→0），pop 向右滑出（0→1）。
+    //
+    // 过渡时长内两层**同时在组合里**，旧页因此必然自始至终在场，不依赖任何
+    // 库内部的回收时机；动画结束时只留 baseRoute（即当前栈顶）。
+    var baseRoute by remember { mutableStateOf<Route?>(null) }
+    var slideRoute by remember { mutableStateOf<Route?>(null) }
+    val slide = remember { Animatable(0f) }
+    // 上一次的栈顶，用来判断 push/pop 时谁当静态底、谁做位移。
+    var lastRoute by remember { mutableStateOf<Route?>(null) }
+
+    LaunchedEffect(stackRoute) {
+        val previous = lastRoute
+        lastRoute = stackRoute
+        if (previous == null || previous == stackRoute) return@LaunchedEffect
+
+        if (navForward) {
+            // 前进：旧栈顶沉作静态底，新页自右侧滑入盖压上来。
+            baseRoute = if (previous == Route.Browser) null else previous
+            slideRoute = stackRoute
+            slide.snapTo(1f)
+            slide.animateTo(0f, animationSpec = tween(300))
+            // 新页已盖满全屏，这时才把旧页卸掉、新页转为静态底。
+            slideRoute = null
+            baseRoute = if (stackRoute == Route.Browser) null else stackRoute
+        } else {
+            // 返回：新栈顶（下层页）作静态底，旧栈顶整体向右滑出。
+            baseRoute = if (stackRoute == Route.Browser) null else stackRoute
+            slideRoute = previous
+            slide.snapTo(0f)
+            slide.animateTo(1f, animationSpec = tween(300))
+            slideRoute = null
+        }
+    }
+
     // 所有上层界面（书签 / 历史 / 设置 / 嗅探…）都是**叠加层**而非独立页面：
     // BrowserScreen 必须一直挂载着，否则 when 一切换它就被卸载，
     // DisposableEffect 会 detachHost 把 WebView 摘下来 —— 上层背后就成了空白。
@@ -294,31 +331,9 @@ private fun LingApp(viewModel: BrowserViewModel) {
             canHandleBack = !hasOverlay,
         )
 
-        // 上层：二级页面。这些页面自己是不透明的，会盖住底层浏览页。
-        //
-        // 用 AnimatedContent 给"打开二级界面"补过渡动画：此前 when(route) 直接
-        // 换内容，新页面是瞬间出现 —— 从「更多」面板点进去时面板还在收起、下面
-        // 已经"啪"地换了张脸，观感很生硬。现在前进时新页面自右滑入、旧页面向左
-        // 退让；返回时反向。modifier 必须填满整屏：否则 Route.Browser 分支为空
-        // 会量出 0 尺寸，AnimatedContent 的尺寸过渡会把旧页面一起越缩越小。
-        AnimatedContent(
-            targetState = stackRoute,
-            modifier = Modifier.fillMaxSize(),
-            transitionSpec = {
-                val slideSpec = tween<IntOffset>(durationMillis = 300)
-                val fadeSpec = tween<Float>(durationMillis = 220)
-                if (navForward) {
-                    // 前进：新页面整屏自右滑入，旧页面向左退 1/4 并淡出。
-                    (slideInHorizontally(animationSpec = slideSpec) { it } + fadeIn(fadeSpec)) togetherWith
-                        (slideOutHorizontally(animationSpec = slideSpec) { -it / 4 } + fadeOut(fadeSpec))
-                } else {
-                    // 返回：当前页面向右滑出，下层页面自左轻入。
-                    (slideInHorizontally(animationSpec = slideSpec) { -it / 4 } + fadeIn(fadeSpec)) togetherWith
-                        (slideOutHorizontally(animationSpec = slideSpec) { it } + fadeOut(fadeSpec))
-                }
-            },
-            label = "route",
-        ) { route ->
+        // 各二级页面的内容渲染。抽成局部 lambda，供下面"静态底"和"滑动上层"
+        // 两个插槽复用 —— 过渡期间两页同时在组合里，各占一层，因此都能画出来。
+        val renderRoute: @Composable (Route) -> Unit = { route ->
             when (route) {
                 Route.Browser -> Unit
 
@@ -447,6 +462,31 @@ private fun LingApp(viewModel: BrowserViewModel) {
                         onDownload = viewModel::downloadResource,
                         onBack = pop,
                     )
+                }
+            }
+        }
+
+        // 静态底：整段过渡原地不动、保持不透明。
+        // 只画当前需要的那一页 —— 过渡期间它是"旧页"，无过渡时它就是栈顶页。
+        baseRoute?.let { route ->
+            key(route) {
+                Box(modifier = Modifier.fillMaxSize().zIndex(1f)) {
+                    renderRoute(route)
+                }
+            }
+        }
+
+        // 滑动上层：translationX 由 slide 驱动 —— push 时 1→0（自右向左盖压上来），
+        // pop 时 0→1（整体向右滑出）。全程不透明，不做任何交叉淡化。
+        slideRoute?.let { route ->
+            key(route) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .zIndex(2f)
+                        .graphicsLayer { translationX = slide.value * size.width },
+                ) {
+                    renderRoute(route)
                 }
             }
         }

@@ -43,12 +43,14 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.ling.browser.ui.Suggestion
 import com.ling.browser.ui.SuggestionKind
+import com.ling.browser.web.SecurityState
 
 /**
  * 地址栏 + 联想下拉。
@@ -66,7 +68,8 @@ fun AddressBar(
     isLoading: Boolean,
     /** 加载进度 0..100，传给进度条；不确定态（进度未知）传 null。 */
     progress: Int?,
-    isSecure: Boolean,
+    /** 当前页面的连接安全状态，用于展示「不安全 / 部分不安全 / 证书错误」标识。 */
+    security: SecurityState,
     suggestions: List<Suggestion>,
     onTextChange: (String) -> Unit,
     onFocusChange: (Boolean) -> Unit,
@@ -153,13 +156,49 @@ fun AddressBar(
                         ),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    // 左侧：安全标识 / 搜索图标
+                    // 左侧：连接安全标识 / 搜索图标。
+                    //
+                    // 只要不是"安全"，就必须给出**醒目的提示**（no-entry 图标 + error
+                    // 配色的文字），而不是继续挂一把代表安全的锁 —— 否则等于在骗用户
+                    // "这个页面是安全的"。三种不安全的成因不同，文案也不同：
+                    //   明文 HTTP → 不安全；HTTPS 混入 HTTP 子资源 → 部分不安全；
+                    //   证书校验失败 → 证书错误。
+                    // 编辑态不给标识（此时用户自己在输入或改地址），显示搜索图标。
+                    val insecureLabel = if (isEditing) {
+                        null
+                    } else {
+                        when (security) {
+                            SecurityState.SECURE -> null
+                            SecurityState.INSECURE_HTTP -> "不安全"
+                            SecurityState.INSECURE_MIXED -> "部分不安全"
+                            SecurityState.INSECURE_CERT -> "证书错误"
+                        }
+                    }
+                    val insecure = insecureLabel != null
                     Icon(
-                        imageVector = if (isEditing) LingIcons.Search  else LingIcons.Lock,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        imageVector = when {
+                            isEditing -> LingIcons.Search
+                            insecure -> LingIcons.Block
+                            else -> LingIcons.Lock
+                        },
+                        contentDescription = insecureLabel,
+                        tint = if (insecure) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
                         modifier = Modifier.size(16.dp),
                     )
+                    if (insecureLabel != null) {
+                        Spacer(Modifier.width(5.dp))
+                        Text(
+                            text = insecureLabel,
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.error,
+                            maxLines = 1,
+                        )
+                    }
                     Spacer(Modifier.width(8.dp))
 
                     Box(modifier = Modifier.weight(1f)) {

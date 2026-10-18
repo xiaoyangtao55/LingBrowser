@@ -53,6 +53,15 @@ class WebTabManager(private val context: Context) {
      */
     private val readerContent = mutableMapOf<String, ReaderResult.Ok>()
 
+    /**
+     * tabId -> 用户已明确放行的证书错误站点（主机名）。
+     *
+     * 证书错误页「继续访问」的临时白名单：放行后本标签页再访问该主机就自动
+     * 放行，不再反复弹确认。只在本标签存活期间有效 —— 关标签即清
+     * （见 [recycleTab]），**不落盘、不跨标签**，避免一次手滑变成长期放行。
+     */
+    private val certExceptions = mutableMapOf<String, MutableSet<String>>()
+
     /** 需要 UI 层处理的副作用（打开外部应用、下载等）。 */
     var onExternalUri: ((Uri) -> Boolean)? = null
 
@@ -283,6 +292,8 @@ class WebTabManager(private val context: Context) {
         tab?.favicon?.takeIf { !it.isRecycled }?.recycle()
         // 一并丢掉缓存的正文，否则关掉的标签会一直把它压在内存里
         tab?.let { readerContent.remove(it.id) }
+        // 证书放行白名单同样随手清掉：逃生口不该比标签活得久
+        tab?.let { certExceptions.remove(it.id) }
     }
 
     /**
@@ -401,7 +412,17 @@ class WebTabManager(private val context: Context) {
         // 主页那层透明底是主页专用的，若带到普通网页上，
         // 页面自身的透明区域会露出下面的 Compose 背景，观感不对。
         wv.setOpaqueBackground(true)
-        updateTab(id) { it.copy(url = url, errorText = null, isLoading = true, progress = 0) }
+        updateTab(id) {
+            it.copy(
+                url = url,
+                // 显式导航：安全状态回到按协议判定的基础态（混合内容 / 证书错误
+                // 会在随后的加载回调里升级）。
+                security = SecurityState.baseForUrl(url),
+                errorText = null,
+                isLoading = true,
+                progress = 0,
+            )
+        }
         wv.loadUrl(url)
     }
 
@@ -829,6 +850,23 @@ class WebTabManager(private val context: Context) {
         }
     }
 
+    /**
+     * 放行当前标签页的证书错误并重新导航（证书错误页的「继续访问」）。
+     *
+     * 只把**当前主机**加入本标签的临时白名单，然后重走一次导航：这一次
+     * [LingWebViewClient.onReceivedSslError] 会读到白名单并 `proceed()` 放行。
+     *
+     * 用 [loadUrl] 而不是 `wv.reload()`：证书握手失败后 WebView 停在错误态，
+     * `reload()` 未必会重新发起网络请求，显式导航更可靠。
+     */
+    fun proceedInsecure(id: String = _activeId.value) {
+        val tab = _tabs.value.firstOrNull { it.id == id } ?: return
+        val host = runCatching { Uri.parse(tab.url).host }.getOrNull()
+            ?.takeIf { it.isNotBlank() } ?: return
+        certExceptions.getOrPut(id) { mutableSetOf() }.add(host)
+        loadUrl(id, tab.url)
+    }
+
     fun stopLoading(id: String = _activeId.value) {
         obtainWebView(id).stopLoading()
         updateTab(id) { it.copy(isLoading = false) }
@@ -960,19 +998,24 @@ class WebTabManager(private val context: Context) {
                     val isInternal = InternalPage.isInternal(url, currentUrl)
                     val isHome = InternalPage.isHomeDocument(url, currentUrl)
                     val keep = isInternal || !isNavigable(url)
-                    updateTab(id) {
-                        it.copy(
-                            // 三种情况分开处理，不能简单"keep 就保留旧 url"：
-                            //  - 回到主页（历史前进/后退触发）：必须写成逻辑地址
-                            //    ling://home，否则旧网站 URL 残留在 TabState.url，
-                            //    地址栏就一直显示那个网址；
-                            //  - 阅读视图 / 自定义协议：保留既有逻辑地址；
-                            //  - 普通页面：写回真实 url。
-                            url = when {
-                                isHome -> HomePage.URL
-                                keep -> it.url
-                                else -> url
-                            },
+                    updateTab(id) { tab ->
+                        // 三种情况分开处理，不能简单"keep 就保留旧 url"：
+                        //  - 回到主页（历史前进/后退触发）：必须写成逻辑地址
+                        //    ling://home，否则旧网站 URL 残留在 TabState.url，
+                        //    地址栏就一直显示那个网址；
+                        //  - 阅读视图 / 自定义协议：保留既有逻辑地址；
+                        //  - 普通页面：写回真实 url。
+                        val storedUrl = when {
+                            isHome -> HomePage.URL
+                            keep -> tab.url
+                            else -> url
+                        }
+                        tab.copy(
+                            url = storedUrl,
+                            // 新一次主框架导航：安全状态先按协议落到**基础态**，
+                            // 混合内容 / 证书错误会在加载过程中把它升级
+                            // （见 onMixedContent / onSslError）。
+                            security = SecurityState.baseForUrl(storedUrl),
                             isLoading = !isInternal,
                             errorText = null,
                             // 主页是历史起点：任何一次回调都不能把返回键点亮。
@@ -1061,6 +1104,42 @@ class WebTabManager(private val context: Context) {
                     }
                 },
                 onReceivedIcon = { icon -> applyFavicon(id, icon) },
+                onMixedContent = {
+                    // 只在**基础态仍是安全**时升级：主框架本来就是 http 的话，
+                    // 状态已是 INSECURE_HTTP，不必再标成混合内容；证书错误更不能被它覆盖。
+                    // 该回调来自 shouldInterceptRequest 的后台线程，而 _tabs 是
+                    // MutableStateFlow（update 原子且线程安全），因此这里直接写即可。
+                    updateTab(id) { tab ->
+                        if (tab.security == SecurityState.SECURE) {
+                            tab.copy(security = SecurityState.INSECURE_MIXED)
+                        } else {
+                            tab
+                        }
+                    }
+                },
+                isCertAllowed = { host -> certExceptions[id]?.contains(host) == true },
+                currentUrl = { _tabs.value.firstOrNull { it.id == id }?.url },
+                onSslError = { reason, proceeded ->
+                    updateTab(id) {
+                        if (proceeded) {
+                            // 用户已放行：不显示错误页，让页面照常渲染；
+                            // 但安全状态仍锁在「证书错误」——放行 ≠ 安全。
+                            it.copy(
+                                isLoading = false,
+                                security = SecurityState.INSECURE_CERT,
+                                errorText = null,
+                            )
+                        } else {
+                            // 未放行：连接已被 cancel，给出明确原因，
+                            // 而不是让用户看到一句不知道所以然的「页面加载失败」。
+                            it.copy(
+                                isLoading = false,
+                                security = SecurityState.INSECURE_CERT,
+                                errorText = "$reason，已阻断连接",
+                            )
+                        }
+                    }
+                },
                 onError = { _, desc ->
                     updateTab(id) { it.copy(isLoading = false, errorText = desc) }
                 },
