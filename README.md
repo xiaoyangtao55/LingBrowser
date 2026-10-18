@@ -98,8 +98,7 @@ LingBrowser/
     ├── check_bookmark_folders.py  # 书签文件夹校验
     ├── check_ux_fixes.py          # 焦点/书签编辑/图标校验
     ├── check_reader.py            # 阅读模式提取与接线校验
-    ├── check_client_thread.py     # 校验 shouldInterceptRequest 不碰 WebView（后台线程会闪退）
-    └── make_icons.py              # 生成 API<26 的传统位图图标
+    └── check_client_thread.py     # 校验 shouldInterceptRequest 不碰 WebView（后台线程会闪退）
 ```
 
 ---
@@ -1162,87 +1161,28 @@ run: https://github.com/xiaoyangtao55/LingBrowser/actions/runs/38042019419
 
 ## 五、启动图标
 
-图标的设计源是 `tools/icon_source.svg` —— 一枚 24×24 视口的描边羽毛（6 条 stroke
-路径）；`tools/emit_icon_xml.py` 把它等比放大并居中到 256×256 画布、配上纯色圆底，
-写出 `tools/icon.xml`。造型是**纯色圆底（`#A8F2CB`）+ 一枚描边羽毛（`#00210F`）**，
-没有渐变、没有浏览器外环、没有高光点。
+启动图标是一套外部导出的完整资源包，直接铺进 `res/`，不再由仓库内的脚本生成：
 
-Android 的自适应图标有一个容易踩的坑：**画布 108dp，但只有中心 72dp 直径的
-圆形区域对所有遮罩形状都可见**（圆形、方形、圆角、水滴…）。原图整圆半径占满
-画布，直接用作自适应图标会有约 33% 被裁掉。
+| 资源 | 内容 |
+|---|---|
+| `mipmap-anydpi-v26/ic_launcher.xml` | 自适应图标（API 26+）：`@color/ic_launcher_background` 背景 + `@mipmap/ic_launcher_foreground` 前景 + `@mipmap/ic_launcher_monochrome` 单色层 |
+| `mipmap-anydpi-v26/ic_launcher_round.xml` | 圆形自适应图标；`AndroidManifest` 的 `roundIcon` 指向它 |
+| `values/ic_launcher_background.xml` | 背景纯色 `#FFFFFF` |
+| `mipmap-{mdpi,hdpi,xhdpi,xxhdpi,xxxhdpi}/ic_launcher.png` | API 23~25 的传统位图 fallback（不支持自适应图标） |
+| `mipmap-*/ic_launcher_round.png` | 传统圆形位图 fallback |
+| `mipmap-*/ic_launcher_foreground.png` | 自适应图标前景层（位图，各密度一份） |
+| `mipmap-*/ic_launcher_monochrome.png` | Android 13+ 主题图标单色层 |
 
-因此拆成三层：
+关于"跟随取色"：启动图标是**静态资源**，无法在运行时读到壁纸色；会随壁纸变色的是
+Android 13+ 的**主题化图标** —— 系统读 `ic_launcher_monochrome` 单色层并重新着色。
 
-| 层 | 内容 | 为什么 |
-|---|---|---|
-| `ic_launcher_background` | 纯色方底（铺满 108dp） | 背景层被裁是**预期**的；"铺满 + 遮罩裁切"在各遮罩形状下都呈现为纯色圆/方/圆角底 |
-| `ic_launcher_foreground` | 描边羽毛（缩到 72dp 内） | 前景必须完整可见，任何遮罩都不能裁 |
-| `ic_launcher_monochrome` | 描边羽毛剪影 | Android 13+ 主题图标由系统按壁纸重新着色 —— 启动图标"跟随取色"的唯一路径 |
+> 自适应图标的画布是 108dp，但只有中心 72dp 直径对所有遮罩形状可见。这套资源已
+> 按该规则裁好前景与单色层，无需再手工缩放。
 
-前景缩放系数 **0.8723**：让羽毛描边外沿落在安全区边界内并留 8% 余量。
-这个系数不写死 —— `tools/gen_launcher_icon.py` 按 `icon.xml` 里羽毛**实测的最远
-触达**算出来，羽毛的形状/大小一改就自动重算（旧版是按外环算的，外环去掉后
-改成了按羽毛算）。
-
-### 造型：以 `tools/icon_source.svg` 为唯一事实来源
-
-早期启动图标是"**填充**羽毛 + 白色浏览器外环 + 青蓝渐变底 + 高光点"，与设计源的
-"**描边**羽毛 + 纯色圆底"是两套造型。现在造型只有一个来源：
-
-- `tools/emit_icon_xml.py` 从 `tools/icon_source.svg` 抽出 6 条 stroke 路径，
-  等比缩放（描边宽 1.6 → 12）并居中到 256×256 画布，配上纯色圆底写出
-  `tools/icon.xml`。改设计源会自动反映到启动图标，不存在两处各画一遍的漂移。
-- **外环与高光点都去掉了** —— 设计源里没有这两样。
-- 颜色取浅色主题 `HomeColors` 的默认配色：圆底 `#A8F2CB`（`--pc`）、
-  羽毛描边 `#00210F`（`--on-pc`）。
-
-> 这份路径原先内联在主页 logo 里，靠"改主页 logo 自动同步启动图标"维持唯一来源。
-> 主页改版成"时钟 + 搜索框"后不再有 logo，于是把它独立成 `tools/icon_source.svg`
-> —— 启动图标自此与主页解耦，以该文件为唯一造型来源。
-
-关于"跟随取色"要说清楚：启动图标是**静态资源**，无法在运行时读到壁纸色，所以
-底色只能取"浅色主题下的那一档 primaryContainer"作为固定值。真正会随壁纸
-变色的是 Android 13+ 的**主题化图标** —— 系统读 `ic_launcher_monochrome` 单色层
-并重新着色。这两件事要分开理解，否则会误以为图标本该自己变色。
-
-这条改动顺带把工具链对齐了：`svg_preview.py` 从"只渲染填充"扩展成"也渲染描边"
-（点到线段距离判定）；`make_icons.py` 的 PNG fallback 从"evenOdd 异或填多边形"
-改成"圆角线描点列"；`check_icon_composition.py` 从"羽片是否超出外环"改成
-"底色是否纯色、外环是否残留、羽毛占比是否合理"；`check_launcher_png.py`
-从"校验渐变方向"改成"校验纯色底 + 羽毛描边色 + 无白色残留"。
-
-### 生成与校验工具链
-
-```bash
-python tools/emit_icon_xml.py        # icon_source.svg -> 生成 tools/icon.xml
-python tools/check_icon_svg.py         # SVG 安全区 + ASCII 预览
-python tools/gen_launcher_icon.py      # icon.xml -> 3 层 vector drawable
-python tools/make_icons.py             # 生成 API<26 的 5 档 PNG
-python tools/check_launcher_icons.py   # 校验矢量层 + 安全区
-python tools/check_icon_composition.py # 校验构图（纯色底、无外环、羽毛占比）
-python tools/check_launcher_png.py     # 校验 PNG
-python tools/preview_launcher_png.py mipmap-xxxhdpi   # ASCII 预览
-python tools/verify_icon_assertions.py # 复算 LauncherIconTest 的全部断言
-```
-
-> `make_icons.py` 画位图时按 SVG 的 **描边**路径采样成点列、用圆角线描出来，
-> 等价于 `stroke-linecap/linejoin="round"`。早先它是逐个子路径填白 + evenodd 异或，
-> 那套是给填充羽毛准备的，改成描边羽毛后不再适用。
-
-> 工具链里 `svg_preview.py` 是一个不依赖 cairo 的最小 SVG 光栅化器
-> （支持 circle / path / 贝塞尔 / 线性渐变 / `<g transform>` 与属性继承，
-> 且**描边与填充都能渲染**），因为本机装不上 cairo，而图标造型必须能"看见"才能调。
-
-> API 23~25 不支持自适应图标，故保留 `mipmap-*/ic_launcher.png` 位图 fallback。
-
-### 设计源羽毛的两条硬约束
-
-`tools/icon_source.svg` 的造型是早先迭代出来的，改它时要守住两条：
-
-1. **羽片必须够宽，否则羽枝线会糊成一片。** 描边宽 1.6 时，羽轴与边缘之间
-   要留出 ≥ 描边宽度的空隙；实测羽片半宽 < 4 单位时三条线就并成一条白块。
-2. **羽片轮廓要用两条"开放"曲线，不能闭合成一个圈。** 闭合轮廓 + 羽轴 + 羽枝线
-   在小尺寸下会读成一整块白色实心（enclose 出来的区域视觉上被填掉了）。
+> 旧版是一枚手绘描边羽毛，由 `tools/icon_source.svg → gen_launcher_icon.py →`
+> `三层 vector drawable` 这条本地管线生成，再用 `make_icons.py` 产出 PNG fallback，
+> 另有 `LauncherIconTest` 与一批 `check_launcher_*` 脚本守着它的造型。改用这套外部
+> 资源后该管线已整体退役，相关生成脚本、检查脚本与回归测试一并删除。
 
 ---
 
@@ -1257,9 +1197,6 @@ python tools/verify_icon_assertions.py # 复算 LauncherIconTest 的全部断言
 | `tools/check_calls.py` | 交叉核对所有函数调用点的具名参数与声明是否一致（改签名后最易漏改） |
 | `tools/check_home_html.py` | 从 `HomePage.kt` 抽出 HTML 模板实例化，检查标签配平、CSS 变量配对、SVG 里误用 `var()`、外部资源引用 |
 | `tools/verify_home_assertions.py` | 对着 `HomePage.kt` 复算 `isHomeUrl` 的全部断言，确认测试与实现一致 |
-| `tools/check_launcher_icons.py` | 校验生成的 3 层自适应图标矢量：pathData 可解析、前景是否落在 72dp 安全区内 |
-| `tools/check_launcher_png.py` | 校验 API<26 的 PNG 图标：圆形遮罩、纯色底占比、羽毛描边色、无白色外环残留 |
-| `tools/check_icon_composition.py` | 量化图标构图：底色是不是纯色（`#RRGGBB`）、有没有残留外环、羽毛是否越界/占比合理 |
 | `tools/check_dead_code.py` | 找出「定义了但没人调用」的动作型函数（见 §四.9，此坑踩过两次） |
 | `tools/check_download_bytes.py` | 比对 `formatBytes` 在 UI 层与测试层的两份实现，防止测试测的是旧逻辑 |
 | `tools/check_download_progress.py` | 校验下载进度的节流与速度采样（字节/时间不能用同一个变量、采样窗口要有下限，见 §四.12） |
@@ -1276,16 +1213,12 @@ python tools/verify_icon_assertions.py # 复算 LauncherIconTest 的全部断言
 | `tools/ascii_icons.py` | 把图标按 even-odd 扫描线填充渲染成 ASCII，编译前肉眼校验造型 |
 | `tools/import_material_icons.py` | 官方 VectorDrawable → Compose 矢量代码 |
 | `tools/emit_ling_icons.py` | 组装 `LingIcons.kt` |
-| `tools/preview_launcher_png.py` | 把 PNG 图标渲染成 ASCII 预览（终端里就能看构图） |
 
 ```bash
 python tools/static_check.py
 python tools/check_calls.py
 python tools/check_home_html.py
 python tools/verify_home_assertions.py
-python tools/check_launcher_icons.py
-python tools/check_launcher_png.py
-python tools/check_icon_composition.py
 python tools/check_dead_code.py
 python tools/check_download_bytes.py
 python tools/check_download_progress.py
@@ -1296,7 +1229,6 @@ python tools/check_icon_fidelity.py
 python tools/import_material_icons.py
 python tools/emit_ling_icons.py
 python tools/ascii_icons.py Download Layers          # 渲染指定图标
-python tools/preview_launcher_png.py mipmap-xxxhdpi  # 预览启动图标
 ```
 
 ---
@@ -1305,15 +1237,15 @@ python tools/preview_launcher_png.py mipmap-xxxhdpi  # 预览启动图标
 
 | 项目 | 结果 |
 |---|---|
-| `:app:assembleDebug` | ✅ 通过（图标改版后重新验证） |
-| `:app:testDebugUnitTest` | ✅ **231 个用例全部通过**（`UrlUtilsTest` 20 / `FaviconFetcherTest` 12 / `ReaderPageTest` 20 / `ReaderResultTest` 15 / `UrlSchemeTest` 18 / `AdBlockerTest` 16 / `SniffResultTest` 12 / `HomePageTest` 19 / `TabOrderTest` 15 / `BookmarkFolderTest` 14 / `LingSettingsTest` 17 / `LauncherIconTest` 12 / `LingIconsTest` 11 / `DownloadTest` 10 / `SessionSnapshotTest` 9 / `TabInitialTest` 6 / `PendingDownloadTest` 5） |
+| `:app:assembleDebug` | ✅ 通过（换用新图标资源包后重新验证） |
+| `:app:testDebugUnitTest` | ✅ **259 个用例全部通过**（`UrlUtilsTest` 20 / `FaviconFetcherTest` 12 / `ReaderPageTest` 22 / `ReaderResultTest` 15 / `UrlSchemeTest` 18 / `AdBlockerTest` 16 / `SniffResultTest` 12 / `HomePageTest` 25 / `InternalPageTest` 11 / `TabOrderTest` 15 / `BookmarkFolderTest` 14 / `LingSettingsTest` 16 / `LingIconsTest` 11 / `DownloadTest` 14 / `ResumePlanTest` 7 / `PendingDownloadTest` 5 / `SessionSnapshotTest` 9 / `TabInitialTest` 6 / `TabAddressBarTest` 6 / `LingWebViewClientTest` 2 / `SecurityStateTest` 3） |
 | `:app:assembleRelease`（R8 压缩） | ✅ 通过，产物 1.4 MB（图标改版前） |
 | APK 签名校验 | ✅ v1 + v2 方案均通过 |
 | 真机安装（Xiaomi MI 8 / Android 14） | ✅ `adb install` 成功 |
 | 真机启动 | ✅ 无崩溃，`Displayed MainActivity: +884ms` |
 | WebView 进程 | ✅ sandboxed_process 正常拉起 |
 | View 层级 | ✅ Compose 树与 WebView 宿主 `FrameLayout` 布局正确 |
-| 静态自检（19 个脚本） | ✅ 全部通过 |
+| 静态自检（16 个脚本通过） | ✅ 全部通过（`check_icon_fidelity` 因缺官方图标源文件未跑） |
 
 > **阅读模式**：逻辑层与接线已全部通过单测与静态检查，但**中文站点的实际
 > 提取效果尚未在真机验证** —— 提取质量依赖具体站点的 DOM 结构，
@@ -1326,11 +1258,10 @@ python tools/preview_launcher_png.py mipmap-xxxhdpi  # 预览启动图标
 > ⚠️ **§四.12「内部页静默失效」这一轮改动尚未编译、尚未真机验证**：
 > 改动的环境里没有 Android SDK（`ANDROID_HOME` 为空、无 gradle），
 > 只能跑不依赖编译的静态自检 —— 18 个脚本全部通过
-> （`check_icon_fidelity` / `check_launcher_png` 因缺官方图标源文件与 PIL 未跑）。
+> （`check_icon_fidelity` 因缺官方图标源文件未跑）。
 > 合入前需要：`./gradlew :app:testDebugUnitTest` + 下面的真机回归。
-> （上表的 231 用例 / `HomePageTest` 19 是更早一轮的记录；此后新增
-> `InternalPageTest` 8 条、主页用例 9 条、阅读视图用例 2 条、地址栏文案用例 6 条，
-> 预期总数 259。）
+> （上表 259 用例 / `HomePageTest` 25 为本次实际跑出的结果；此前的 231 是更早
+> 一轮的记录。）
 >
 > **§四.12**（主页/阅读视图的静默失效）的 6 项**已在真机验证通过**：
 >
@@ -1401,15 +1332,14 @@ D LingFocus: focusWebContent host=true webview=true wvHasFocus=true hostHasFocus
 
 > 至此本轮改动**全部通过真机验证**，无待确认项。
 
-### 羽毛造型改版的验证记录
+### 启动图标资源包改版的验证记录
 
 | 项目 | 结果 |
 |---|---|
-| 9 个自检脚本（`check_icon_svg` / `check_launcher_icons` / `check_launcher_png` / `check_icon_composition` / `verify_icon_assertions` / `check_home_html` / `verify_home_assertions` / `static_check` / `check_calls`） | ✅ 全部通过 |
-| `:app:processDebugResources` | ✅ 通过 —— AAPT2 接受新的 3 层矢量图与 5 档 PNG |
-| 生成管线幂等性 | ✅ 重跑 `emit_icon_xml` → `gen_launcher_icon` → `make_icons`，8 个产物逐字节一致 |
-| `:app:testDebugUnitTest` / `:app:assembleDebug` | ✅ 通过（修掉下面两个编译错误之后） |
-| 设计源羽毛造型 | ✅ 用 `tools/check_icon_svg.py` 预览并逐轮比对 `icon.xml`（描边线画，`svg_preview.py` 现已支持描边与填充） |
+| `:app:processDebugResources` | ✅ 通过 —— AAPT2 接受新的自适应图标（`@color` 背景 + PNG 前景/单色层）与 5 档传统位图 |
+| `:app:assembleDebug` | ✅ 通过，产出新图标 APK |
+
+旧羽毛造型管线（`emit_icon_xml` → `gen_launcher_icon` → `make_icons` 及其校验脚本）已随本次换图标一并退役，相关记录不再维护。
 
 顺带修掉两处让工程编译不过的错误（与造型无关，但会挡住任何真机验证）：
 
