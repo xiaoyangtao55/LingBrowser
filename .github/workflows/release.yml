@@ -4,11 +4,10 @@ name: Build Release
 # 推到仓库后由 CI 出包，产物直接在 Actions 页面下载。
 on:
   push:
-    branches: [main, master]
-    tags: ["v*"]
+    tags: ["v*"]        # 只有打 tag（合并 Release PR）时，才运行打包并上传到 Release
   pull_request:
-    branches: [main, master]
-  workflow_dispatch:
+    branches: [main, master] # 只有有人提 PR 时，才跑一次编译测试
+  workflow_dispatch:    # 允许你手动点按钮打包（用于临时出测试包）:
 
 permissions:
   contents: write # ⚠️ 必须改为 write，否则无法创建 Release 和上传资产
