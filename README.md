@@ -96,7 +96,7 @@ LingBrowser/
     ├── check_icon_fidelity.py     # 生成物与源文件逐点比对
     ├── check_session.py           # 会话恢复接线校验
     ├── check_bookmark_folders.py  # 书签文件夹校验
-    ├── check_ux_fixes.py          # 焦点/书签编辑/图标校验
+    ├── check_ux_fixes.py          # 焦点/书签编辑/图标/文件上传校验
     ├── check_reader.py            # 阅读模式提取与接线校验
     └── check_client_thread.py     # 校验 shouldInterceptRequest 不碰 WebView（后台线程会闪退）
 ```
@@ -1203,7 +1203,7 @@ Android 13+ 的**主题化图标** —— 系统读 `ic_launcher_monochrome` 单
 | `tools/check_tabs_layer.py` | 校验标签面板的层级与动画约束（遮罩必须画在面板之后、拖拽手势不吞点击等） |
 | `tools/check_session.py` | 校验会话恢复接线：保存挂在 onStop、协程不被 viewModelScope 取消、无痕不落盘 |
 | `tools/check_bookmark_folders.py` | 校验文件夹不建表、删文件夹不连带删书签、导出规则与新建入口 |
-| `tools/check_ux_fixes.py` | 校验地址栏真的释放焦点、书签重命名/删除确认、图标存储与迁移不丢数据 |
+| `tools/check_ux_fixes.py` | 校验地址栏真的释放焦点、书签重命名/删除确认、图标存储与迁移不丢数据、网页 `<input type=file>` 走 `onShowFileChooser` |
 | `tools/check_reader.py` | 校验阅读模式提取脚本语法与算法（用 Node 真实运行）、以及各层接线完整 |
 | `tools/check_client_thread.py` | 校验 `shouldInterceptRequest` 方法体不引用 WebView —— 它跑在后台线程，`view.url` 会触发 `checkThread()` 抛异常并让进程闪退 |
 | `tools/check_junit_args.py` | 抓 JUnit 参数顺序写反（应为 `(message, value)`） |

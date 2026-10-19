@@ -2,10 +2,16 @@ package com.ling.browser.ui.screens
 
 import com.ling.browser.ui.theme.LingIcons
 import android.annotation.SuppressLint
+import android.app.Activity
+import android.content.Intent
 import android.graphics.Color as AndroidColor
+import android.net.Uri
 import android.view.ViewGroup
+import android.webkit.WebChromeClient
 import android.widget.FrameLayout
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -172,6 +178,42 @@ fun BrowserScreen(
     DisposableEffect(host) {
         viewModel.tabManager.attachHost(host)
         onDispose { viewModel.tabManager.detachHost(host) }
+    }
+
+    // 网页 <input type="file"> → 系统文件选择器。
+    //
+    // WebView 自己不会拉起任何界面：不实现 onShowFileChooser 时点击完全无反应，
+    // 这正是"网页上传按钮点了没反应、没拉起文件管理"的成因，必须由宿主代劳。
+    //
+    // 这里刻意用 StartActivityForResult 而不是 GetContent / OpenDocument 那几个
+    // 封装契约：单选 / 多选 / 取目录 / 存盘四种模式与 accept 类型都要在**运行时**
+    // 决定，而封装契约的输入类型在组合期就固定了，只有自己拼 Intent 才能全覆盖。
+    //
+    // pendingFileChooser 存"这一次"的结果回调。WebView 要求 onReceiveValue
+    // 至多调用一次，故发起前存好、返回后立刻清空，避免重复兑现。
+    var pendingFileChooser by remember { mutableStateOf<((Array<Uri>?) -> Unit)?>(null) }
+    val fileChooserLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        val deliver = pendingFileChooser
+        pendingFileChooser = null
+        // 取消时也回调 null（见 WebTabManager.onShowFileChooser 的说明）。
+        deliver?.invoke(collectFileChooserResult(result.resultCode, result.data))
+    }
+
+    DisposableEffect(Unit) {
+        viewModel.tabManager.onShowFileChooser = { params, onResult ->
+            pendingFileChooser = onResult
+            runCatching { fileChooserLauncher.launch(buildFileChooserIntent(params)) }
+                .onFailure {
+                    // 没有能处理该 Intent 的应用（如极简系统缺 DocumentsUI）：
+                    // 必须清 pending 并兑现 null，否则这次点击会把 WebView 卡在
+                    // "等待选择"，页面之后再也点不动上传按钮。
+                    pendingFileChooser = null
+                    onResult(null)
+                }
+        }
+        onDispose { viewModel.tabManager.onShowFileChooser = null }
     }
 
     // 外部协议（zhihu: / weixin: / tel: / mailto: / intent: …）交给系统
@@ -800,4 +842,71 @@ private fun MoreGridItem(
             overflow = TextOverflow.Ellipsis,
         )
     }
+}
+
+/**
+ * 「取目录」选择模式常量的取值（AOSP 定义 = 3）。
+ *
+ * FileChooserParams 上的 MODE_OPEN_FOLDER 在 AOSP 里标了 `@hide`，不会导出到
+ * SDK 桩 android.jar —— 直接引用会 Unresolved reference（构建实测报错），
+ * 因此按 AOSP 定义用字面量。运行时 getMode() 仍会返回 3。
+ */
+private const val MODE_OPEN_FOLDER = 3
+
+/**
+ * 把 WebView 的文件选择约束翻译成系统文件选择 Intent。
+ *
+ * 四种模式各自对应一个 Intent：取目录用 ACTION_OPEN_DOCUMENT_TREE，存盘用
+ * ACTION_CREATE_DOCUMENT，其余（单选 / 多选）都用 ACTION_OPEN_DOCUMENT。
+ */
+private fun buildFileChooserIntent(params: WebChromeClient.FileChooserParams?): Intent {
+    val mode = params?.mode ?: WebChromeClient.FileChooserParams.MODE_OPEN
+
+    // accept 类型既可能是正经 MIME（"image/*"），也可能是扩展名（".png"）或空串。
+    // 只保留含 "/" 的合法 MIME：扩展名对 DocumentsUI 无效，会把可选范围收窄成空；
+    // 一个合法项都没有时退回 "*/*"，否则用户什么文件都选不了（点了白点）。
+    val mimeTypes = params?.acceptTypes.orEmpty()
+        .map { it.trim() }
+        .filter { it.contains('/') }
+
+    return when (mode) {
+        MODE_OPEN_FOLDER -> Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
+
+        WebChromeClient.FileChooserParams.MODE_SAVE ->
+            Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = mimeTypes.firstOrNull() ?: "*/*"
+            }
+
+        else -> Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            // 多类型时 type 必须是 "*/*"，真正的类型集合交给 EXTRA_MIME_TYPES；
+            // 只有一种类型则直接写进 type。
+            type = if (mimeTypes.size == 1) mimeTypes[0] else "*/*"
+            if (mimeTypes.size > 1) {
+                putExtra(Intent.EXTRA_MIME_TYPES, mimeTypes.toTypedArray())
+            }
+            if (mode == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE) {
+                putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+            }
+        }
+    }
+}
+
+/**
+ * 从文件选择结果里收集用户选中的 URI。
+ *
+ * 多选走 ClipData，单选走 data；取消（resultCode != RESULT_OK）返回 null ——
+ * 调用方会把这个 null 原样兑现给 WebView，以解除它对本次选择的等待。
+ */
+private fun collectFileChooserResult(resultCode: Int, data: Intent?): Array<Uri>? {
+    if (resultCode != Activity.RESULT_OK) return null
+    data?.clipData?.let { clip ->
+        val uris = ArrayList<Uri>(clip.itemCount)
+        for (i in 0 until clip.itemCount) {
+            clip.getItemAt(i).uri?.let { uris.add(it) }
+        }
+        if (uris.isNotEmpty()) return uris.toTypedArray()
+    }
+    return data?.data?.let { arrayOf(it) }
 }

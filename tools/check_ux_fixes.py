@@ -1,4 +1,4 @@
-"""校验「地址栏焦点释放」「书签重命名/删除确认」「书签网站图标」三项。
+"""校验「地址栏焦点释放」「书签重命名/删除确认」「书签网站图标」「网页文件上传」等多项。
 
 每一项都对应一个真实出现过或极易出现的问题：
 
@@ -9,6 +9,9 @@
      - 存 Bitmap 而不是字节 -> 列表重建时 `use of recycled bitmap` 崩溃
      - 空数组与 null 不区分 -> 每次进页面都重试注定失败的站点，白耗流量
      - 老库升级时 DROP 重建 -> 用户的书签和历史全丢
+  4. 网页 `<input type=file>` 点击毫无反应 -> WebChromeClient 未实现
+     onShowFileChooser。WebView 自己**不会**拉起任何界面，必须由宿主用
+     ActivityResult 代劳，且取消时也要兑现回调，否则之后再也点不动上传按钮。
 """
 import os
 import re
@@ -493,6 +496,101 @@ if re.search(r"if \(ReaderPage\.isReaderUrl\(url\)\) \{\s*\n\s*loadHome\(id, wv\
 else:
     bad("loadUrl 会把合成的 ling://reader 交给 WebView —— ERR_UNKNOWN_URL_SCHEME")
 
+# ---------- 10. 网页文件上传（<input type=file>） ----------
+print("\n10. 网页文件上传按钮")
+#
+# 症状：网页里点上传按钮什么都不弹，像坏了一样。
+# 根因：WebChromeClient 没实现 onShowFileChooser —— WebView 自身不会拉起任何
+# 选择界面，必须由宿主用 ActivityResult 代劳。且 onShowFileChooser 返回 true
+# 就代表「已受理」，WebView 会一直等 onReceiveValue，取消时也必须兑现，
+# 否则之后该页面再也点不动上传按钮。
+#
+# ⚠️ 只剔 // 行注释，**不做**整块注释替换：本节要匹配的源码里含 "*/*" 字面量，
+# 其中恰好有 "/*" 子串，用 `/\*[\s\S]*?\*/` 去注释会把它当成注释起点，
+# 一路吞到下一个 "*/"（实测会连带吃掉 EXTRA_ALLOW_MULTIPLE 那段代码而误报）。
+# 源码里对该 @hide 常量的说明也刻意写成不带点号的 "FileChooserParams 上的
+# MODE_OPEN_FOLDER"，避免行/块注释被匹配到。
+mgr_code10 = re.sub(r"//.*$", "", mgr, flags=re.M)
+bs_code10 = re.sub(r"//.*$", "", browser_screen, flags=re.M)
+
+if re.search(r"var onShowFileChooser:[\s\S]{0,160}?FileChooserParams", mgr_code10):
+    ok("WebTabManager 暴露了 onShowFileChooser 给 UI 层")
+else:
+    bad("WebTabManager 没有 onShowFileChooser 钩子 —— UI 层无从接管")
+
+# 覆写必须读**管理器**上的回调，而不是 WebChromeClient 自己的同名方法
+# （裸写 onShowFileChooser 会解析成 WebChromeClient.onShowFileChooser 本身）
+if re.search(r"override fun onShowFileChooser\(", mgr_code10) and \
+        re.search(r"this@WebTabManager\.onShowFileChooser", mgr_code10):
+    ok("WebChromeClient 覆写了 onShowFileChooser，且读管理器上的回调")
+else:
+    bad("未覆写 onShowFileChooser（或读错字段）—— 点上传按钮完全没有反应")
+
+# 没接管时必须回 false：回 true 却不兑现回调会让 WebView 永久卡住
+if re.search(r"filePathCallback \?: return false", mgr_code10) and \
+        re.search(r"this@WebTabManager\.onShowFileChooser \?: return false", mgr_code10) and \
+        re.search(r"handler\(fileChooserParams, callback::onReceiveValue\)[\s\S]{0,80}?return true", mgr_code10):
+    ok("未接管/无回调时以 return false 兜住（返回 true 却不兑现会卡死）")
+else:
+    bad("onShowFileChooser 兜底不完整 —— 可能返回 true 而永不兑现回调")
+
+if re.search(r"onResult: \(Array<Uri>\?\) -> Unit", mgr_code10):
+    ok("结果回调按「可空数组」设计（null 即取消）")
+else:
+    bad("结果回调未按可空设计 —— 取消时无法解除 WebView 等待")
+
+# ---- UI 层接线 ----
+if re.search(r"rememberLauncherForActivityResult\(\s*ActivityResultContracts\.StartActivityForResult\(\)", bs_code10):
+    ok("用 StartActivityForResult 承接结果（四种模式要运行时决定，封装契约做不到）")
+else:
+    bad("没有注册 ActivityResult 启动器 —— 选择结果传不回来")
+
+if re.search(r"viewModel\.tabManager\.onShowFileChooser = \{", bs_code10) and \
+        re.search(r"onDispose \{ viewModel\.tabManager\.onShowFileChooser = null \}", bs_code10):
+    ok("BrowserScreen 接上钩子，并在离开组合时摘掉")
+else:
+    bad("BrowserScreen 没有接管 onShowFileChooser（或没在 onDispose 摘除）")
+
+# 取消也必须兑现：收集函数在非 RESULT_OK 时返回 null
+if re.search(r"deliver\?\.invoke\(collectFileChooserResult\(result\.resultCode, result\.data\)\)", bs_code10) and \
+        re.search(r"fun collectFileChooserResult[\s\S]{0,200}?resultCode != Activity\.RESULT_OK\) return null", bs_code10):
+    ok("取消（非 RESULT_OK）也回传 null，解除 WebView 的等待")
+else:
+    bad("取消路径没回传 null —— 之后该页面再也点不动上传按钮")
+
+if re.search(r"fileChooserLauncher\.launch\([\s\S]{0,300}?onFailure[\s\S]{0,200}?onResult\(null\)", bs_code10):
+    ok("拉起失败（如系统缺 DocumentsUI）也兑现 null")
+else:
+    bad("拉起失败没有兜底 —— 会把 WebView 卡在「等待选择」")
+
+# 四种模式各自的 Intent 映射
+for label, pattern in [
+    ("取目录 -> OPEN_DOCUMENT_TREE", r"MODE_OPEN_FOLDER ->\s*Intent\(Intent\.ACTION_OPEN_DOCUMENT_TREE\)"),
+    ("存盘 -> CREATE_DOCUMENT", r"MODE_SAVE ->[\s\S]{0,140}?Intent\.ACTION_CREATE_DOCUMENT"),
+    ("多选 -> EXTRA_ALLOW_MULTIPLE", r"MODE_OPEN_MULTIPLE[\s\S]{0,220}?EXTRA_ALLOW_MULTIPLE"),
+    ("单选/多选 -> OPEN_DOCUMENT + CATEGORY_OPENABLE",
+     r"Intent\.ACTION_OPEN_DOCUMENT\)\.apply[\s\S]{0,220}?CATEGORY_OPENABLE"),
+]:
+    if re.search(pattern, bs_code10):
+        ok(label)
+    else:
+        bad(f"缺少模式映射：{label}")
+
+# accept 里的扩展名（".png"）不是合法 MIME，必须过滤；无合法项要退回 */*
+if re.search(r"\.filter \{ it\.contains\('/'\) \}", bs_code10) and (
+        re.search(r'type = mimeTypes\.firstOrNull\(\) \?: "\*/\*"', bs_code10) or
+        re.search(r'type = if \(mimeTypes\.size == 1\) mimeTypes\[0\] else "\*/\*"', bs_code10)):
+    ok("accept 只认合法 MIME，无合法项退回 */*（否则「点了白点」选不了）")
+else:
+    bad("accept 未过滤扩展名或未退回 */* —— 会出现选了没反应")
+
+# MODE_OPEN_FOLDER 是 @hide 常量，SDK 桩（android.jar）不导出，只能写字面量
+if re.search(r"const val MODE_OPEN_FOLDER = 3", bs_code10) and \
+        not re.search(r"FileChooserParams\.MODE_OPEN_FOLDER", bs_code10):
+    ok("取目录用字面量 3（引用 @hide 常量会编译不过）")
+else:
+    bad("直接引用了 @hide 的 MODE_OPEN_FOLDER —— 编译会 Unresolved reference")
+
 print()
 print("=" * 55)
 if problems:
@@ -500,4 +598,4 @@ if problems:
     for p in problems:
         print("  ! " + p)
     sys.exit(1)
-print("地址栏焦点 / 书签编辑 / 网站图标 / 地址栏文案 / 外部链接校验通过")
+print("地址栏焦点 / 书签编辑 / 网站图标 / 地址栏文案 / 外部链接 / 文件上传校验通过")

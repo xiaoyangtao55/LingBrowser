@@ -5,6 +5,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.net.Uri
 import android.webkit.CookieManager
+import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebStorage
 import android.webkit.WebView
@@ -78,6 +79,18 @@ class WebTabManager(private val context: Context) {
      * 这里只负责把网页提交上来的字符串转出去。
      */
     var onSearchRequested: ((query: String) -> Unit)? = null
+
+    /**
+     * 网页 `<input type="file">` 点击后的文件选择回调（由 UI 层接管）。
+     *
+     * 参数 1 是 WebView 给出的选择约束（单选 / 多选 / 取目录 / 存盘 + accept 类型），
+     * 参数 2 是结果回传：**必须且只能回调一次**，传 null 表示用户取消。
+     * 用户取消时也要回调 null —— 否则 WebView 会一直停在"等待选择"状态，
+     * 之后该页面再点上传按钮就全部没反应。
+     */
+    var onShowFileChooser: (
+        (params: WebChromeClient.FileChooserParams?, onResult: (Array<Uri>?) -> Unit) -> Unit
+    )? = null
 
     /** 当前标签页。 */
     val activeTab: TabState?
@@ -969,6 +982,26 @@ class WebTabManager(private val context: Context) {
                     // LingWebViewClient.onPageStarted 的 favicon 参数 ——
                     // 两者都汇到 applyFavicon，保证更新逻辑只有一份。
                     applyFavicon(id, icon)
+                }
+
+                override fun onShowFileChooser(
+                    view: WebView?,
+                    filePathCallback: ValueCallback<Array<Uri>>?,
+                    fileChooserParams: FileChooserParams?,
+                ): Boolean {
+                    // 网页点了 <input type="file">。
+                    //
+                    // 必须返回 true 表示"已受理"，但它同时意味着 WebView 会
+                    // **一直等待** onReceiveValue 被调用 —— 所以下面任何时候
+                    // 都要把回调兑现（没有 UI 接管或 callback 缺失时则回 false，
+                    // 让 WebView 走默认行为，而不是留下一个永不兑现的等待）。
+                    val callback = filePathCallback ?: return false
+                    // ⚠️ 必须显式限定 this@WebTabManager：对象内部裸写
+                    // onShowFileChooser 会解析成 WebChromeClient 自己的同名方法，
+                    // 导致"永远读到方法引用"而不是 UI 层设置的回调。
+                    val handler = this@WebTabManager.onShowFileChooser ?: return false
+                    handler(fileChooserParams, callback::onReceiveValue)
+                    return true
                 }
             }
             webViewClient = LingWebViewClient(
