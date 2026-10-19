@@ -183,18 +183,33 @@ function mkNode(tag, cls, text) {
   // 算法最后取 article.innerHTML 就永远是空的，
   // 会让"提取成功但 html 为空"看起来像 bug（踩过）。
   // 叶子节点要把自身的文本吐出来，否则序列化结果只有空标签。
+  //
+  // 这里**必须把属性也序列化出来**：属性净化的整条检查都靠"返回值里还有没有
+  // onclick / javascript:"来判定，若 serialize 吞掉属性，净化就算失效也看不出来。
+  // 现有场景里节点默认没有 setAttribute 的属性，所以加上这段对它们是**逐字节等价**的。
   n.serialize = function () {
     if (n.childNodes.length === 0) {
       return (n.rawHtml !== undefined) ? n.rawHtml : (n.textContent || '');
     }
     return n.childNodes.map(function (c) {
       if (c.nodeType === 3) return c.textContent;
-      return '<' + c.tagName.toLowerCase() + '>' + c.serialize() + '</' + c.tagName.toLowerCase() + '>';
+      var a = '';
+      var ks = Object.keys(c.attrs || {});
+      for (var i = 0; i < ks.length; i++) a += ' ' + ks[i] + '="' + c.attrs[ks[i]] + '"';
+      return '<' + c.tagName.toLowerCase() + a + '>' + c.serialize() + '</' + c.tagName.toLowerCase() + '>';
     }).join('');
   };
   Object.defineProperty(n, 'innerHTML', {
     get: function () { return n.serialize(); },
     set: function (v) { n.rawHtml = v; },
+  });
+  // 属性净化会遍历 node.attributes 并逐个 removeAttribute。桩若没有 attributes，
+  // 净化代码会因"没有属性可遍历"整体跳过 —— 检查就会**假通过**（踩过）。
+  // 用 getter 现算一份 {name} 列表，与真实 NamedNodeMap 的用法一致。
+  Object.defineProperty(n, 'attributes', {
+    get: function () {
+      return Object.keys(n.attrs || {}).map(function (k) { return { name: k }; });
+    }
   });
   return n;
 }
@@ -244,6 +259,13 @@ append(art, N('p', '',
 append(art, N('p', '',
   '第三段继续补充内容，让段落数量达到算法认为足够的标准，'
   + '三段以上且每段都超过一定长度，才能稳定通过可读性判断。'));
+// 属性级净化的测试载体：正文里塞一个带 on* 事件属性 + javascript: 伪协议的链接。
+// 标签层面它**不会**被删（<a> 不在 junkTags 里），只能靠属性净化拦下 ——
+// 若净化缺失，返回的 html 里就会出现 onclick / javascript:。
+var evil = N('a', '', '恶意链接');
+evil.setAttribute('href', 'javascript:alert(1)');
+evil.setAttribute('onclick', 'alert(2)');
+append(art, evil);
 // 这两个块**故意用 div 而不是 nav/footer**：div 不在 junkTags 里，
 // 只能靠 class/id 语义正则（UNLIKELY）淘汰。若去掉语义过滤，
 // 它们就会被当成候选并可能污染正文 —— 这样那一项检查才有意义。
@@ -312,6 +334,14 @@ console.log('__PAGE__' + (PAGE_BEFORE === PAGE_AFTER ? 'INTACT' : 'CHANGED'));
                 ok("保留了全部正文段落")
             else:
                 bad("正文段落丢失")
+
+            # 属性级净化：on* 事件属性与 javascript: 伪协议必须被剥离。
+            # 正文 HTML 会被原样嵌进阅读视图，而阅读视图开着 JS ——
+            # 残留一个 onclick/onerror 或 javascript: 链接就等于在应用内执行页面代码。
+            if "onclick" in h or "javascript:" in h:
+                bad("正文残留 on* 事件属性或 javascript: 伪协议 —— 阅读视图里会执行")
+            else:
+                ok("已剥离 on* 事件属性与 javascript: 伪协议")
 
             # 真身必须原样保留：删除全部发生在克隆体上
             if page_state == "INTACT":
@@ -536,6 +566,34 @@ console.log('__PAGE__' + (PAGE_BEFORE === PAGE_AFTER ? 'INTACT' : 'CHANGED'));
             break
     else:
         bad("未处理图片懒加载 —— 阅读视图里图片会是占位图")
+
+    # 属性级净化（on* / javascript:）。
+    #
+    # 只删危险标签不够：<img onerror=...>、<a href="javascript:..."> 靠的是
+    # **属性**执行代码，而正文 HTML 会被原样嵌进开着 JS 的阅读视图。
+    # 第 4 节已经真跑过一遍；这里再盯住源码特征，防止"函数被改名/挪走"而
+    # 端到端那条因为别的原因碰巧通过。
+    if re.search(r"function sanitizeAttrs\(", script):
+        ok("有属性净化函数 sanitizeAttrs")
+    else:
+        bad("缺少属性净化 —— on*/javascript: 会随正文进入阅读视图")
+
+    if re.search(r"indexOf\('on'\)\s*===\s*0", script):
+        ok("删除 on* 事件处理器属性（onclick/onerror/onload…）")
+    else:
+        bad("未删除 on* 事件处理器属性")
+
+    if "javascript|vbscript" in script:
+        ok("识别 javascript:/vbscript: 伪协议")
+    else:
+        bad("未识别 javascript:/vbscript: 伪协议")
+
+    # 必须真的作用到正文容器**及其全部后代**：只定义不调用等于没净化
+    if re.search(r"sanitizeAttrs\(article\)\s*;", script) and \
+            re.search(r"sanitizeAttrs\(dirty\[", script):
+        ok("属性净化作用于正文容器及其全部后代")
+    else:
+        bad("属性净化未覆盖正文容器/后代 —— 函数可能定义了却没人调")
 
     # 原文地址必须优先 canonical，不能直接用 location.href
     #

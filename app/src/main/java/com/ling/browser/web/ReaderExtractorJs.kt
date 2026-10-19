@@ -321,6 +321,40 @@ object ReaderExtractorJs {
       img.removeAttribute('srcset');
     }
 
+    // ------------------------------------------------- 第四步：属性净化
+
+    // 前面只删了「危险标签」（script/iframe…），但**属性**同样能执行代码：
+    //   - <img src=x onerror=alert(1)>         事件处理器属性
+    //   - <a href="javascript:alert(1)">       伪协议
+    // 正文 HTML 会被**原样**嵌进阅读视图（ReaderPage 里 content 不做转义），
+    // 而阅读视图的 WebView 开着 JS —— 不净化就等于把第三方页面的事件处理器
+    // 和 javascript: 链接一起搬进来执行。
+    var DANGEROUS_URL_ATTRS = ['href', 'src', 'xlink:href', 'formaction', 'action',
+                               'poster', 'data', 'cite', 'background'];
+    var JS_SCHEME = /^\s*(?:javascript|vbscript)\s*:/i;
+    function sanitizeAttrs(node) {
+      if (!node || !node.attributes || node.attributes.length === 0) return;
+      // attributes 是**活集合**：边遍历边删会漏项，先把属性名抄一份
+      var names = [];
+      for (var ai = 0; ai < node.attributes.length; ai++) {
+        names.push(node.attributes[ai].name);
+      }
+      for (var aj = 0; aj < names.length; aj++) {
+        var name = names[aj];
+        var lower = name.toLowerCase();
+        // on* 事件处理器（onclick/onerror/onload…）一律删
+        if (lower.indexOf('on') === 0) { node.removeAttribute(name); continue; }
+        // javascript:/vbscript: 伪协议一律删
+        if (DANGEROUS_URL_ATTRS.indexOf(lower) !== -1 &&
+            JS_SCHEME.test(node.getAttribute(name) || '')) {
+          node.removeAttribute(name);
+        }
+      }
+    }
+    sanitizeAttrs(article);
+    var dirty = article.getElementsByTagName('*');
+    for (var pn = 0; pn < dirty.length; pn++) sanitizeAttrs(dirty[pn]);
+
     // 收集正文 HTML。用 innerHTML 而不是 DOM 序列化整棵树：
     // 后者会带上命名空间属性，体积也更大。
     var html = article.innerHTML || '';
