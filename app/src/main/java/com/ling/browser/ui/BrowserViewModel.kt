@@ -1,6 +1,7 @@
 package com.ling.browser.ui
 
 import android.app.Application
+import android.net.Uri
 import androidx.compose.ui.graphics.Color
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -8,7 +9,11 @@ import com.ling.browser.LingApplication
 import com.ling.browser.data.db.Bookmark
 import com.ling.browser.data.db.DownloadEntry
 import com.ling.browser.data.db.HistoryEntry
+import com.ling.browser.data.repo.MAX_BACKUP_BYTES
 import com.ling.browser.data.repo.deriveFolders
+import com.ling.browser.data.repo.parseNetscapeHtml
+import com.ling.browser.data.repo.planImport
+import com.ling.browser.data.repo.toNetscapeHtml
 import com.ling.browser.data.prefs.DownloadLocation
 import com.ling.browser.data.prefs.DownloaderType
 import com.ling.browser.data.prefs.HomeBackground
@@ -25,6 +30,7 @@ import com.ling.browser.web.SniffResult
 import com.ling.browser.web.TabState
 import com.ling.browser.web.UrlScheme
 import com.ling.browser.web.WebTabManager
+import java.io.ByteArrayOutputStream
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -506,6 +512,89 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
     fun renameBookmark(id: Long, title: String, folder: String?) {
         viewModelScope.launch { container.bookmarks.rename(id, title, folder) }
     }
+
+    // ------------------------------------------------------------ 备份与恢复
+
+    /**
+     * 把全部书签导出到用户选定的文件。
+     *
+     * 成败都通过 [_message] 回报：写文件可能因为权限、空间不足或用户选了个
+     * 只读位置而失败，静默失败会让用户以为"导出了但文件是空的"。
+     */
+    fun exportBookmarks(target: Uri) {
+        viewModelScope.launch {
+            val list = container.bookmarks.bookmarks.value
+            val text = toNetscapeHtml(list)
+            val written = withContext(Dispatchers.IO) {
+                runCatching {
+                    getApplication<Application>().contentResolver
+                        .openOutputStream(target)?.use { output ->
+                            output.write(text.toByteArray(Charsets.UTF_8))
+                        } ?: error("无法写入所选位置")
+                }.isSuccess
+            }
+            _message.value = if (written) {
+                "已导出 ${list.size} 条书签"
+            } else {
+                "导出失败，请换个位置重试"
+            }
+        }
+    }
+
+    /**
+     * 从用户选定的文件导入书签。
+     *
+     * **合并**而不是覆盖：库里已有同网址的条目一律跳过。书签是用户自己攒的，
+     * 任何"导入顺手删掉几条"的行为都不可原谅，因此这条路径从不 DELETE。
+     */
+    fun importBookmarks(source: Uri) {
+        viewModelScope.launch {
+            val text = withContext(Dispatchers.IO) { readTextCapped(source) }
+            if (text == null) {
+                _message.value = "读取失败：文件过大或无法读取"
+                return@launch
+            }
+            val parsed = parseNetscapeHtml(text)
+            if (parsed.isEmpty()) {
+                _message.value = "这个文件里没有可导入的书签"
+                return@launch
+            }
+            // 以库里现有的网址为去重基准；跳过的条数要如实回报，
+            // 否则用户看到导入后条数对不上，会以为数据丢了
+            val plan = planImport(
+                container.bookmarks.bookmarks.value.map { it.url }.toSet(),
+                parsed,
+            )
+            val added = container.bookmarks.addAll(plan.toAdd)
+            _message.value = when {
+                added == 0 -> "没有新增（${plan.skipped} 条已存在）"
+                plan.skipped == 0 -> "已导入 $added 条书签"
+                else -> "已导入 $added 条，跳过 ${plan.skipped} 条重复"
+            }
+        }
+    }
+
+    /**
+     * 读文件内容，**边读边数**上限。
+     *
+     * 不能"先整个读进内存再看有多大" —— 那正是要防的事。也刻意不用
+     * `InputStream.readBytes()`：它会把整个流读完，没有上限。
+     */
+    private fun readTextCapped(source: Uri): String? = runCatching {
+        getApplication<Application>().contentResolver.openInputStream(source)?.use { input ->
+            val out = ByteArrayOutputStream()
+            val buffer = ByteArray(8192)
+            var total = 0
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                total += read
+                if (total > MAX_BACKUP_BYTES) return null
+                out.write(buffer, 0, read)
+            }
+            String(out.toByteArray(), Charsets.UTF_8)
+        }
+    }.getOrNull()
 
     // ------------------------------------------------------------ 下载
 

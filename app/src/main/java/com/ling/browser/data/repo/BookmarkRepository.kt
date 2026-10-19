@@ -1,6 +1,7 @@
 package com.ling.browser.data.repo
 
 import android.content.ContentValues
+import android.database.sqlite.SQLiteDatabase
 import com.ling.browser.data.db.Bookmark
 import com.ling.browser.data.db.LingDatabase
 import com.ling.browser.data.db.bookmarkValues
@@ -170,6 +171,47 @@ class BookmarkRepository(private val db: LingDatabase) {
      */
     fun urlsMissingFavicon(limit: Int = 8): List<String> =
         _bookmarks.value.filter { it.favicon == null }.map { it.url }.take(limit)
+
+    // ------------------------------------------------------------ 备份与恢复
+
+    /**
+     * 批量写入导入的书签，返回真正新增的条数。
+     *
+     * 用 `CONFLICT_IGNORE` 而**不是** `CONFLICT_REPLACE`（[toggle] 那边用的那个）：
+     * url 上有唯一索引，REPLACE 会把库里已有那条**连 favicon 一起删掉重建** ——
+     * 明明只是"这条重复"，用户的图标却没了。IGNORE 保留原记录，冲突行返回 -1，
+     * 正好用来数出真正写进去几条。
+     *
+     * 整个批次包在一个事务里：几百上千条逐条 autocommit 会慢得肉眼可见，
+     * 中途失败也容易留下写了一半的状态。
+     */
+    suspend fun addAll(entries: List<ImportedBookmark>): Int = withContext(Dispatchers.IO) {
+        if (entries.isEmpty()) return@withContext 0
+        val writable = db.writableDatabase
+        var added = 0
+        writable.beginTransaction()
+        try {
+            for (entry in entries) {
+                val row = writable.insertWithOnConflict(
+                    "bookmarks",
+                    null,
+                    bookmarkValues(
+                        title = entry.title.ifBlank { entry.url },
+                        url = entry.url,
+                        folder = entry.folder,
+                        createdAt = entry.createdAt,
+                    ),
+                    SQLiteDatabase.CONFLICT_IGNORE,
+                )
+                if (row != -1L) added++
+            }
+            writable.setTransactionSuccessful()
+        } finally {
+            writable.endTransaction()
+        }
+        refresh()
+        added
+    }
 }
 
 // ------------------------------------------------------------------ 纯函数

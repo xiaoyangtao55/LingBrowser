@@ -1,6 +1,7 @@
 package com.ling.browser.ui.screens
 
 import android.content.Intent
+import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
@@ -62,6 +63,7 @@ enum class SettingsGroup(val title: String) {
     BROWSING("浏览"),
     DOWNLOAD("下载"),
     PRIVACY("隐私"),
+    BACKUP("备份与恢复"),
     ABOUT("关于"),
 }
 
@@ -124,6 +126,14 @@ fun SettingsScreen(
                     title = SettingsGroup.PRIVACY.title,
                     subtitle = "清除缓存、Cookie 与历史记录",
                     onClick = { onOpenGroup(SettingsGroup.PRIVACY) },
+                )
+            }
+            item {
+                GroupEntryRow(
+                    icon = LingIcons.Bookmark,
+                    title = SettingsGroup.BACKUP.title,
+                    subtitle = "导出书签备份，或从其它浏览器导入",
+                    onClick = { onOpenGroup(SettingsGroup.BACKUP) },
                 )
             }
             item {
@@ -785,6 +795,86 @@ fun PrivacySettingsScreen(
             },
         )
     }
+}
+
+/**
+ * 「备份与恢复」子页。
+ *
+ * 只做书签的导入/导出 —— 用 Netscape 书签 HTML（浏览器之间搬书签的事实标准），
+ * 不用自有格式：导出的文件在 Chrome / Edge / Firefox / Safari 里都能直接导入，
+ * 反过来它们导出的文件这里也读得懂，备份才有意义。
+ *
+ * 选文件都用系统选择器（SAF），因此**不需要存储权限**，
+ * 用户选哪儿就写哪儿 / 读哪儿。
+ */
+@Composable
+fun BackupSettingsScreen(
+    onExport: (Uri) -> Unit,
+    onImport: (Uri) -> Unit,
+    onBack: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    // 导出：CreateDocument 让用户选保存位置并起名，默认名 bookmarks.html。
+    val exportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("text/html"),
+    ) { uri ->
+        // 用户取消时 uri 为 null，什么都不做（不会产生空文件）。
+        if (uri != null) onExport(uri)
+    }
+
+    // 导入：OpenDocument 让用户挑一个已有的书签文件。
+    val importLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri != null) onImport(uri)
+    }
+
+    SettingsPageScaffold(
+        title = SettingsGroup.BACKUP.title,
+        onBack = onBack,
+        modifier = modifier,
+        content = {
+            item {
+                SettingRow(
+                    icon = LingIcons.Article,
+                    title = "导出书签",
+                    subtitle = "全部书签保存为一个 HTML 文件，可在电脑或其它浏览器打开",
+                    onClick = { exportLauncher.launch("bookmarks.html") },
+                )
+            }
+            item {
+                SettingRow(
+                    icon = LingIcons.FolderOpen,
+                    title = "导入书签",
+                    subtitle = "读取其它浏览器导出的 HTML 文件，重复的网址会自动跳过",
+                    // 多给几个 MIME：不同来源的书签文件有的被标成 text/html，
+                    // 有的被标成 octet-stream，只认一种会让用户"看不到自己的文件"。
+                    // 末尾的 */* 作为兜底，宁可多显示几个文件，也别让该选的选不中。
+                    onClick = {
+                        importLauncher.launch(
+                            arrayOf(
+                                "text/html",
+                                "application/xhtml+xml",
+                                "text/plain",
+                                "*/*",
+                            ),
+                        )
+                    },
+                )
+            }
+            item {
+                Text(
+                    // 把两个关键承诺写清楚：导入是合并、UI 不会丢书签；
+                    // 图标不在格式里，导入后会由书签页自动重建。
+                    text = "导入采用合并方式：只新增、不删除，库里已有的网址会跳过。" +
+                        "网站图标不在备份文件里，导入后打开书签页会自动补齐。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
+                )
+            }
+        },
+    )
 }
 
 /**

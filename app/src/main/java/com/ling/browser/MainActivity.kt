@@ -46,6 +46,7 @@ import com.ling.browser.ui.screens.HistoryScreen
 import com.ling.browser.ui.screens.SettingsScreen
 import com.ling.browser.ui.screens.AboutScreen
 import com.ling.browser.ui.screens.AppearanceSettingsScreen
+import com.ling.browser.ui.screens.BackupSettingsScreen
 import com.ling.browser.ui.screens.BrowsingSettingsScreen
 import com.ling.browser.ui.screens.DownloadSettingsScreen
 import com.ling.browser.ui.screens.PrivacySettingsScreen
@@ -392,6 +393,7 @@ private fun LingApp(viewModel: BrowserViewModel) {
                                 SettingsGroup.BROWSING -> Route.SettingsBrowsing
                                 SettingsGroup.DOWNLOAD -> Route.SettingsDownload
                                 SettingsGroup.PRIVACY -> Route.SettingsPrivacy
+                                SettingsGroup.BACKUP -> Route.SettingsBackup
                                 SettingsGroup.ABOUT -> Route.About
                             },
                         )
@@ -437,6 +439,12 @@ private fun LingApp(viewModel: BrowserViewModel) {
 
                 Route.SettingsPrivacy -> PrivacySettingsScreen(
                     onClearData = viewModel::clearAllData,
+                    onBack = pop,
+                )
+
+                Route.SettingsBackup -> BackupSettingsScreen(
+                    onExport = viewModel::exportBookmarks,
+                    onImport = viewModel::importBookmarks,
                     onBack = pop,
                 )
 
@@ -505,6 +513,7 @@ private sealed interface Route {
     data object SettingsBrowsing : Route
     data object SettingsDownload : Route
     data object SettingsPrivacy : Route
+    data object SettingsBackup : Route
     data object About : Route
     data object AdBlockRules : Route
     data object SniffedResources : Route
