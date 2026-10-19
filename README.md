@@ -96,6 +96,7 @@ LingBrowser/
     ├── check_icon_fidelity.py     # 生成物与源文件逐点比对
     ├── check_session.py           # 会话恢复接线校验
     ├── check_bookmark_folders.py  # 书签文件夹校验
+    ├── check_bookmark_backup.py   # 书签导入导出校验
     ├── check_ux_fixes.py          # 焦点/书签编辑/图标/文件上传校验
     ├── check_reader.py            # 阅读模式提取与接线校验
     └── check_client_thread.py     # 校验 shouldInterceptRequest 不碰 WebView（后台线程会闪退）
@@ -1203,6 +1204,7 @@ Android 13+ 的**主题化图标** —— 系统读 `ic_launcher_monochrome` 单
 | `tools/check_tabs_layer.py` | 校验标签面板的层级与动画约束（遮罩必须画在面板之后、拖拽手势不吞点击等） |
 | `tools/check_session.py` | 校验会话恢复接线：保存挂在 onStop、协程不被 viewModelScope 取消、无痕不落盘 |
 | `tools/check_bookmark_folders.py` | 校验文件夹不建表、删文件夹不连带删书签、导出规则与新建入口 |
+| `tools/check_bookmark_backup.py` | 校验 Netscape HTML 编解码往返一致、导入**只增不删**（重复网址跳过）、拒绝 `javascript:` / `vbscript:` / `data:` 伪协议 |
 | `tools/check_ux_fixes.py` | 校验地址栏真的释放焦点、书签重命名/删除确认、图标存储与迁移不丢数据、网页 `<input type=file>` 走 `onShowFileChooser` |
 | `tools/check_reader.py` | 校验阅读模式提取脚本语法与算法（用 Node 真实运行）、以及各层接线完整 |
 | `tools/check_client_thread.py` | 校验 `shouldInterceptRequest` 方法体不引用 WebView —— 它跑在后台线程，`view.url` 会触发 `checkThread()` 抛异常并让进程闪退 |
@@ -1238,14 +1240,14 @@ python tools/ascii_icons.py Download Layers          # 渲染指定图标
 | 项目 | 结果 |
 |---|---|
 | `:app:assembleDebug` | ✅ 通过（换用新图标资源包后重新验证） |
-| `:app:testDebugUnitTest` | ✅ **259 个用例全部通过**（`UrlUtilsTest` 20 / `FaviconFetcherTest` 12 / `ReaderPageTest` 22 / `ReaderResultTest` 15 / `UrlSchemeTest` 18 / `AdBlockerTest` 16 / `SniffResultTest` 12 / `HomePageTest` 25 / `InternalPageTest` 11 / `TabOrderTest` 15 / `BookmarkFolderTest` 14 / `LingSettingsTest` 16 / `LingIconsTest` 11 / `DownloadTest` 14 / `ResumePlanTest` 7 / `PendingDownloadTest` 5 / `SessionSnapshotTest` 9 / `TabInitialTest` 6 / `TabAddressBarTest` 6 / `LingWebViewClientTest` 2 / `SecurityStateTest` 3） |
+| `:app:testDebugUnitTest` | ✅ **276 个用例全部通过**（`UrlUtilsTest` 20 / `FaviconFetcherTest` 12 / `ReaderPageTest` 22 / `ReaderResultTest` 15 / `UrlSchemeTest` 18 / `AdBlockerTest` 16 / `SniffResultTest` 12 / `HomePageTest` 25 / `InternalPageTest` 11 / `TabOrderTest` 15 / `BookmarkFolderTest` 14 / `BookmarkBackupTest` 17 / `LingSettingsTest` 16 / `LingIconsTest` 11 / `DownloadTest` 14 / `ResumePlanTest` 7 / `PendingDownloadTest` 5 / `SessionSnapshotTest` 9 / `TabInitialTest` 6 / `TabAddressBarTest` 6 / `LingWebViewClientTest` 2 / `SecurityStateTest` 3） |
 | `:app:assembleRelease`（R8 压缩） | ✅ 通过，产物 1.4 MB（图标改版前） |
 | APK 签名校验 | ✅ v1 + v2 方案均通过 |
 | 真机安装（Xiaomi MI 8 / Android 14） | ✅ `adb install` 成功 |
 | 真机启动 | ✅ 无崩溃，`Displayed MainActivity: +884ms` |
 | WebView 进程 | ✅ sandboxed_process 正常拉起 |
 | View 层级 | ✅ Compose 树与 WebView 宿主 `FrameLayout` 布局正确 |
-| 静态自检（16 个脚本通过） | ✅ 全部通过（`check_icon_fidelity` 因缺官方图标源文件未跑） |
+| 静态自检（17 个脚本通过） | ✅ 全部通过（`check_icon_fidelity` 因缺官方图标源文件未跑） |
 
 > **阅读模式**：逻辑层与接线已全部通过单测与静态检查，但**中文站点的实际
 > 提取效果尚未在真机验证** —— 提取质量依赖具体站点的 DOM 结构，
@@ -1386,6 +1388,7 @@ hello world                -> 必应搜索（默认引擎）
 | 会话恢复 | `onStop` 保存 + 冷启动重建；无痕不入库；设置里可开关 |
 | 书签文件夹 | 单层文件夹；**不建表**，由书签归属派生（无幽灵文件夹） |
 | 书签网站图标 | 按 URL 自行抓取 `/favicon.ico`；存压缩字节而非 `Bitmap` |
+| 书签备份与恢复 | 导出 **Netscape 书签 HTML**（Chrome/Edge/Firefox/Safari 互认）；导入按 URL 去重**合并**、只增不删、不覆盖已有图标；拒绝 `javascript:` 等伪协议；边读边卡 8 MiB 上限 |
 | 阅读模式 | 移植 Readability 打分算法（<11 KB）+ **中文阈值适配**；可调四档字号 |
 | 广告拦截 | `shouldInterceptRequest` 资源级拦截，域名黑名单 + 路径关键字；抽 `AdBlocker` 纯 Kotlin 可单测；主文档保护；默认开；**支持自定义域名规则（二级菜单增删）** |
 | 资源嗅探 | 注入 JS 扫描 DOM，抓视频/音频/图片/下载链接；结果二级页分组展示，可打开或下载 |
