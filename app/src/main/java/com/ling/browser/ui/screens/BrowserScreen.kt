@@ -35,11 +35,13 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -60,8 +62,15 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntRect
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupPositionProvider
+import androidx.compose.ui.window.PopupProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.ling.browser.data.prefs.NightMode
 import com.ling.browser.ui.BrowserViewModel
@@ -131,6 +140,8 @@ fun BrowserScreen(
     // 阅读模式是否开启。必须 collect（而不是直接读 viewModel.readerActive），
     // 否则进入/退出后菜单文案不会刷新。
     val readerActive by viewModel.readerActive.collectAsStateWithLifecycle()
+    // 长按命中的链接/图片；非 null 时弹上下文菜单
+    val hitTarget by viewModel.hitTarget.collectAsStateWithLifecycle()
 
     // 两个 BottomSheet 的展开状态：「更多」与「标签页」。
     // 面板本体是 ModalBottomSheet（自屏幕底部升起），这里只留一个布尔开关。
@@ -597,6 +608,65 @@ fun BrowserScreen(
         }
     }
 
+    // ---- 长按上下文菜单 ----
+    // 现代 Chromium WebView 不再自带链接/图片的长按菜单，长按正文只会进入
+    // 文字选择。菜单由我们自己实现：命中结果经 LingWebView → WebTabManager
+    // → ViewModel 送上来，这里按目标类型决定列出哪些动作。
+    //
+    // 用**贴着手指弹出的小浮层**而不是 ModalBottomSheet：上下文菜单是"对这一点
+    // 的动作"，用户在长按位置做选择，视线不该被拉到屏幕底部；菜单本身只有
+    // 2~4 行，占满整屏宽度也显得过重。
+    val target = hitTarget
+    if (target != null) {
+        Popup(
+            popupPositionProvider = remember(target) {
+                TouchAnchoredPositionProvider(target.anchorX, target.anchorY)
+            },
+            onDismissRequest = viewModel::dismissHitTarget,
+            // focusable：返回键与点击外部都能关掉，和系统菜单一致
+            properties = PopupProperties(focusable = true),
+        ) {
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                shadowElevation = 8.dp,
+                modifier = Modifier.widthIn(max = 240.dp),
+            ) {
+                Column(Modifier.padding(vertical = 4.dp)) {
+                    val copy: (String, String) -> Unit = { text, label ->
+                        val clipboard = context.getSystemService(ClipboardManager::class.java)
+                        clipboard?.setPrimaryClip(ClipData.newPlainText(label, text))
+                        viewModel.dismissHitTarget()
+                        viewModel.showMessage("已复制$label")
+                    }
+
+                    if (target.hasLink) {
+                        ContextMenuAction("在新标签页打开") {
+                            viewModel.openHitTarget(inNewTab = true)
+                        }
+                        ContextMenuAction("复制链接地址") {
+                            copy(target.url.orEmpty(), "链接地址")
+                        }
+                    }
+                    if (target.hasImage) {
+                        ContextMenuAction("打开图片") {
+                            viewModel.openHitTargetImage(inNewTab = false)
+                        }
+                        ContextMenuAction("在新标签页打开图片") {
+                            viewModel.openHitTargetImage(inNewTab = true)
+                        }
+                        ContextMenuAction("保存图片") {
+                            viewModel.saveHitTargetImage()
+                        }
+                        ContextMenuAction("复制图片地址") {
+                            copy(target.imageUrl.orEmpty(), "图片地址")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // ---- 下载确认 ----
     // 网页可以自行触发下载（弹窗广告、误触都会），因此不能静默开始。
     val pending = pendingDownload
@@ -856,6 +926,69 @@ private fun MoreGridItem(
         )
     }
 }
+
+/**
+ * 长按菜单里的一行动作。
+ *
+ * 竖排一行一个动词，行高按 40dp 左右压：上下文菜单只有 2~4 项，
+ * 做成图标网格或大卡片都会显得比"点上那一下"更重。
+ */
+@Composable
+private fun ContextMenuAction(
+    label: String,
+    onClick: () -> Unit,
+) {
+    Text(
+        text = label,
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSurface,
+        maxLines = 1,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+    )
+}
+
+/**
+ * 让长按菜单贴着手指弹出，并整体夹在窗口内。
+ *
+ * 返回的坐标是**窗口坐标**（Compose `PopupPositionProvider` 的约定），
+ * 与 [com.ling.browser.web.HitTarget.anchorX] 的算法一致 —— 两边都是
+ * "WebView 在窗口中的位置 + 触摸点"。
+ *
+ * 放不下时先整块往左挪，再考虑翻到手指上方：菜单盖住手指会挡掉用户
+ * 正在看的那一小块内容，还会让人以为没点中。
+ */
+private class TouchAnchoredPositionProvider(
+    private val anchorX: Int,
+    private val anchorY: Int,
+) : PopupPositionProvider {
+    override fun calculatePosition(
+        anchorBounds: IntRect,
+        windowSize: IntSize,
+        layoutDirection: LayoutDirection,
+        popupContentSize: IntSize,
+    ): IntOffset {
+        val margin = CONTEXT_MENU_MARGIN
+        val x = anchorX
+            .coerceAtMost(windowSize.width - popupContentSize.width - margin)
+            .coerceAtLeast(margin)
+        // 手指下方放不下就翻到上方；上方也放不下再夹回窗口内
+        val wantedY = if (anchorY + popupContentSize.height + margin > windowSize.height) {
+            anchorY - popupContentSize.height
+        } else {
+            anchorY
+        }
+        val y = wantedY
+            .coerceAtMost(windowSize.height - popupContentSize.height - margin)
+            .coerceAtLeast(margin)
+        return IntOffset(x, y)
+    }
+}
+
+/** 菜单与窗口边缘的最小间距（px）。 */
+private const val CONTEXT_MENU_MARGIN = 16
 
 /**
  * 「取目录」选择模式常量的取值（AOSP 定义 = 3）。

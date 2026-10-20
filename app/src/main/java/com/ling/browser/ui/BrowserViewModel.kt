@@ -25,6 +25,7 @@ import com.ling.browser.data.prefs.ReaderFontSize
 import com.ling.browser.data.prefs.SearchEngine
 import com.ling.browser.util.FaviconFetcher
 import com.ling.browser.util.UrlUtils
+import com.ling.browser.web.HitTarget
 import com.ling.browser.web.InternalPage
 import com.ling.browser.web.ReaderPage
 import com.ling.browser.web.ReaderResult
@@ -184,6 +185,10 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
         // 在当前标签打开 —— 网页那边只负责把输入交回来，不做任何判定。
         tabManager.onSearchRequested = { query ->
             navigate(UrlUtils.toUrl(query, settings.value.searchEngine))
+        }
+        // 长按链接/图片：只把命中结果交给 UI，菜单项由界面按目标类型拼
+        tabManager.onLongPress = { target ->
+            _hitTarget.value = target
         }
 
         // 订阅名单（启用中的域名并集）变化时同步给 WebTabManager 的拦截 lambda。
@@ -667,6 +672,48 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
             String(out.toByteArray(), Charsets.UTF_8)
         }
     }.getOrNull()
+
+    // ------------------------------------------------------------ 长按菜单
+
+    /**
+     * 长按网页内容命中的目标；非 null 时 UI 弹出上下文菜单。
+     *
+     * 放在 ViewModel 而不是 WebTabManager：菜单要不要显示、显示哪些项都取决于
+     * 当前标签状态（无痕、能否新开标签），而且转屏/重组后菜单不能凭空消失。
+     */
+    private val _hitTarget = MutableStateFlow<HitTarget?>(null)
+    val hitTarget: StateFlow<HitTarget?> = _hitTarget.asStateFlow()
+
+    /** 关掉长按菜单（下滑、点遮罩、点动作后都走这里）。 */
+    fun dismissHitTarget() {
+        _hitTarget.value = null
+    }
+
+    /**
+     * 打开长按命中的链接 / 媒体地址。
+     *
+     * [inNewTab] 为 true 时新开标签页 —— 长按链接最常见的意图就是"先留着，
+     * 别打断当前页面"，所以菜单把新标签页放在第一项。
+     */
+    fun openHitTarget(inNewTab: Boolean) {
+        val url = _hitTarget.value?.url ?: return
+        _hitTarget.value = null
+        if (inNewTab) newTab(url) else navigate(url)
+    }
+
+    /** 只打开图片本身（当前标签或新标签）。 */
+    fun openHitTargetImage(inNewTab: Boolean) {
+        val url = _hitTarget.value?.imageUrl ?: return
+        _hitTarget.value = null
+        if (inNewTab) newTab(url) else navigate(url)
+    }
+
+    /** 保存长按的图片：仍走下载确认框，不静默落盘。 */
+    fun saveHitTargetImage() {
+        val url = _hitTarget.value?.imageUrl ?: return
+        _hitTarget.value = null
+        requestDownload(url, mimeType = null, fileName = null)
+    }
 
     // ------------------------------------------------------------ 下载
 

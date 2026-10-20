@@ -4,6 +4,9 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.os.Build
 import android.util.AttributeSet
+import android.view.GestureDetector
+import android.view.HapticFeedbackConstants
+import android.view.MotionEvent
 import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.WebSettings
@@ -32,6 +35,74 @@ class LingWebView @JvmOverloads constructor(
         )
         isVerticalScrollBarEnabled = true
         overScrollMode = OVER_SCROLL_NEVER
+    }
+
+    /**
+     * 长按命中链接 / 图片 / 媒体资源时的回调，由 [com.ling.browser.web.WebTabManager]
+     * 设置。返回的菜单由 UI 层渲染。
+     *
+     * 为什么需要自己识别：现代 Chromium WebView **不带**链接与图片的长按菜单
+     * （旧版 WebKit 才有），长按正文只会进入文字选择。浏览器要给"新标签页打开 /
+     * 复制链接地址"这类动作，只能自己接管。
+     *
+     * 这里刻意不用 `setOnLongClickListener`：那个回调依赖 View 的长按计时器，
+     * 而 WebView 的触摸处理在 Chromium 内部（`AwContents`）另走一套手势识别，
+     * 两者并不总是对齐；基于 [onTouchEvent] 自己跑 [GestureDetector] 则与
+     * WebView 版本无关，行为可预测。
+     */
+    var onLongPress: ((HitTarget) -> Unit)? = null
+
+    /** 本次手势是否已弹出过长按菜单（用于吞掉随后的 ACTION_UP）。 */
+    private var longPressHandled = false
+
+    private val longPressDetector = GestureDetector(
+        context,
+        object : GestureDetector.SimpleOnGestureListener() {
+            // 必须返回 true：返回 false 时 GestureDetector 不再跟踪本次手势，
+            // onLongPress 永远不会触发。
+            override fun onDown(e: MotionEvent): Boolean = true
+
+            override fun onLongPress(e: MotionEvent) {
+                val hit = hitTestResult ?: return
+                // 命中目标为空（输入框、正文、电话/邮箱…）时什么都不做，
+                // 把长按留给 WebView 自己 —— 那里是文字选择，抢走会弄坏复制/粘贴。
+                val target = hitTargetOf(hit.type, hit.extra) ?: return
+                val handler = onLongPress ?: return
+
+                longPressHandled = true
+                // 把触摸点换算成**窗口坐标**，菜单据此贴着手指弹出。
+                // e.x / e.y 是 WebView 内部坐标，必须先加上它在窗口中的位置。
+                val origin = IntArray(2)
+                getLocationInWindow(origin)
+                handler(
+                    target.copy(
+                        anchorX = origin[0] + e.x.toInt(),
+                        anchorY = origin[1] + e.y.toInt(),
+                    ),
+                )
+                // 触感反馈要和系统长按一致，否则用户会以为没按上
+                performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+            }
+        },
+    )
+
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        // 只"观察"不消费：手势检测器拿一份事件，WebView 自己照常处理，
+        // 滚动、点击、双指缩放都不受影响（用户一滑动，检测器就会自行取消）。
+        longPressDetector.onTouchEvent(event)
+
+        if (event.actionMasked == MotionEvent.ACTION_UP && longPressHandled) {
+            // 吞掉长按之后的抬起：否则这次抬起会被 WebView 当成一次点击，
+            // 菜单刚弹出、页面就跳走了。
+            longPressHandled = false
+            return true
+        }
+        if (event.actionMasked == MotionEvent.ACTION_DOWN ||
+            event.actionMasked == MotionEvent.ACTION_CANCEL
+        ) {
+            longPressHandled = false
+        }
+        return super.onTouchEvent(event)
     }
 
     /**

@@ -106,6 +106,14 @@ class WebTabManager(private val context: Context) {
     var onDownloadRequested: ((url: String, mimeType: String?) -> Unit)? = null
 
     /**
+     * 长按网页中的链接 / 图片 / 媒体时的回调（由 UI 层弹上下文菜单）。
+     *
+     * 只转发，不做任何判定 —— 菜单要展示哪些动作取决于当前页面状态
+     * （能不能开新标签、当前是不是无痕），那只有 UI 层知道。
+     */
+    var onLongPress: ((HitTarget) -> Unit)? = null
+
+    /**
      * 主页搜索框提交的回调（查询串，可能是一句搜索词也可能是个网址）。
      *
      * 判定"网址还是搜索词"要 UrlUtils + 用户选的搜索引擎，那是 UI 层的事；
@@ -1024,6 +1032,15 @@ class WebTabManager(private val context: Context) {
             setOnTouchListener { v, _ ->
                 if (!v.isFocused) v.requestFocus()
                 false
+            }
+            // 长按链接/图片 → 上下文菜单。命中识别在 LingWebView 内部完成
+            // （它要跑自己的手势检测器），这里只把结果转给 UI 层。
+            //
+            // 转发目标必须写成 this@WebTabManager：lambda 里裸写 onLongPress
+            // 会解析成 LingWebView 自己的同名字段 —— 等于让回调调用自己，
+            // 弹出菜单时栈溢出。
+            onLongPress = { target ->
+                this@WebTabManager.onLongPress?.invoke(target)
             }
             // 注意：在 LingWebView 的 apply 作用域里，裸写 `settings` 会解析成
             // WebView.settings（WebSettings），必须显式限定到本类的字段。
