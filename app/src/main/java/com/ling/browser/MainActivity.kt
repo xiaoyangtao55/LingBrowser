@@ -383,7 +383,10 @@ private fun LingApp(viewModel: BrowserViewModel) {
                     onResume = viewModel::resumeDownload,
                     onRemove = { entry, deleteFile -> viewModel.removeDownload(entry, deleteFile) },
                     onClearAll = viewModel::clearDownloads,
-                    onOpen = { entry -> openDownloadedFile(context, entry) },
+                    onOpen = { entry ->
+                        // 打开失败时明确说一声，否则用户只觉得"点了没反应"
+                        openDownloadedFile(context, entry)?.let(viewModel::showMessage)
+                    },
                     onBack = pop,
                 )
 
@@ -554,28 +557,161 @@ private sealed interface Route {
  *
  * 必须走 FileProvider：Android 7 起直接传 file:// 给别的应用会抛
  * FileUriExposedException。这里用既有的 `${applicationId}.fileprovider`
- * （见 AndroidManifest），它已声明了 files-path/downloads 目录。
+ * （见 AndroidManifest），它已声明了 files-path/downloads、external-files-path
+ * 与公共 Download 目录。
  *
- * 取不到能处理该类型的应用（没有 MIME 且系统也猜不出）时返回 false，
- * 由调用方决定是否提示。
+ * 三条路径都要覆盖，缺一条就会表现为"点了没反应"：
+ *  1. `content://` —— 公共下载目录（Android 10+ 走 MediaStore），**不能**再交给
+ *     FileProvider（它只收文件路径），原样递给系统；
+ *  2. 文件路径 —— 应用私有目录 / 旧版公共目录，走 FileProvider；
+ *  3. 记录里没有路径或路径已失效 —— 按文件名在几个下载目录与 MediaStore 里找回。
+ *     早期版本写库时没存 localPath，这类老记录只能靠这一步。
+ *
+ * 返回 null 表示已成功拉起；否则返回给用户看的失败原因。
  */
-private fun openDownloadedFile(context: android.content.Context, entry: DownloadEntry): Boolean {
-    val path = entry.localPath ?: return false
-    val file = java.io.File(path)
-    if (!file.exists()) return false
+private fun openDownloadedFile(
+    context: android.content.Context,
+    entry: DownloadEntry,
+): String? {
+    val uri = resolveOpenUri(context, entry).getOrElse {
+        return it.message ?: "无法打开这个文件"
+    }
 
-    return runCatching {
-        val uri = androidx.core.content.FileProvider.getUriForFile(
-            context,
-            "${context.packageName}.fileprovider",
-            file,
-        )
-        val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
-            setDataAndType(uri, entry.mimeType ?: "*/*")
-            addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
+    val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+        setDataAndType(uri, mimeTypeFor(context, entry, uri))
+        addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+
+    return try {
         context.startActivity(intent)
-        true
-    }.getOrDefault(false)
+        null
+    } catch (e: android.content.ActivityNotFoundException) {
+        // 系统里没有任何应用认领这个类型（常见于 .bin / 冷门后缀）
+        "没有可以打开这个文件的应用"
+    } catch (e: SecurityException) {
+        "没有权限打开这个文件"
+    }
+}
+
+/**
+ * 找出该下载条目对应的可分享 URI。
+ *
+ * 先用记录里的 [DownloadEntry.localPath]；它为空或指向的文件已经不存在时，
+ * 依次到应用私有下载目录、旧版公共下载目录、MediaStore 里按文件名找。
+ * 全部落空才判定"文件已不存在"。
+ */
+private fun resolveOpenUri(
+    context: android.content.Context,
+    entry: DownloadEntry,
+): Result<android.net.Uri> {
+    val recorded = entry.localPath
+    if (!recorded.isNullOrBlank()) {
+        if (recorded.startsWith("content://")) {
+            return Result.success(android.net.Uri.parse(recorded))
+        }
+        val file = java.io.File(recorded)
+        if (file.exists()) return shareUri(context, file)
+    }
+
+    val name = entry.fileName.takeIf { it.isNotBlank() }
+    if (name != null) {
+        downloadDirs(context).firstNotNullOfOrNull { dir ->
+            java.io.File(dir, name).takeIf { it.exists() }
+        }?.let { return shareUri(context, it) }
+
+        mediaStoreDownloadUri(context, name)?.let { return Result.success(it) }
+    }
+
+    // 提示里带上文件名：同一个页面里点错行时，用户一眼能看出点的是哪一条
+    return Result.failure(
+        IllegalStateException("文件已不存在，可能被删除了" + if (name != null) "（$name）" else ""),
+    )
+}
+
+/** 文件路径 → FileProvider 的 content URI；不在已声明的目录里时给出原因。 */
+private fun shareUri(
+    context: android.content.Context,
+    file: java.io.File,
+): Result<android.net.Uri> = runCatching {
+    androidx.core.content.FileProvider.getUriForFile(
+        context,
+        "${context.packageName}.fileprovider",
+        file,
+    )
+}.recoverCatching {
+    throw IllegalStateException("这个文件所在的位置无法共享给其它应用")
+}
+
+/** 文件可能落地的几个目录，顺序即查找优先级。 */
+private fun downloadDirs(context: android.content.Context): List<java.io.File> = listOfNotNull(
+    // 内建下载器默认落点：/Android/data/<pkg>/files/Download
+    context.getExternalFilesDir(android.os.Environment.DIRECTORY_DOWNLOADS),
+    // 外部存储不可用时的兜底落点（见 DownloadDestination.resolvePrivate）
+    java.io.File(context.filesDir, "downloads"),
+    // Android 9 及以下的公共下载目录
+    android.os.Environment.getExternalStoragePublicDirectory(
+        android.os.Environment.DIRECTORY_DOWNLOADS,
+    ),
+)
+
+/**
+ * 在 MediaStore 的公共下载集合里按文件名找条目（Android 10+）。
+ *
+ * 这个兜底专治"文件明明在公共下载目录、记录里却没存路径"——那类条目既不能
+ * 用 `File.exists()` 判断（分区存储下路径不可见），也不能走 FileProvider。
+ */
+private fun mediaStoreDownloadUri(
+    context: android.content.Context,
+    fileName: String,
+): android.net.Uri? {
+    if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q) return null
+    val collection = android.provider.MediaStore.Downloads.getContentUri(
+        android.provider.MediaStore.VOLUME_EXTERNAL_PRIMARY,
+    )
+    return runCatching {
+        context.contentResolver.query(
+            collection,
+            arrayOf(android.provider.MediaStore.Downloads._ID),
+            "${android.provider.MediaStore.Downloads.DISPLAY_NAME} = ?",
+            arrayOf(fileName),
+            null,
+        )?.use { c ->
+            if (c.moveToFirst()) android.net.Uri.withAppendedPath(collection, c.getLong(0).toString())
+            else null
+        }
+    }.getOrNull()
+}
+
+/**
+ * 推断打开文件时该用的 MIME。
+ *
+ * 优先用下载时记录的类型，但 `application/octet-stream` 等于"不知道"，不能直接
+ * 用它去 ACTION_VIEW —— 几乎没有应用认领这个类型，表现就是点了没反应。这类
+ * 情况退回查表：`content://` 先问 ContentResolver，其余按文件名的后缀查 MimeTypeMap。
+ */
+private fun mimeTypeFor(
+    context: android.content.Context,
+    entry: DownloadEntry,
+    uri: android.net.Uri,
+): String {
+    val recorded = entry.mimeType
+        ?.takeIf { it.isNotBlank() && it != "application/octet-stream" }
+    if (recorded != null) return recorded
+
+    if (uri.scheme == "content") {
+        runCatching { context.contentResolver.getType(uri) }
+            .getOrNull()
+            ?.takeIf { it.isNotBlank() }
+            ?.let { return it }
+    }
+
+    // 后缀从文件名取，不能从 URI 取：content:// 的最后一段是数字 ID
+    val ext = entry.fileName.substringAfterLast('.', "")
+    if (ext.isNotEmpty()) {
+        android.webkit.MimeTypeMap.getSingleton()
+            .getMimeTypeFromExtension(ext.lowercase())
+            ?.let { return it }
+    }
+    return "*/*"
 }

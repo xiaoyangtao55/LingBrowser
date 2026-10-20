@@ -236,28 +236,33 @@ private fun BookmarkRow(
                 FolderTag(bookmark.folder)
                 Spacer(Modifier.width(4.dp))
             }
-            IconButton(onClick = { menu = true }) {
-                Icon(
-                    LingIcons.MoreVert,
-                    contentDescription = "更多",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(20.dp),
-                )
-            }
-            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                DropdownMenuItem(
-                    text = { Text("重命名") },
-                    onClick = { renaming = true; menu = false },
-                )
-                DropdownMenuItem(
-                    text = { Text("移到文件夹…") },
-                    onClick = { showMove = true; menu = false },
-                )
-                HorizontalDivider()
-                DropdownMenuItem(
-                    text = { Text("删除") },
-                    onClick = { confirmDelete = true; menu = false },
-                )
+            // 菜单和按钮一起包进 Box：DropdownMenu 以**最近的父布局节点**为锚点定位。
+            // 直接把 DropdownMenu 放在 Row 末尾，锚点就成了整行（满宽），菜单会从
+            // 屏幕左边缘展开；包一层 Box 后锚点是这个按钮区域，菜单才会贴着右侧。
+            Box {
+                IconButton(onClick = { menu = true }) {
+                    Icon(
+                        LingIcons.MoreVert,
+                        contentDescription = "更多",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
+                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                    DropdownMenuItem(
+                        text = { Text("重命名") },
+                        onClick = { renaming = true; menu = false },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("移到文件夹…") },
+                        onClick = { showMove = true; menu = false },
+                    )
+                    HorizontalDivider()
+                    DropdownMenuItem(
+                        text = { Text("删除") },
+                        onClick = { confirmDelete = true; menu = false },
+                    )
+                }
             }
         },
     )

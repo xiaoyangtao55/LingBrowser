@@ -151,7 +151,14 @@ private fun DownloadRow(
     onOpen: () -> Unit,
 ) {
     var confirmRemove by remember { mutableStateOf(false) }
-    val canOpen = entry.status == DownloadStatus.SUCCESS && entry.localPath != null
+    // 只要「已完成」就允许点击。
+    //
+    // 这里刻意**不再**要求 localPath 非空：早期版本写库时没存路径、或记录来自
+    // 系统下载器还没回查，都会出现「状态已完成但没有路径」。以前把 localPath
+    // 当作可点击的前提，结果是点击连涟漪都没有 —— 用户只看到"点了没反应"，
+    // 也不知道是文件没了还是功能坏了。现在统一交给打开逻辑，由它按文件名兜底
+    // 查找，找不到再明确提示。
+    val canOpen = entry.status == DownloadStatus.SUCCESS
     // 进行中（RUNNING）或已暂停（PAUSED）都需要操作按钮：
     // RUNNING → 暂停 + 取消；PAUSED → 恢复 + 取消
     val hasActiveControls = entry.status == DownloadStatus.RUNNING ||

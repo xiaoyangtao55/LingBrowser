@@ -3,6 +3,8 @@ package com.ling.browser.ui.screens
 import com.ling.browser.ui.theme.LingIcons
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.graphics.Color as AndroidColor
 import android.net.Uri
@@ -634,7 +636,18 @@ fun BrowserScreen(
                 }
             },
             confirmButton = {
-                TextButton(onClick = viewModel::confirmPendingDownload) { Text("下载") }
+                Row {
+                    // 复制链接放在「下载」旁边而不是塞进正文：两个都是这个对话框的
+                    // 主操作，并且复制后对话框**不关闭** —— 用户可能还想顺手下载。
+                    TextButton(onClick = {
+                        val clipboard = context.getSystemService(ClipboardManager::class.java)
+                        clipboard?.setPrimaryClip(
+                            ClipData.newPlainText("下载链接", pending.url),
+                        )
+                        viewModel.showMessage("已复制下载链接")
+                    }) { Text("复制链接") }
+                    TextButton(onClick = viewModel::confirmPendingDownload) { Text("下载") }
+                }
             },
             dismissButton = {
                 TextButton(onClick = viewModel::dismissPendingDownload) { Text("取消") }

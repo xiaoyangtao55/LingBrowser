@@ -10,4 +10,9 @@
     <external-files-path
         name="ext"
         path="." />
+    <!-- Android 9 及以下的公共下载目录：下载完成后的文件在这里，
+         打开文件同样要通过 FileProvider 才能交给别的应用 -->
+    <external-path
+        name="public_downloads"
+        path="Download/" />
 </paths>
