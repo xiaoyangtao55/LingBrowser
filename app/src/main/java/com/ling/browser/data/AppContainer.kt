@@ -4,6 +4,7 @@ import android.content.Context
 import com.ling.browser.data.db.LingDatabase
 import com.ling.browser.data.prefs.LingSettings
 import com.ling.browser.data.prefs.SettingsStore
+import com.ling.browser.data.repo.BlockListRepository
 import com.ling.browser.data.repo.BookmarkRepository
 import com.ling.browser.data.repo.DownloadRepository
 import com.ling.browser.data.repo.HistoryRepository
@@ -77,4 +78,15 @@ class AppContainer(context: Context) {
     )
 
     val session: SessionRepository = SessionRepository(database)
+
+    /**
+     * 广告拦截的订阅名单。
+     *
+     * 域名表从"APK 内置"升级成"可订阅"之后，大名单（十几万条）由用户从网址
+     * 或本地文件导入 —— 那些文件太大，塞不进 DataStore，因此落应用私有目录、
+     * 由这个仓库自己管（见 [BlockListRepository]）。
+     *
+     * 构造即读回磁盘，`enabledDomains` 是启用中订阅的并集，供 WebView 拦截 lambda 查表。
+     */
+    val blockList: BlockListRepository = BlockListRepository(appContext)
 }

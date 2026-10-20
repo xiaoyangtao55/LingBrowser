@@ -535,6 +535,9 @@ fun BrowsingSettingsScreen(
     onBlockImages: (Boolean) -> Unit,
     onAdBlock: (Boolean) -> Unit,
     onOpenAdBlockRules: () -> Unit,
+    /** 已导入的订阅名单份数，用来给出"有没有订阅"的一眼判据。 */
+    blockSubscriptionCount: Int,
+    onOpenBlockSubscriptions: () -> Unit,
     onOpenLinksExternal: (Boolean) -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
@@ -591,6 +594,19 @@ fun BrowsingSettingsScreen(
                         "${settings.adBlockRules.size} 条自定义域名规则"
                     },
                     onClick = onOpenAdBlockRules,
+                )
+            }
+            item {
+                SettingRow(
+                    icon = LingIcons.Public,
+                    title = "订阅名单",
+                    // 说清"内置保底 + 订阅增强"，避免用户以为不订阅就没有拦截
+                    subtitle = if (blockSubscriptionCount == 0) {
+                        "内置规则保底；从网址或本地导入 Hosts / 域名名单可增强"
+                    } else {
+                        "已导入 $blockSubscriptionCount 份名单，可导入、更新或停用"
+                    },
+                    onClick = onOpenBlockSubscriptions,
                 )
             }
             item {

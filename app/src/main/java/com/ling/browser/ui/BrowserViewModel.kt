@@ -9,6 +9,8 @@ import com.ling.browser.LingApplication
 import com.ling.browser.data.db.Bookmark
 import com.ling.browser.data.db.DownloadEntry
 import com.ling.browser.data.db.HistoryEntry
+import com.ling.browser.data.repo.BlockSubscription
+import com.ling.browser.data.repo.ImportResult
 import com.ling.browser.data.repo.MAX_BACKUP_BYTES
 import com.ling.browser.data.repo.deriveFolders
 import com.ling.browser.data.repo.parseNetscapeHtml
@@ -82,6 +84,14 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
     val history: StateFlow<List<HistoryEntry>> = container.history.history
     val downloads: StateFlow<List<DownloadEntry>> = container.downloads.downloads
 
+    /**
+     * 广告拦截的订阅名单（见 [com.ling.browser.data.repo.BlockListRepository]）。
+     *
+     * 启用中的域名并集不在这里暴露 —— 它直接由上面 init 里的 collect 送进
+     * [WebTabManager]，UI 只需要列表本身（条数、启停、更新时间）。
+     */
+    val blockSubscriptions: StateFlow<List<BlockSubscription>> = container.blockList.subscriptions
+
     /** 地址栏当前文本（与真实 URL 解耦：用户编辑时不被页面跳转覆盖）。 */
     private val _addressText = MutableStateFlow("")
     val addressText: StateFlow<String> = _addressText.asStateFlow()
@@ -121,6 +131,15 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
         // 在当前标签打开 —— 网页那边只负责把输入交回来，不做任何判定。
         tabManager.onSearchRequested = { query ->
             navigate(UrlUtils.toUrl(query, settings.value.searchEngine))
+        }
+
+        // 订阅名单（启用中的域名并集）变化时同步给 WebTabManager 的拦截 lambda。
+        // 与设置同理：拦截发生在 shouldInterceptRequest 里现读，改完立即生效，
+        // 不需要重建 WebView。首次发射即把磁盘上已导入的名单接入（仓库启动时已读回）。
+        viewModelScope.launch {
+            container.blockList.enabledDomains.collect { domains ->
+                tabManager.applyBlockSubscriptions(domains)
+            }
         }
 
         // 启动时恢复上次的会话；没有可恢复的内容才开一个主页。
@@ -908,6 +927,60 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
     fun removeAdBlockRule(rule: String) {
         val current = settings.value.adBlockRules
         io { container.settings.setAdBlockRules(current - rule) }
+    }
+
+    // ------------------------------------------------------------ 广告拦截订阅
+
+    /**
+     * 从网址导入一份订阅名单（Hosts / AdGuard 域名格式均可）。
+     *
+     * 导入要拉网络、写十几万行，结果只能经 [_message] 回报 —— 这是长耗时操作，
+     * 静默完成会让用户以为"点了没反应"。
+     */
+    fun importBlockSubscriptionFromUrl(url: String) = viewModelScope.launch {
+        reportBlockImport(container.blockList.importFromUrl(url))
+    }
+
+    /** 从本地文件导入。用 SAF 选文件，**不需要**存储权限。 */
+    fun importBlockSubscriptionFromLocal(uri: Uri) = viewModelScope.launch {
+        reportBlockImport(container.blockList.importFromLocal(uri))
+    }
+
+    /**
+     * 重新拉取网址订阅。
+     *
+     * 本地导入的名单无法在线更新（见 [BlockSubscription.url]）：仓库会拒绝，
+     * 这里把原因如实提示出来，而不是静默什么都不做。
+     */
+    fun refreshBlockSubscription(id: String) = viewModelScope.launch {
+        reportBlockImport(container.blockList.refresh(id), verb = "更新")
+    }
+
+    /** 启用 / 停用一份订阅。停用只是不参与查表，名单文件仍保留。 */
+    fun setBlockSubscriptionEnabled(id: String, enabled: Boolean) = io {
+        container.blockList.setEnabled(id, enabled)
+    }
+
+    /** 删除一份订阅（连同它在私有目录里的名单文件）。 */
+    fun removeBlockSubscription(id: String) = io { container.blockList.remove(id) }
+
+    /**
+     * 把一次导入/更新的结果转成一句话提示。
+     *
+     * 如实报出"条数 / 跳过多少行 / 是否被截断"：一份大名单里混着元素规则、
+     * 例外、路径规则是常态，用户看到"文件里 11 万行、只生效 3 千条"若没有
+     * 解释，会以为功能坏了。
+     */
+    private fun reportBlockImport(result: ImportResult, verb: String = "导入") {
+        _message.value = when (result) {
+            is ImportResult.Ok -> buildString {
+                val sub = result.subscription
+                append("已$verb「${sub.name}」：${sub.count} 条域名")
+                if (sub.skipped > 0) append("，跳过 ${sub.skipped} 行")
+                if (sub.truncated) append("（已达上限，仅保留前 ${sub.count} 条）")
+            }
+            is ImportResult.Failed -> "${verb}失败：${result.reason}"
+        }
     }
     fun setDynamicColor(on: Boolean) = io { container.settings.setDynamicColor(on) }
 

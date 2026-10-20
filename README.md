@@ -36,7 +36,7 @@
 | 网页强制夜间 | **跟随夜间模式暗化**（默认开，可关）；Android 10+ 用 `setForceDark`/`setAlgorithmicDarkeningAllowed`，切换时立即注入/移除兜底 CSS，组件同步切换 |
 | 电脑模式 | 切换为桌面版 Safari UA，触发站点桌面布局（有顶部提示条） |
 | 无图模式 | 关闭图片加载，省流量 |
-| 广告拦截 | 域名级拦截常见广告/跟踪域名与路径，`shouldInterceptRequest` 资源级拦截；主文档永不误杀；**支持自定义规则**（二级菜单增删域名），默认开 |
+| 广告拦截 | 域名级拦截常见广告/跟踪域名与路径，`shouldInterceptRequest` 资源级拦截；主文档永不误杀；**内置精简表（140 条）** 开箱即用；**支持自定义规则**（二级菜单增删域名）；**支持订阅名单**（从网址或本地导入 Hosts / AdGuard 域名格式），默认开 |
 | JavaScript 开关 | 可关闭以提速、去干扰 |
 | 自定义主页 | 填入任意网址；**留空则使用「翎」的内置主页** |
 | 标签页面板高度 | 全屏 / 一半 两档，默认一半；面板半透明，可透出后方网页 |
@@ -99,6 +99,7 @@ LingBrowser/
     ├── check_bookmark_backup.py   # 书签导入导出校验
     ├── check_ux_fixes.py          # 焦点/书签编辑/图标/文件上传校验
     ├── check_reader.py            # 阅读模式提取与接线校验
+    ├── check_adblock_subscription.py # 广告拦截订阅（格式兼容/存储/热路径/接线）校验
     └── check_client_thread.py     # 校验 shouldInterceptRequest 不碰 WebView（后台线程会闪退）
 ```
 
@@ -789,6 +790,41 @@ JS 是**字符串常量**嵌在 Kotlin 里，Kotlin 编译器完全不检查它 
 
 自定义规则同样走 **lambda 现读**，改完立即生效。
 
+#### 订阅名单：内置精简表 + 可订阅的大名单
+
+内置表只是"开箱能用"的起点 —— 广告域名天天在长，光靠内置只能等发版。因此
+域名表从"APK 内置"升级成**可订阅**：内置表只保留一批核心广告/跟踪域名
+（`AdBlocker.builtinCount`，140 条），真正的大名单由用户从**网址**或**本地文件**
+导入（`BlockListRepository` 负责存储，`BlockRules` 负责解析）。
+
+三种最常见的写法被**归一成同一种裸域名集合**：
+
+- **Hosts**：`0.0.0.0 ad.doubleclick.net` / `127.0.0.1 mm.admob.com` —— 只取
+  第二个字段（域名），IP 丢弃（我们不做 DNS 劫持，语义只是"拦这个域名的请求"）。
+- **AdGuard 域名规则**：`||ad.doubleclick.net^` —— 去掉 `||` 与 `^`。
+- **AdGuard domains-only**：一行一个裸域名 `ad.doubleclick.net`。
+
+三者语义统一为"命中即拦，且任意深度子域名被兜住"，与内置表、自定义规则完全
+一致。元素规则（`##`）、例外（`@@`）、路径规则需要的是另一套引擎（且例外还会
+与内置表打架），一律**静默跳过并计数**——UI 如实报出"生效多少条、跳过多少行"，
+否则用户看到"文件 20 万行、只生效 3 千条"会以为功能坏了。
+
+存储上有几处刻意的取舍：
+
+- 一份订阅拆成 `adblock/<id>.meta` + `<id>.domains` 两个文件：元信息（启停、
+  条数）频繁改，域名列表几十年写一次，合并会让"点一下开关"变成"重写十几万行"。
+- 内存里存两份副本：`id → 域名集合` 与**启用中订阅的并集**。拦截发生在
+  `shouldInterceptRequest`（每个子资源一次）的热路径，那里绝不能现并十万条集合
+  ——并集在导入/启停/删除时算好，热路径只做集合查询。
+- 网址订阅用网址哈希当 id：同一网址重复导入即**更新**，不在列表里堆重复条目。
+- 本地导入**不持久化** SAF 的 `content://` 地址：那条读权限只在本次会话有效，
+  留着它只会让下次"更新"抛权限异常。本地名单想更新就重新选一次文件。
+- 单源硬上限 8 MiB / 20 万条：超大名单直接报"已放弃导入"，避免畸形文件打爆内存。
+
+> 更新方式是**手动**的：订阅页每条网址订阅有一个「更新」按钮，不引入后台周期性
+> 拉取（省电、可控，也与"极简"保持一致）。本地导入的名单没有稳定的远端地址，
+> 因此不显示更新按钮。
+
 ### 3.9 资源嗅探：注入 JS 读 DOM，不改页面
 
 与阅读模式同一套注入套路（`evaluateJavascript` 跑一段字符串脚本），但语义
@@ -1208,6 +1244,7 @@ Android 13+ 的**主题化图标** —— 系统读 `ic_launcher_monochrome` 单
 | `tools/check_ux_fixes.py` | 校验地址栏真的释放焦点、书签重命名/删除确认、图标存储与迁移不丢数据、网页 `<input type=file>` 走 `onShowFileChooser` |
 | `tools/check_reader.py` | 校验阅读模式提取脚本语法与算法（用 Node 真实运行）、以及各层接线完整 |
 | `tools/check_client_thread.py` | 校验 `shouldInterceptRequest` 方法体不引用 WebView —— 它跑在后台线程，`view.url` 会触发 `checkThread()` 抛异常并让进程闪退 |
+| `tools/check_adblock_subscription.py` | 校验订阅名单：解析器是纯函数、Hosts/AdGuard 三格式归一、元素/例外/路径规则跳过并计数、双文件存储、gzip 魔数兜底、拦截热路径读预合并集、各层接线完整 |
 | `tools/check_junit_args.py` | 抓 JUnit 参数顺序写反（应为 `(message, value)`） |
 | `tools/check_workflow.py` | 校验 GitHub Actions YAML 结构 |
 | `tools/check_signing.py` | 抓签名配置里"空字符串被当成路径"的经典崩溃 |
@@ -1225,6 +1262,7 @@ python tools/check_dead_code.py
 python tools/check_download_bytes.py
 python tools/check_download_progress.py
 python tools/check_client_thread.py
+python tools/check_adblock_subscription.py
 python tools/check_icon_fidelity.py
 
 # 图标管线（改了图标才需要，产物会写回 LingIcons.kt）

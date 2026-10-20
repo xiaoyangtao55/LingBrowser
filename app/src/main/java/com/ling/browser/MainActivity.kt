@@ -38,6 +38,7 @@ import com.ling.browser.data.db.DownloadEntry
 import com.ling.browser.data.prefs.NightMode
 import com.ling.browser.ui.BrowserViewModel
 import com.ling.browser.ui.screens.AdBlockRulesScreen
+import com.ling.browser.ui.screens.AdBlockSubscriptionsScreen
 import com.ling.browser.ui.screens.BookmarksScreen
 import com.ling.browser.ui.screens.SniffedResourcesScreen
 import com.ling.browser.ui.screens.BrowserScreen
@@ -53,6 +54,7 @@ import com.ling.browser.ui.screens.PrivacySettingsScreen
 import com.ling.browser.ui.screens.SearchHomeSettingsScreen
 import com.ling.browser.ui.screens.SettingsGroup
 import com.ling.browser.ui.theme.LingTheme
+import com.ling.browser.web.AdBlocker
 
 /**
  * 唯一的 Activity。
@@ -419,16 +421,21 @@ private fun LingApp(viewModel: BrowserViewModel) {
                     onBack = pop,
                 )
 
-                Route.SettingsBrowsing -> BrowsingSettingsScreen(
-                    settings = settings,
-                    onForceDark = viewModel::setForceDark,
-                    onBlockImages = viewModel::setBlockImages,
-                    onJavaScript = viewModel::setJavaScript,
-                    onAdBlock = viewModel::setAdBlockEnabled,
-                    onOpenAdBlockRules = { push(Route.AdBlockRules) },
-                    onOpenLinksExternal = viewModel::setOpenLinksInExternalApp,
-                    onBack = pop,
-                )
+                Route.SettingsBrowsing -> {
+                    val subs by viewModel.blockSubscriptions.collectAsStateWithLifecycle()
+                    BrowsingSettingsScreen(
+                        settings = settings,
+                        onForceDark = viewModel::setForceDark,
+                        onBlockImages = viewModel::setBlockImages,
+                        onJavaScript = viewModel::setJavaScript,
+                        onAdBlock = viewModel::setAdBlockEnabled,
+                        onOpenAdBlockRules = { push(Route.AdBlockRules) },
+                        blockSubscriptionCount = subs.size,
+                        onOpenBlockSubscriptions = { push(Route.AdBlockSubscriptions) },
+                        onOpenLinksExternal = viewModel::setOpenLinksInExternalApp,
+                        onBack = pop,
+                    )
+                }
 
                 Route.SettingsDownload -> DownloadSettingsScreen(
                     settings = settings,
@@ -456,6 +463,22 @@ private fun LingApp(viewModel: BrowserViewModel) {
                     onRemove = viewModel::removeAdBlockRule,
                     onBack = pop,
                 )
+
+                Route.AdBlockSubscriptions -> {
+                    val subs by viewModel.blockSubscriptions.collectAsStateWithLifecycle()
+                    AdBlockSubscriptionsScreen(
+                        subscriptions = subs,
+                        // 内置表条数是编译期常量（见 AdBlocker.BLOCKED_DOMAINS），
+                        // 不必经 ViewModel 绕一圈。
+                        builtinCount = AdBlocker.builtinCount,
+                        onImportUrl = viewModel::importBlockSubscriptionFromUrl,
+                        onImportLocal = viewModel::importBlockSubscriptionFromLocal,
+                        onRefresh = viewModel::refreshBlockSubscription,
+                        onToggle = viewModel::setBlockSubscriptionEnabled,
+                        onRemove = viewModel::removeBlockSubscription,
+                        onBack = pop,
+                    )
+                }
 
                 Route.SniffedResources -> {
                     val sniff by viewModel.sniffResults.collectAsStateWithLifecycle()
@@ -516,6 +539,7 @@ private sealed interface Route {
     data object SettingsBackup : Route
     data object About : Route
     data object AdBlockRules : Route
+    data object AdBlockSubscriptions : Route
     data object SniffedResources : Route
 }
 

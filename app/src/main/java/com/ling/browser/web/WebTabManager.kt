@@ -43,6 +43,25 @@ class WebTabManager(private val context: Context) {
     private var settings: LingSettings = LingSettings()
 
     /**
+     * 订阅名单的域名并集（见 [com.ling.browser.data.repo.BlockListRepository.enabledDomains]）。
+     *
+     * 由 UI 层经 [applyBlockSubscriptions] 注入 —— web 层不认识订阅仓库，
+     * 从而保持"web 不依赖 data"的既有分层（与 [onVisited] 等回调同理）。
+     */
+    private var subscriptionDomains: Set<String> = emptySet()
+
+    /**
+     * 自定义规则 + 订阅域名的**并集**，预先算好供拦截热路径直接查表。
+     *
+     * 为什么不在这条 lambda 里现并：拦截发生在 `shouldInterceptRequest`，
+     * 那是**每个子资源**都要跑一次的热路径，而订阅名单可能有十万条 ——
+     * 每次请求都并一遍等于白白烧 CPU、还分配一堆临时集合。
+     * 改动只发生在设置变化（[applySettings]）与订阅启停（[applyBlockSubscriptions]）
+     * 这两个低频时刻，算一次就够了。
+     */
+    private var mergedBlockRules: Set<String> = settings.adBlockRules
+
+    /**
      * tabId -> 已提取的正文。
      *
      * 为什么要缓存：进入阅读视图后，页面的 DOM 已经被替换掉了，
@@ -167,6 +186,8 @@ class WebTabManager(private val context: Context) {
     /** 应用设置；已存在的 WebView 立即生效。 */
     fun applySettings(newSettings: LingSettings) {
         settings = newSettings
+        // 自定义规则可能变了，重算查表并集（见 mergedBlockRules）。
+        rebuildBlockRules()
         // ⚠️ 必须是 shouldDarkenPages()（forceDarkWebPages && 夜间模式已解析为深色），
         // 不能只用 resolvedDark()：那等于跳过「网页跟随夜间模式暗化」这个开关本身。
         // 后果很直观 —— 关掉这个开关也是一次设置变化，会立刻把网页重新暗化一次，
@@ -177,6 +198,30 @@ class WebTabManager(private val context: Context) {
             val incognito = _tabs.value.firstOrNull { it.id == id }?.isIncognito ?: false
             wv.applySettings(newSettings, incognito, darkTheme)
         }
+    }
+
+    /**
+     * 注入订阅名单的域名并集，并重算拦截查表用的并集。
+     *
+     * 由 [com.ling.browser.ui.BrowserViewModel] 订阅
+     * [com.ling.browser.data.repo.BlockListRepository.enabledDomains] 后调用：
+     * 导入 / 启停 / 删除 / 更新订阅都会让那个流发新值，这里跟着重算一次，
+     * 拦截 lambda 读的 [mergedBlockRules] 因此立即生效，无需重建 WebView。
+     */
+    fun applyBlockSubscriptions(domains: Set<String>) {
+        subscriptionDomains = domains
+        rebuildBlockRules()
+    }
+
+    /** 重算自定义规则 + 订阅域名的并集（低频调用，见 [mergedBlockRules]）。 */
+    private fun rebuildBlockRules() {
+        mergedBlockRules =
+            if (subscriptionDomains.isEmpty()) {
+                // 没有订阅时直接复用设置里那份集合，不复制 —— 绝大多数用户不会导入订阅。
+                settings.adBlockRules
+            } else {
+                settings.adBlockRules + subscriptionDomains
+            }
     }
 
     /**
@@ -1189,7 +1234,9 @@ class WebTabManager(private val context: Context) {
                 // 广告拦截开关：与 openExternal 同理用 lambda（动态读设置），
                 // 传值会让开关"改完要重启才生效"。默认开。
                 adBlockEnabled = { this@WebTabManager.settings.adBlockEnabled },
-                adBlockRules = { this@WebTabManager.settings.adBlockRules },
+                // 自定义规则 + 订阅域名的并集：读的是**预先算好**的那一份
+                // （见 mergedBlockRules），不在热路径里现并十万条集合。
+                adBlockRules = { this@WebTabManager.mergedBlockRules },
             )
             setDownloadListener { url, _, _, mimeType, _ ->
                 onDownloadRequested?.invoke(url, mimeType)

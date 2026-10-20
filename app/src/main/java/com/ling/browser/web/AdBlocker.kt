@@ -20,15 +20,29 @@ package com.ling.browser.web
  *    接近当前 APK 的 1.4 MB，与极简定位冲突。而内嵌的域名表只有几十 KB 源码。
  * 2. **命中面**：拦截广告**子请求**（banner、脚本、跟踪像素）靠域名级规则
  *    已经能去掉绝大多数广告，元素级只是再补上"页面里残留的空位"。
- * 3. **无网络更新**：域名表随 APK 发布，不依赖在线订阅源 —— 离线也能用，
- *    也避免"订阅源挂了广告拦截就失效"的依赖。
+ * 3. **离线可用**：内置表随 APK 发布，不订阅任何源也能用；订阅（见下）是
+ *    可选的增强 —— 不可用时只是回到内置表，不会让广告拦截整个失效。
+ *
+ * ## 域名规则从哪来
+ *
+ * 共三份，语义完全一致（命中即拦，且任意深度子域名被兜住）：
+ *
+ *  1. [BLOCKED_DOMAINS]：APK 内置的**精简表**。开箱即用，但广告域名是天天
+ *     在长的，光靠内置表只能等发版；
+ *  2. **用户自定义规则**（设置里手输，见 [normalizeRule]）；
+ *  3. **订阅名单**（导入 Hosts / AdGuard domains-only 的网址或本地文件，
+ *     见 [BlockRules]）。
+ *
+ * 后两份都由调用方**现读传入**，本对象不持有它们 —— 一份订阅名单可能有
+ * 十万条，每次请求都合并一遍会白白分配一堆集合（拦截发生在
+ * `shouldInterceptRequest` 里，那是每个子资源都要跑一次的热路径）。
  *
  * ## 判定算法（针对请求 URL）
  *
  * 对每个拦截请求，做三层判定，命中任意一层即拦截：
  *
- * 1. **精确域名命中**：把 URL 的 host 逐级缩短（`ad.doubleclick.net` →
- *    `doubleclick.net` → `net`），查到 [BLOCKED_DOMAINS] 里的条目即拦截。
+ * 1. **域名命中**：把 URL 的 host 逐级缩短（`ad.doubleclick.net` →
+ *    `doubleclick.net` → `net`），查到上面三份规则里任一命中即拦截。
  *    这样 `xxx.doubleclick.net` 这种子域名也能被 `doubleclick.net` 兜住。
  * 2. **路径关键字命中**：域名没拦，但 URL 的 path 里含广告路径片段
  *    （`/ads/`、`/adserver/`、`-ad-` 等）即拦截。很多站点把广告放在
@@ -46,13 +60,18 @@ package com.ling.browser.web
 object AdBlocker {
 
     /**
-     * 广告/跟踪域名表。键是"裸域名"（不含任何子域名前缀）。
+     * 内置精简表。键是"裸域名"（不含任何子域名前缀），也可以是多段的具体
+     * host（如 `union.360.cn`）—— 后者更精确，只拦那个子域名而不会波及整站。
      *
-     * 分级：越靠前的越激进（大网盟 + 跟踪），越靠后的越保守
-     * （国内常见广告 SDK 域名，误伤风险低）。
+     * 选表原则：只收**广告/跟踪专用域名**。像 `360.cn` 这种整个站点都算
+     * 广告公司的域名要慎收（它会连带拦掉 `www.360.cn`、`dl.360.cn` 等正常
+     * 入口），所以宁可写成具体子域，也不图省事写个裸域名。
+     *
+     * 这份表只是"开箱能用"的起点，不是完整名单 —— 大名单走订阅（见
+     * [BlockRules]）。
      */
     private val BLOCKED_DOMAINS: Set<String> = setOf(
-        // ---- 国际大网盟与跟踪 ----
+        // ---- 国际网盟 ----
         "doubleclick.net",
         "googlesyndication.com",
         "googleadservices.com",
@@ -60,7 +79,11 @@ object AdBlocker {
         "googletagmanager.com",
         "googletagservices.com",
         "adservice.google.com",
+        "pagead2.googlesyndication.com",
+        "amazon-adsystem.com",
+        "assoc-amazon.com",
         "adnxs.com",
+        "appnexus.com",
         "adsrvr.org",
         "taboola.com",
         "outbrain.com",
@@ -72,36 +95,137 @@ object AdBlocker {
         "casalemedia.com",
         "adform.net",
         "advertising.com",
+        "adition.com",
+        "smartadserver.com",
+        "teads.tv",
+        "bidswitch.net",
+        "33across.com",
+        "sharethrough.com",
+        "sovrn.com",
+        "indexexchange.com",
+        "media.net",
+        "undertone.com",
+        "adroll.com",
+        "tribalfusion.com",
+        "yieldmo.com",
+        "spotxchange.com",
+        "tremorhub.com",
+        "gumgum.com",
+        "connatix.com",
+        "sonobi.com",
+        "triplelift.com",
+        "improvedigital.com",
+        "loopme.me",
+        "sizmek.com",
         "moatads.com",
+        "adsafeprotected.com",
+        "doubleverify.com",
+        "integralads.com",
+        "pixalate.net",
+        "adloox.com",
+        // ---- 跟踪 / 统计 / 行为分析 ----
         "scorecardresearch.com",
         "quantserve.com",
         "chartbeat.com",
         "hotjar.com",
+        "mouseflow.com",
+        "fullstory.com",
+        "crazyegg.com",
+        "inspectlet.com",
         "mixpanel.com",
         "segment.com",
         "amplitude.com",
+        "heapanalytics.com",
+        "kissmetrics.com",
+        "statcounter.com",
+        "optimizely.com",
+        "vwo.com",
+        "abtasty.com",
+        "contentsquare.net",
+        "exelator.com",
+        "addthis.com",
+        // ---- 移动广告 SDK ----
         "facebook.net",
         "branch.io",
         "appsflyer.com",
         "adjust.com",
-        // ---- 国内常见广告 SDK ----
+        "adcolony.com",
+        "applovin.com",
+        "vungle.com",
+        "inmobi.com",
+        "mopub.com",
+        "startapp.com",
+        "tapjoy.com",
+        "chartboost.com",
+        "flurry.com",
+        "kochava.com",
+        "unityads.unity3d.com",
+        "adswizz.com",
+        "bidvertiser.com",
+        "propellerads.com",
+        "popads.net",
+        "popcash.net",
+        "adcash.com",
+        "exoclick.com",
+        "juicyads.com",
+        "trafficjunky.com",
+        "hilltopads.net",
+        "adsterra.com",
+        // ---- 国内广告平台 / 联盟 ----
         "umeng.com",
         "umengcloud.com",
         "baidustatic.com",
         "bdstatic.com",
         "pos.baidu.com",
         "cpro.baidu.com",
+        "mobads.baidu.com",
+        "mobads-logs.baidu.com",
+        "union.baidu.com",
         "tanx.com",
+        "alimama.com",
+        "simba.taobao.com",
+        "s.click.taobao.com",
+        "uland.taobao.com",
+        "union-click.jd.com",
+        "gdt.qq.com",
+        "e.qq.com",
+        "adsview.qq.com",
+        "pgdt.qq.com",
+        "l.qq.com",
+        "adview.com",
+        "adsmogo.com",
+        "domob.cn",
+        "domob.com.cn",
+        "youmi.net",
+        "admaster.com.cn",
+        "miaozhen.com",
         "mmstat.com",
         "cnzz.com",
         "growingio.com",
         "talkingdata.net",
-        "360.cn",
+        "getui.net",
+        "igexin.com",
+        "jpush.cn",
+        "mob.com",
+        "sinaads.cn",
+        "union.360.cn",
+        // ---- 国内内容平台广告位 ----
         "douyinstatic.com",
         "bytedance.com",
         "pangle.io",
         "snssdk.com",
+        "pangolin-sdk-toutiao.com",
+        "ad.toutiao.com",
     )
+
+    /**
+     * 内置表的条数。
+     *
+     * 供订阅页展示"开箱自带多少条"，让用户明白**不导入任何订阅也能用** ——
+     * 否则他们只看得到订阅列表，会以为不订阅就等于没有广告拦截。
+     */
+    val builtinCount: Int
+        get() = BLOCKED_DOMAINS.size
 
     /**
      * URL path 里出现这些片段即拦截。只匹配 path 段，不碰 query，
