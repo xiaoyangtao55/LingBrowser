@@ -39,6 +39,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
@@ -91,6 +92,58 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
      * [WebTabManager]，UI 只需要列表本身（条数、启停、更新时间）。
      */
     val blockSubscriptions: StateFlow<List<BlockSubscription>> = container.blockList.subscriptions
+
+    /**
+     * 广告拦截的累计计数 = 已落盘的历史总数 + 本次运行新增。
+     *
+     * 直接显示这个和值：用户关心的是"一共挡了多少"，不关心它拆成几段。
+     * 历史总数在退到后台时被更新（见 [flushBlockedCount]），因此这个值会随
+     * 一次冷启动后的读回继续增长。
+     */
+    val blockedCount: StateFlow<Long> = combine(
+        settings.map { it.adBlockBlockedTotal },
+        tabManager.blockedCount,
+    ) { saved, session -> saved + session }
+        .stateIn(
+            viewModelScope,
+            SharingStarted.Eagerly,
+            container.initialSettings.adBlockBlockedTotal,
+        )
+
+    /**
+     * 清零拦截计数：历史总数与本次运行一起归零。
+     *
+     * 用独立协程写盘，理由同 [persistSession] —— 清零后用户可能立刻切走，
+     * viewModelScope 会随之取消。
+     */
+    fun resetBlockedCount() {
+        tabManager.resetBlockedCount()
+        CoroutineScope(Dispatchers.IO).launch {
+            runCatching { container.settings.setAdBlockBlockedTotal(0L) }
+        }
+    }
+
+    /**
+     * 把本次运行新增的拦截数并进已落盘的历史总数，然后清掉会话计数。
+     *
+     * 由 `Activity.onStop` 触发（与 [persistSession] 同一时机）：这是**唯一**
+     * 的落盘点，拦截热路径上一次盘都不写。写盘后先落库再清会话计数，避免
+     * 出现"总和短暂变小"的闪动。
+     *
+     * 进程被强制杀死时 `onStop` 不保证走到 —— 这是本方案唯一的丢失窗口。
+     */
+    fun flushBlockedCount() {
+        val session = tabManager.blockedCount.value
+        if (session == 0L) return
+        CoroutineScope(Dispatchers.IO).launch {
+            runCatching {
+                // 增量写：DataStore 内的读-改-写是原子的，不会因为读到的旧值
+                // 尚未被 Flow 刷新而漏加（见 SettingsStore.addAdBlockBlockedTotal）。
+                container.settings.addAdBlockBlockedTotal(session)
+                tabManager.resetBlockedCount()
+            }
+        }
+    }
 
     /** 地址栏当前文本（与真实 URL 解耦：用户编辑时不被页面跳转覆盖）。 */
     private val _addressText = MutableStateFlow("")

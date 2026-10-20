@@ -168,6 +168,9 @@ class MainActivity : ComponentActivity() {
      */
     override fun onStop() {
         browserViewModel.persistSession()
+        // 与存会话同一时机：把本次运行新增的拦截数并进已落盘的总数。
+        // 拦截热路径上一次盘都不写，落盘只发生在这里。
+        browserViewModel.flushBlockedCount()
         super.onStop()
     }
 }
@@ -423,6 +426,7 @@ private fun LingApp(viewModel: BrowserViewModel) {
 
                 Route.SettingsBrowsing -> {
                     val subs by viewModel.blockSubscriptions.collectAsStateWithLifecycle()
+                    val blocked by viewModel.blockedCount.collectAsStateWithLifecycle()
                     BrowsingSettingsScreen(
                         settings = settings,
                         onForceDark = viewModel::setForceDark,
@@ -432,6 +436,8 @@ private fun LingApp(viewModel: BrowserViewModel) {
                         onOpenAdBlockRules = { push(Route.AdBlockRules) },
                         blockSubscriptionCount = subs.size,
                         onOpenBlockSubscriptions = { push(Route.AdBlockSubscriptions) },
+                        blockedCount = blocked,
+                        onResetBlockedCount = viewModel::resetBlockedCount,
                         onOpenLinksExternal = viewModel::setOpenLinksInExternalApp,
                         onBack = pop,
                     )

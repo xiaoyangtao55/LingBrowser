@@ -538,6 +538,9 @@ fun BrowsingSettingsScreen(
     /** 已导入的订阅名单份数，用来给出"有没有订阅"的一眼判据。 */
     blockSubscriptionCount: Int,
     onOpenBlockSubscriptions: () -> Unit,
+    /** 累计拦下的广告/跟踪请求数（跨重启累加）。 */
+    blockedCount: Long,
+    onResetBlockedCount: () -> Unit,
     onOpenLinksExternal: (Boolean) -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
@@ -607,6 +610,19 @@ fun BrowsingSettingsScreen(
                         "已导入 $blockSubscriptionCount 份名单，可导入、更新或停用"
                     },
                     onClick = onOpenBlockSubscriptions,
+                )
+            }
+            item {
+                SettingRow(
+                    icon = LingIcons.Block,
+                    title = "已拦截广告",
+                    // 说明是"累计"并提示可清零；否则用户会以为这个数只会涨、清不掉
+                    subtitle = if (blockedCount == 0L) {
+                        "累计拦截广告/跟踪请求数（点按可清零）"
+                    } else {
+                        "累计已拦下 $blockedCount 个广告/跟踪请求，点按清零"
+                    },
+                    onClick = onResetBlockedCount,
                 )
             }
             item {

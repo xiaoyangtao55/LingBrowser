@@ -43,6 +43,13 @@ class LingWebViewClient(
     private val adBlockEnabled: () -> Boolean = { true },
     /** 用户自定义的广告拦截域名规则（裸域名）。动态读，改完立即生效。 */
     private val adBlockRules: () -> Set<String> = { emptySet() },
+    /**
+     * 拦下一个请求时回调一次，供调用方计数（见 [WebTabManager.blockedCount]）。
+     *
+     * 回调跑在 `shouldInterceptRequest` 的**后台线程**上，且每个命中的子资源
+     * 都会触发一次 —— 因此接收方必须自己保证线程安全，且不能在这里做重活。
+     */
+    private val onAdBlocked: () -> Unit = {},
     /** 返回 true 表示已由外部接管（例如外部应用打开），WebView 不应继续加载。 */
     private val onExternalScheme: (Uri) -> Boolean,
     /**
@@ -144,6 +151,9 @@ class LingWebViewClient(
 
         if (!adBlockEnabled()) return null
         if (AdBlocker.shouldBlock(url, request.isForMainFrame, adBlockRules())) {
+            // 计数点选在这里：只有真正拦下的请求才 +1，放行的不计，
+            // 因此和用户看到的"挡掉多少"完全一致。
+            onAdBlocked()
             return WebResourceResponse("text/plain", "utf-8", EMPTY_STREAM)
         }
         return null

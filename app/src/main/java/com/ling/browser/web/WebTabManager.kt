@@ -34,6 +34,20 @@ class WebTabManager(private val context: Context) {
     private val _activeId = MutableStateFlow("")
     val activeId: StateFlow<String> = _activeId.asStateFlow()
 
+    private val _blockedCount = MutableStateFlow(0L)
+
+    /**
+     * 本次运行累计拦下的广告/跟踪请求数（应用重启即清零）。
+     *
+     * 纯内存计数、**不落盘**：拦截发生在每个子资源的 `shouldInterceptRequest`
+     * 上，如果每次命中都写一次 DataStore，磁盘会被打爆 —— 而"拦了多少"本身
+     * 只是个参考值，不值得为它付持久化代价。
+     *
+     * 累加走 [MutableStateFlow.update]（内部是 compareAndSet 重试），
+     * 因此多个后台线程同时命中也不会丢计数。
+     */
+    val blockedCount: StateFlow<Long> = _blockedCount.asStateFlow()
+
     /** tabId -> WebView。仅在内存中存活，不参与状态序列化。 */
     private val webViews = LinkedHashMap<String, LingWebView>()
 
@@ -222,6 +236,16 @@ class WebTabManager(private val context: Context) {
             } else {
                 settings.adBlockRules + subscriptionDomains
             }
+    }
+
+    /** 命中一次拦截 +1。由后台线程经 [LingWebViewClient] 的回调调用（见 [blockedCount]）。 */
+    private fun countBlocked() {
+        _blockedCount.update { it + 1 }
+    }
+
+    /** 清零拦截计数。 */
+    fun resetBlockedCount() {
+        _blockedCount.value = 0
     }
 
     /**
@@ -1237,6 +1261,8 @@ class WebTabManager(private val context: Context) {
                 // 自定义规则 + 订阅域名的并集：读的是**预先算好**的那一份
                 // （见 mergedBlockRules），不在热路径里现并十万条集合。
                 adBlockRules = { this@WebTabManager.mergedBlockRules },
+                // 命中拦截即计数（见 blockedCount）；回调在后台线程上，累加是线程安全的。
+                onAdBlocked = { countBlocked() },
             )
             setDownloadListener { url, _, _, mimeType, _ ->
                 onDownloadRequested?.invoke(url, mimeType)

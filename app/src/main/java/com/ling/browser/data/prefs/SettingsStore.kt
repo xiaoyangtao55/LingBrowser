@@ -6,6 +6,7 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -209,6 +210,20 @@ data class LingSettings(
      */
     val adBlockRules: Set<String> = emptySet(),
     /**
+     * 广告拦截的**累计**计数（跨重启累加）。
+     *
+     * 只存"已落盘的历史总数"，本次运行新增的那部分由 `WebTabManager` 在内存里
+     * 累加（见 [com.ling.browser.web.WebTabManager.blockedCount]），界面显示二者之和。
+     *
+     * 为什么不在每次拦截时直接写这里：拦截发生在每个子资源的 `shouldInterceptRequest`
+     * 上，命中即写一次 DataStore 会把磁盘打爆。因此改为**低频**落盘 ——
+     * 只在应用退到后台（`onStop`）时把本次新增并进总数。
+     *
+     * 代价：进程被强制杀死时 `onStop` 不保证走到，这一段新增会丢。对"挡了多少"
+     * 这种参考值可以接受。
+     */
+    val adBlockBlockedTotal: Long = 0L,
+    /**
      * 阅读模式的字号档位。
      *
      * 存的是档位而不是像素值：字号需要在**阅读视图里**改，而那边是
@@ -256,6 +271,7 @@ class SettingsStore(private val context: Context) {
         val OPEN_LINKS_EXTERNAL = booleanPreferencesKey("open_links_external")
         val AD_BLOCK = booleanPreferencesKey("ad_block")
         val AD_BLOCK_RULES = stringSetPreferencesKey("ad_block_rules")
+        val AD_BLOCK_BLOCKED_TOTAL = longPreferencesKey("ad_block_blocked_total")
         val DOWNLOADER_TYPE = stringPreferencesKey("downloader_type")
         val DOWNLOAD_LOCATION = stringPreferencesKey("download_location")
     }
@@ -281,6 +297,8 @@ class SettingsStore(private val context: Context) {
             openLinksInExternalApp = p[Keys.OPEN_LINKS_EXTERNAL] ?: false,
             adBlockEnabled = p[Keys.AD_BLOCK] ?: true,
             adBlockRules = p[Keys.AD_BLOCK_RULES] ?: emptySet(),
+            // 负数只可能来自脏数据/溢出，夹回 0 避免界面显示"-1 个广告"
+            adBlockBlockedTotal = (p[Keys.AD_BLOCK_BLOCKED_TOTAL] ?: 0L).coerceAtLeast(0L),
             // 枚举名入库、读回时用 runCatching 兜底：万一将来删掉某个档位，
             // 老用户不会因为 valueOf 抛异常而闪退。
             readerFontSize = p[Keys.READER_FONT_SIZE]
@@ -353,6 +371,27 @@ class SettingsStore(private val context: Context) {
      */
     suspend fun setAdBlockRules(rules: Set<String>) =
         context.dataStore.edit { it[Keys.AD_BLOCK_RULES] = rules.filter { r -> r.isNotBlank() }.toSet() }
+
+    /**
+     * 写入广告拦截的累计总数（用于清零）。
+     *
+     * 由 UI 层在退到后台时调用（低频），不做防抖/节流 —— 调用点本身就很少。
+     */
+    suspend fun setAdBlockBlockedTotal(total: Long) =
+        context.dataStore.edit { it[Keys.AD_BLOCK_BLOCKED_TOTAL] = total.coerceAtLeast(0L) }
+
+    /**
+     * 在累计总数上**增量**累加。
+     *
+     * 用增量而不是"先读旧值、加完再整体写回"：后者的旧值可能取自 Flow 的
+     * 最后一次发射，若上一次写盘还没被 Flow 收到，就会漏加（用户连续两次
+     * 退到后台时能观察到）。`dataStore.edit` 内的读-改-写是原子的，不会漏。
+     */
+    suspend fun addAdBlockBlockedTotal(delta: Long) =
+        context.dataStore.edit { p ->
+            val next = (p[Keys.AD_BLOCK_BLOCKED_TOTAL] ?: 0L) + delta
+            p[Keys.AD_BLOCK_BLOCKED_TOTAL] = next.coerceAtLeast(0L)
+        }
 
     suspend fun setDownloaderType(type: DownloaderType) =
         context.dataStore.edit { it[Keys.DOWNLOADER_TYPE] = type.name }

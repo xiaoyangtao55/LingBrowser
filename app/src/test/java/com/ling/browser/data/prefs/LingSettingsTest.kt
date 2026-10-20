@@ -122,6 +122,8 @@ class LingSettingsTest {
         assertTrue("默认必须开广告拦截", LingSettings().adBlockEnabled)
         // 自定义规则默认空集合：新用户没有任何自定义拦截
         assertTrue("自定义规则默认应为空", LingSettings().adBlockRules.isEmpty())
+        // 累计拦截计数默认 0：新装用户还没拦过任何请求
+        assertEquals("累计拦截计数默认应为 0", 0L, LingSettings().adBlockBlockedTotal)
     }
 
     @Test
