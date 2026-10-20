@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.0](https://github.com/xiaoyangtao55/LingBrowser/compare/v1.1.0...v1.2.0) (2026-10-20)
+
+
+### Features
+
+* 广告拦截域名表升级为可订阅（Hosts / AdGuard 域名格式） ([85bee3a](https://github.com/xiaoyangtao55/LingBrowser/commit/85bee3a731664d5c644958328b2d7fde6d0ca94d))
+* 广告拦截累计计数（跨重启） ([9f90849](https://github.com/xiaoyangtao55/LingBrowser/commit/9f90849df430159206ecb50f1e2eb3caaca46853))
+
 ## [1.1.0](https://github.com/xiaoyangtao55/LingBrowser/compare/v1.0.0...v1.1.0) (2026-10-19)
 
 
