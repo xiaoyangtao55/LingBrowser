@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.3.0](https://github.com/xiaoyangtao55/LingBrowser/compare/v1.2.0...v1.3.0) (2026-10-20)
+
+
+### Features
+
+* 网页长按链接/图片弹出上下文菜单 ([8755e2c](https://github.com/xiaoyangtao55/LingBrowser/commit/8755e2c2b84ca83709e3f9f5410b81112f0622e3))
+
+
+### Bug Fixes
+
+* 书签菜单贴右展开、下载完成后可点击打开、下载确认支持复制链接 ([4b02f05](https://github.com/xiaoyangtao55/LingBrowser/commit/4b02f056e2a82307a073cd59234eadf7561db4fe))
+
 ## [1.2.0](https://github.com/xiaoyangtao55/LingBrowser/compare/v1.1.0...v1.2.0) (2026-10-20)
 
 
