@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.0](https://github.com/xiaoyangtao55/LingBrowser/compare/v1.3.0...v1.4.0) (2026-10-21)
+
+
+### Features
+
+* 支持用户脚本（Tampermonkey 风格） ([6d3d522](https://github.com/xiaoyangtao55/LingBrowser/commit/6d3d522680dbc1501f6ff47a6569a97079a6c1d9))
+
 ## [1.3.0](https://github.com/xiaoyangtao55/LingBrowser/compare/v1.2.0...v1.3.0) (2026-10-20)
 
 
