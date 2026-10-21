@@ -962,7 +962,9 @@ else:
 for cb, nxt in (("onPageStarted", "onPageFinished"),
                 ("onPageFinished", "onReceivedTitle")):
     start = mgr.find(cb + " = {")
-    end = mgr.find(nxt, start + 1) if start >= 0 else -1
+    # 必须按赋值语句找下一个回调，而不是裸回调名：onPageStarted 的注释里
+    # 也会出现 "onPageFinished" 字样，按裸名字切会把代码块截断在注释处。
+    end = mgr.find(nxt + " = {", start + 1) if start >= 0 else -1
     blk = mgr[start:end] if start >= 0 and end > start else ""
     if "InternalPage.isInternal(url" in blk and "isNavigable(url)" in blk:
         ok(f"{cb} 同时挡住内部页面与自定义协议")
@@ -970,7 +972,8 @@ for cb, nxt in (("onPageStarted", "onPageFinished"),
         bad(f"{cb} 的判定不完整 —— 会把 ling://reader 或 zhihu:// 写回状态")
 
 # (4) 合成地址不写入历史
-if re.search(r"onVisited\?\.invoke[\s\S]{0,500}?合成", mgr):
+# 说明性注释写在 onVisited 调用**之前**，所以要往前找，不能只往后看。
+if re.search(r"合成[\s\S]{0,600}?onVisited\?\.invoke", mgr):
     ok("合成地址（ling://reader）不写入历史记录")
 else:
     bad("未说明合成地址是否写入历史 —— ling://reader 记进去点不开")
@@ -1055,7 +1058,10 @@ if re.search(r"shouldBlock\(url, request\.isForMainFrame, adBlockRules\(\)\)", c
 else:
     bad("自定义规则未传进 shouldBlock —— 加了规则等于没加")
 
-if re.search(r"adBlockRules = \{ this@WebTabManager\.settings\.adBlockRules \}", mgr):
+if re.search(
+    r"adBlockRules = \{ this@WebTabManager\.(?:settings\.adBlockRules|mergedBlockRules) \}",
+    mgr,
+):
     ok("自定义规则用 lambda 传递（动态生效）")
 else:
     bad("自定义规则按值传递 —— 改了规则不重启不生效")

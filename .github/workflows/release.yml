@@ -18,7 +18,61 @@ permissions:
   contents: write # ⚠️ 必须改为 write，否则无法创建 Release 和上传资产
 
 jobs:
+  # 纯文本级检查，不需要 Android SDK，几秒跑完；先过这一关再开始编译
+  static-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: 配置 Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: 配置 Node（check_reader 用它校验内嵌 JS）
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - name: 运行静态检查
+        run: |
+          set -euo pipefail
+          scripts=(
+            tools/static_check.py
+            tools/check_calls.py
+            tools/check_home_html.py
+            tools/verify_home_assertions.py
+            tools/check_dead_code.py
+            tools/check_download_bytes.py
+            tools/check_download_progress.py
+            tools/check_tabs_layer.py
+            tools/check_session.py
+            tools/check_bookmark_folders.py
+            tools/check_bookmark_backup.py
+            tools/check_ux_fixes.py
+            tools/check_reader.py
+            tools/check_client_thread.py
+            tools/check_adblock_subscription.py
+            tools/check_junit_args.py
+            tools/check_workflow.py
+            tools/check_signing.py
+          )
+          # check_icon_fidelity.py 依赖未入库的官方 Material 源 XML，只在本地改图标时跑
+          for f in "${scripts[@]}"; do
+            echo "::group::$f"
+            python3 "$f"
+            echo "::endgroup::"
+          done
+
   build:
+    needs: static-checks
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
@@ -137,6 +191,9 @@ jobs:
       # ---------------------------------------------------------------
       - name: 运行单元测试
         run: ./gradlew :app:testDebugUnitTest --stacktrace
+
+      - name: Android Lint
+        run: ./gradlew :app:lintDebug --stacktrace
 
       # ---------------------------------------------------------------
       # Release 构建
@@ -269,7 +326,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: test-report
-          path: app/build/reports/tests/
+          path: |
+            app/build/reports/tests/
+            app/build/reports/lint-results-debug.*
           if-no-files-found: ignore
 
       # 打 tag 时自动创建 Release 并附上 APK

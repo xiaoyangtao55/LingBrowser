@@ -51,7 +51,7 @@
 
 ```
 LingBrowser/
-├── .github/workflows/release.yml  # CI：推代码自动跑测试 + 出 release APK
+├── .github/workflows/release.yml  # CI：PR 跑静态检查 / Lint / 测试并出 release APK
 ├── app/
 │   ├── build.gradle.kts           # 模块配置（含签名、R8、localeFilters）
 │   ├── proguard-rules.pro         # 混淆规则（保留 JS 接口与 Room/Compose 元数据）
@@ -155,8 +155,8 @@ LingBrowser/
 本地设备编译较慢，因此提供了 GitHub Actions 工作流
 [.github/workflows/release.yml](.github/workflows/release.yml)：
 
-- **push / PR** → 自动跑单元测试 + 构建 release APK，产物在该次运行的 Artifacts 里下载
-- **打 `v*` 标签** → 额外自动创建 GitHub Release 并附上 APK
+- **PR 到 main/master** → 先跑 `static-checks`（文本级检查，不需要 Android SDK），再跑 Android Lint、单元测试并构建 release APK，产物在该次运行的 Artifacts 里下载
+- **打 `v*` 标签 / 手动触发** → 同样先过检查，再构建；打标签时额外自动创建 GitHub Release 并附上 APK
 - 签名密钥通过仓库 Secrets 注入（不配也能出未签名包）：
 
 | Secret | 说明 |

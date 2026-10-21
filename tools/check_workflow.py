@@ -27,6 +27,59 @@ def ok(msg):
     print("  OK   " + msg)
 
 
+def strip_shell_comment(line):
+    """去掉 shell 注释，但不要误伤引号里和 ${VAR#pattern} 里的 #。
+
+    旧实现直接 line.split("#")[0]，会把
+      VERSION_NAME="${GITHUB_REF#refs/tags/v}"
+    截成 `VERSION_NAME="${GITHUB_REF`，引号数变成奇数，产生稳定的误报。
+    """
+    out = []
+    quote = None
+    brace = 0
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if quote == "'":
+            out.append(ch)
+            if ch == "'":
+                quote = None
+            i += 1
+            continue
+        if quote == '"':
+            out.append(ch)
+            if ch == "\\" and i + 1 < len(line):
+                out.append(line[i + 1])
+                i += 2
+                continue
+            if ch == '"':
+                quote = None
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "$" and i + 1 < len(line) and line[i + 1] == "{":
+            brace += 1
+            out.append("${")
+            i += 2
+            continue
+        if ch == "}" and brace:
+            brace -= 1
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "#" and brace == 0 and (
+            i == 0 or line[i - 1].isspace() or line[i - 1] in ";|&("
+        ):
+            break
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 # ---------- 1. 基础 ----------
 print("1. 文件基础")
 if not os.path.exists(WF):
@@ -124,8 +177,10 @@ for start, body in blocks:
         bad(f"行 {start} 块：if={n_if} 但 fi={n_fi}")
     # 单双引号配平（逐行，忽略注释）
     for k, ln in enumerate(body.split("\n")):
-        code = ln.split("#")[0] if not ln.strip().startswith("#") else ""
-        if code.count('"') % 2:
+        code = strip_shell_comment(ln)
+        if not code.strip():
+            continue
+        if len(re.findall(r'(?<!\\)"', code)) % 2:
             bad(f"行 {start+k+1} 双引号不成对：{ln.strip()}")
 if not any("for=" in p or "if=" in p or "引号" in p for p in problems):
     ok("for/done、if/fi、引号均配平")
