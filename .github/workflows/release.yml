@@ -9,6 +9,11 @@ on:
     branches: [main, master] # 只有有人提 PR 时，才跑一次编译测试
   workflow_dispatch:    # 允许你手动点按钮打包（用于临时出测试包）:
 
+# 同一个 PR 连续 push 时取消旧构建；tag 构建不取消，避免发布被打断
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
 permissions:
   contents: write # ⚠️ 必须改为 write，否则无法创建 Release 和上传资产
 
@@ -23,6 +28,8 @@ jobs:
         with:
           fetch-depth: 0   # ⚠️ 新增：拉取完整历史，确保能读取到 Tag
           fetch-tags: true # ⚠️ 新增：显式拉取所有 tags
+          # 不让构建脚本拿到持久化的 GITHUB_TOKEN
+          persist-credentials: false
 
       # ⚠️ 新增：计算版本号
       # 如果是打 Tag（v1.2.3），则 versionName 为 1.2.3
@@ -160,19 +167,19 @@ jobs:
             echo "::warning::未配置 LING_KEYSTORE_BASE64，将产出未签名 APK（仍可验证编译）"
           fi
 
+      - name: 导出签名路径
+        if: steps.keystore.outputs.signed == 'true'
+        run: echo "LING_KEYSTORE_PATH=keystore/ling-release.jks" >> "$GITHUB_ENV"
+
       - name: 构建 Release APK
         env:
-          # 不再用 `cond && 'x' || ''` 这种表达式来传路径：
-          # 未签名时它会求值成空字符串，而空字符串**不是**未设置，
-          # Gradle 里 `System.getenv(...)?.let { file(it) }` 会走进来并抛
-          #   IllegalArgumentException: Cannot convert '' to File
-          # 让构建在配置阶段就失败。
+          # LING_KEYSTORE_PATH 只在密钥库还原成功时由上一步注入。
+          # 未签名构建不能设置它：Gradle 看到「路径非空但文件不存在」会直接
+          # 抛 GradleException（见 app/build.gradle.kts），不会退化成 unsigned。
           #
-          # ⚠️ 这个路径是**相对仓库根**的。app/build.gradle.kts 里必须用
-          # rootProject.file(...) 解析 —— 裸写 file(...) 会相对 app/ 解析成
-          # app/keystore/...，exists() 恒为 false，构建"成功"但产物是
-          # app-release-unsigned.apk（真实故障，已修）。
-          LING_KEYSTORE_PATH: keystore/ling-release.jks
+          # 路径是相对仓库根的，app/build.gradle.kts 里用 rootProject.file(...)
+          # 解析；裸写 file(...) 会相对 app/ 解析成 app/keystore/...，exists()
+          # 恒为 false，构建"成功"但产物是 app-release-unsigned.apk。
           LING_STORE_PASSWORD: ${{ secrets.LING_STORE_PASSWORD }}
           LING_KEY_ALIAS: ${{ secrets.LING_KEY_ALIAS }}
           LING_KEY_PASSWORD: ${{ secrets.LING_KEY_PASSWORD }}
@@ -198,6 +205,12 @@ jobs:
             else
               echo "::warning::未配置签名 Secrets，产出未签名 APK（预期行为）"
             fi
+          fi
+
+          # 未签名 APK 本来就过不了 apksigner verify，跳过而不是报错
+          if [ "${{ steps.keystore.outputs.signed }}" != "true" ]; then
+            echo "未配置签名 Secrets，跳过 apksigner 校验"
+            exit 0
           fi
 
           # 选 apksigner 必须**明确挑一个版本**，不能写
@@ -242,6 +255,15 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      # R8 混淆后的崩溃堆栈需要 mapping.txt 才能还原，保留时间比 APK 长
+      - name: 上传 R8 mapping
+        uses: actions/upload-artifact@v4
+        with:
+          name: ling-mapping-${{ env.VERSION_NAME }}
+          path: app/build/outputs/mapping/release/
+          if-no-files-found: warn
+          retention-days: 90
+
       - name: 上传测试报告（失败时）
         if: failure()
         uses: actions/upload-artifact@v4
@@ -256,4 +278,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: out/*.apk
-          generate_release_notes: true
+          # Release 正文由 release-please 生成；这里只补 APK。
+          # 不要加 generate_release_notes —— 遇到已存在的 Release 时它会把
+          # release-please 写好的 CHANGELOG 覆盖成 GitHub 自动生成的 notes。

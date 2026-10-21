@@ -13,7 +13,29 @@ permissions:
 jobs:
   release-please:
     runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
-      - uses: googleapis/release-please-action@v4
+      - id: release
+        uses: googleapis/release-please-action@v4
         with:
           release-type: simple # 如果你有 package.json 可以换成 node
+
+  # 合并 release PR 后，release-please 用 GITHUB_TOKEN 建 tag / Release。
+  # GitHub 规定：GITHUB_TOKEN 产生的事件不会触发新的 workflow（workflow_dispatch
+  # 和 repository_dispatch 例外），所以 release.yml 里的 push.tags 永远等不到。
+  # 这里显式 dispatch 一次 release.yml，构建好的 APK 会由它挂到同一个 Release 上。
+  trigger-release-build:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: 触发 Release 打包
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
+        run: gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$TAG_NAME"
