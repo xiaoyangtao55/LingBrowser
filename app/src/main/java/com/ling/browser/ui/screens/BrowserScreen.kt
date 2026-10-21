@@ -137,6 +137,8 @@ fun BrowserScreen(
     val activeUrl = activeTab?.url
     val homeBackgroundVisible = activeUrl != null && UrlUtils.isHome(activeUrl)
     val pendingDownload by viewModel.pendingDownload.collectAsStateWithLifecycle()
+    // 点开 `.user.js` 链接时先弹确认，不直接安装。
+    val pendingUserScript by viewModel.pendingUserScript.collectAsStateWithLifecycle()
     // 阅读模式是否开启。必须 collect（而不是直接读 viewModel.readerActive），
     // 否则进入/退出后菜单文案不会刷新。
     val readerActive by viewModel.readerActive.collectAsStateWithLifecycle()
@@ -721,6 +723,48 @@ fun BrowserScreen(
             },
             dismissButton = {
                 TextButton(onClick = viewModel::dismissPendingDownload) { Text("取消") }
+            },
+        )
+    }
+
+    // ---- 用户脚本安装确认 ----
+    // 打开 `.user.js` 链接时不加载原始代码，先问一句再装。与下载确认同理：
+    // 点了一个链接，不代表用户愿意让任意 JS 长期跑在所有匹配页面上。
+    pendingUserScript?.let { url ->
+        AlertDialog(
+            onDismissRequest = viewModel::dismissUserScriptInstall,
+            icon = { Icon(LingIcons.Javascript, contentDescription = null) },
+            title = { Text("安装这个用户脚本？") },
+            text = {
+                Column {
+                    Text(
+                        text = url.substringAfterLast('/').substringBefore('?').ifBlank { "user.js" },
+                        style = MaterialTheme.typography.bodyLarge,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = UrlUtils.hostOf(url),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = "脚本会以网页权限运行，能读写页面内容与 Cookie。" +
+                            "请只安装可信来源的脚本。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = viewModel::confirmUserScriptInstall) { Text("安装") }
+            },
+            dismissButton = {
+                TextButton(onClick = viewModel::dismissUserScriptInstall) { Text("取消") }
             },
         )
     }

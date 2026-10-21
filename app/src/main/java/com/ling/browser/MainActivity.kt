@@ -44,6 +44,7 @@ import com.ling.browser.ui.screens.SniffedResourcesScreen
 import com.ling.browser.ui.screens.BrowserScreen
 import com.ling.browser.ui.screens.DownloadsScreen
 import com.ling.browser.ui.screens.HistoryScreen
+import com.ling.browser.ui.screens.UserScriptsScreen
 import com.ling.browser.ui.screens.SettingsScreen
 import com.ling.browser.ui.screens.AboutScreen
 import com.ling.browser.ui.screens.AppearanceSettingsScreen
@@ -430,6 +431,7 @@ private fun LingApp(viewModel: BrowserViewModel) {
                 Route.SettingsBrowsing -> {
                     val subs by viewModel.blockSubscriptions.collectAsStateWithLifecycle()
                     val blocked by viewModel.blockedCount.collectAsStateWithLifecycle()
+                    val scripts by viewModel.userScripts.collectAsStateWithLifecycle()
                     BrowsingSettingsScreen(
                         settings = settings,
                         onForceDark = viewModel::setForceDark,
@@ -441,6 +443,8 @@ private fun LingApp(viewModel: BrowserViewModel) {
                         onOpenBlockSubscriptions = { push(Route.AdBlockSubscriptions) },
                         blockedCount = blocked,
                         onResetBlockedCount = viewModel::resetBlockedCount,
+                        userScriptCount = scripts.size,
+                        onOpenUserScripts = { push(Route.UserScripts) },
                         onOpenLinksExternal = viewModel::setOpenLinksInExternalApp,
                         onBack = pop,
                     )
@@ -485,6 +489,19 @@ private fun LingApp(viewModel: BrowserViewModel) {
                         onRefresh = viewModel::refreshBlockSubscription,
                         onToggle = viewModel::setBlockSubscriptionEnabled,
                         onRemove = viewModel::removeBlockSubscription,
+                        onBack = pop,
+                    )
+                }
+
+                Route.UserScripts -> {
+                    val scripts by viewModel.userScripts.collectAsStateWithLifecycle()
+                    UserScriptsScreen(
+                        scripts = scripts,
+                        onImportUrl = viewModel::importUserScriptFromUrl,
+                        onImportLocal = viewModel::importUserScriptFromLocal,
+                        onRefresh = viewModel::refreshUserScript,
+                        onToggle = viewModel::setUserScriptEnabled,
+                        onRemove = viewModel::removeUserScript,
                         onBack = pop,
                     )
                 }
@@ -549,6 +566,7 @@ private sealed interface Route {
     data object About : Route
     data object AdBlockRules : Route
     data object AdBlockSubscriptions : Route
+    data object UserScripts : Route
     data object SniffedResources : Route
 }
 

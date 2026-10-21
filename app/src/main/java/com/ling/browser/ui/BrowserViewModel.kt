@@ -12,6 +12,8 @@ import com.ling.browser.data.db.HistoryEntry
 import com.ling.browser.data.repo.BlockSubscription
 import com.ling.browser.data.repo.ImportResult
 import com.ling.browser.data.repo.MAX_BACKUP_BYTES
+import com.ling.browser.data.repo.ScriptImportResult
+import com.ling.browser.data.repo.UserScriptEntry
 import com.ling.browser.data.repo.deriveFolders
 import com.ling.browser.data.repo.parseNetscapeHtml
 import com.ling.browser.data.repo.planImport
@@ -46,6 +48,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 
 /**
  * 浏览器主界面的状态与业务逻辑。
@@ -93,6 +96,14 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
      * [WebTabManager]，UI 只需要列表本身（条数、启停、更新时间）。
      */
     val blockSubscriptions: StateFlow<List<BlockSubscription>> = container.blockList.subscriptions
+
+    /**
+     * 已安装的用户脚本（见 [com.ling.browser.data.repo.UserScriptRepository]）。
+     *
+     * 与订阅名单一样，UI 只看列表；启用中的脚本快照在 init 里直接送进
+     * [WebTabManager]，注入时不需要再经 ViewModel 中转。
+     */
+    val userScripts: StateFlow<List<UserScriptEntry>> = container.userScripts.scripts
 
     /**
      * 广告拦截的累计计数 = 已落盘的历史总数 + 本次运行新增。
@@ -199,6 +210,19 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
                 tabManager.applyBlockSubscriptions(domains)
             }
         }
+
+        // 用户脚本（启用中的快照）变化时重新注册注入。首次发射即把磁盘上
+        // 已有的脚本接入（仓库启动时已读回）。
+        viewModelScope.launch {
+            container.userScripts.enabledScripts.collect { scripts ->
+                tabManager.applyUserScripts(scripts)
+            }
+        }
+        // 页面里 GM_* 的回调：写入值表或打开新标签。
+        // 消息来自 WebView 的 UI 线程，因此这里可以直接操作标签页。
+        tabManager.onUserScriptMessage = { _, message -> handleUserScriptMessage(message) }
+        // 点开 `.user.js` 安装链接：只记下地址弹确认，不直接加载，也不直接安装。
+        tabManager.onUserScriptLink = { url -> _pendingUserScript.value = url }
 
         // 启动时恢复上次的会话；没有可恢复的内容才开一个主页。
         //
@@ -728,6 +752,15 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
     val pendingDownload: StateFlow<PendingDownload?> = _pendingDownload.asStateFlow()
 
     /**
+     * 待确认的用户脚本安装链接（`.user.js`）。
+     *
+     * 链接本身不加载，先由 UI 弹确认框；确认后走 [importUserScriptFromUrl]，
+     * 与在管理页里粘贴网址是**同一条**导入路径（同样有大小/条数上限与解析校验）。
+     */
+    private val _pendingUserScript = MutableStateFlow<String?>(null)
+    val pendingUserScript: StateFlow<String?> = _pendingUserScript.asStateFlow()
+
+    /**
      * 「去申请存储权限」的信号，值只增不减。
      *
      * 当用户选择公共下载目录且系统是 Android 9 及以下时，下载前需要
@@ -1080,6 +1113,89 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
                 if (sub.truncated) append("（已达上限，仅保留前 ${sub.count} 条）")
             }
             is ImportResult.Failed -> "${verb}失败：${result.reason}"
+        }
+    }
+
+    // ------------------------------------------------------------ 用户脚本
+
+    /**
+     * 从网址导入用户脚本。
+     *
+     * 导入会拉网络、解析元数据头，结果只能经 [_message] 回报 ——
+     * 静默完成会让用户以为"点了没反应"。
+     */
+    fun importUserScriptFromUrl(url: String) = viewModelScope.launch {
+        reportScriptImport(container.userScripts.importFromUrl(url))
+    }
+
+    /** 从本地文件导入。用 SAF 选文件，**不需要**存储权限。 */
+    fun importUserScriptFromLocal(uri: Uri) = viewModelScope.launch {
+        reportScriptImport(container.userScripts.importFromLocal(uri))
+    }
+
+    /** 重新拉取网址脚本。本地导入的没有远端，仓库会拒绝并给出原因。 */
+    fun refreshUserScript(id: String) = viewModelScope.launch {
+        reportScriptImport(container.userScripts.refresh(id), verb = "更新")
+    }
+
+    /** 启用 / 停用。停用只是不再注入，脚本源码与值表都保留。 */
+    fun setUserScriptEnabled(id: String, enabled: Boolean) = io {
+        container.userScripts.setEnabled(id, enabled)
+    }
+
+    /** 删除脚本（连同源码、元信息与 GM 值表）。 */
+    fun removeUserScript(id: String) = io { container.userScripts.remove(id) }
+
+    /** 确认安装待确认的脚本链接。 */
+    fun confirmUserScriptInstall() {
+        val url = _pendingUserScript.value ?: return
+        _pendingUserScript.value = null
+        importUserScriptFromUrl(url)
+    }
+
+    /**
+     * 放弃安装。
+     *
+     * 链接可能来自地址栏提交或页面点击，导航都已被取消 —— 取消后要把地址栏
+     * 文本拉回当前页面，否则它会一直显示那个永远不会加载的 `.user.js` 地址。
+     */
+    fun dismissUserScriptInstall() {
+        if (_pendingUserScript.value == null) return
+        _pendingUserScript.value = null
+        syncAddressFromActiveTab()
+    }
+
+    private fun reportScriptImport(result: ScriptImportResult, verb: String = "导入") {
+        _message.value = when (result) {
+            is ScriptImportResult.Ok -> buildString {
+                val entry = result.entry
+                append("已$verb「${entry.script.name}」")
+                if (entry.script.version.isNotBlank()) append(" v${entry.script.version}")
+                append("，匹配 ${entry.script.patternLabels.size} 条规则")
+            }
+            is ScriptImportResult.Failed -> "${verb}失败：${result.reason}"
+        }
+    }
+
+    /**
+     * 处理页面里 GM 垫片发来的消息。
+     *
+     * 消息是页面 JS 构造的，因此**不可信**：脚本 id 必须在仓库里存在且启用
+     * （由 [com.ling.browser.data.repo.UserScriptRepository.setValue] 二次校验），
+     * 非法 JSON 直接丢弃。写入只进该脚本自己的值文件，不碰任何其它状态。
+     */
+    private fun handleUserScriptMessage(raw: String) {
+        val obj = runCatching { JSONObject(raw) }.getOrNull() ?: return
+        val scriptId = obj.optString("s")
+        if (scriptId.isEmpty()) return
+        when (obj.optString("t")) {
+            "set" -> {
+                val key = obj.optString("k")
+                viewModelScope.launch {
+                    container.userScripts.setValue(scriptId, key, obj.opt("v"))
+                }
+            }
+            "open" -> obj.optString("u").takeIf { it.isNotBlank() }?.let(::openInNewTab)
         }
     }
     fun setDynamicColor(on: Boolean) = io { container.settings.setDynamicColor(on) }

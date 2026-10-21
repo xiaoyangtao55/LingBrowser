@@ -10,6 +10,9 @@ import android.webkit.WebChromeClient
 import android.webkit.WebStorage
 import android.webkit.WebView
 import android.widget.FrameLayout
+import androidx.webkit.ScriptHandler
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
 import com.ling.browser.data.db.TabSnapshot
 import com.ling.browser.data.prefs.LingSettings
 import com.ling.browser.data.prefs.NightMode
@@ -76,6 +79,31 @@ class WebTabManager(private val context: Context) {
     private var mergedBlockRules: Set<String> = settings.adBlockRules
 
     /**
+     * 启用中的用户脚本快照（见 [com.ling.browser.data.repo.UserScriptRepository]）。
+     *
+     * 与订阅域名同理：web 层不认识仓库，由 UI 层经 [applyUserScripts] 注入。
+     * 快照里的 `valuesJson` 是 `GM_getValue` 的只读初值，注入时随包装代码一起下发。
+     */
+    private var userScripts: List<EnabledUserScript> = emptyList()
+
+    /** tabId -> document-start 的注册句柄；脚本变更或实例重建时要先摘掉旧的。 */
+    private val scriptHandlers = mutableMapOf<String, MutableList<ScriptHandler>>()
+
+    /** tabId -> 本页已注入过的 "脚本|时机|URL"，防止同一页重复执行。 */
+    private val injectedScripts = mutableMapOf<String, MutableSet<String>>()
+
+    /**
+     * 系统 WebView 是否支持 document-start 注入。
+     *
+     * 不支持时 `@run-at document-start` 的脚本降级到 [ScriptRunAt.END]
+     * （首帧已提交，是可达的最早时机）。特性检查本身在老系统上可能抛异常，
+     * 因此包一层 runCatching，失败按"不支持"处理。
+     */
+    private val documentStartSupported: Boolean = runCatching {
+        WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
+    }.getOrDefault(false)
+
+    /**
      * tabId -> 已提取的正文。
      *
      * 为什么要缓存：进入阅读视图后，页面的 DOM 已经被替换掉了，
@@ -106,12 +134,28 @@ class WebTabManager(private val context: Context) {
     var onDownloadRequested: ((url: String, mimeType: String?) -> Unit)? = null
 
     /**
+     * 打开 `.user.js` 安装链接的回调（由 UI 层弹安装确认）。
+     *
+     * 安装链接不加载：原始 JS 当网页渲染只会得到一屏代码，且用户离开后
+     * 容易误以为"已经装上了"。确认与导入都由 UI 层负责。
+     */
+    var onUserScriptLink: ((url: String) -> Unit)? = null
+
+    /**
      * 长按网页中的链接 / 图片 / 媒体时的回调（由 UI 层弹上下文菜单）。
      *
      * 只转发，不做任何判定 —— 菜单要展示哪些动作取决于当前页面状态
      * （能不能开新标签、当前是不是无痕），那只有 UI 层知道。
      */
     var onLongPress: ((HitTarget) -> Unit)? = null
+
+    /**
+     * 用户脚本通过 GM 桥发来的消息（原始 JSON）。
+     *
+     * 只转发不算账：解析消息、校验脚本 id、落库或开标签都属于 UI 层
+     * （见 [com.ling.browser.ui.BrowserViewModel]），web 层不导入 data 层。
+     */
+    var onUserScriptMessage: ((tabId: String, message: String) -> Unit)? = null
 
     /**
      * 主页搜索框提交的回调（查询串，可能是一句搜索词也可能是个网址）。
@@ -246,6 +290,80 @@ class WebTabManager(private val context: Context) {
             }
     }
 
+    // ---------------------------------------------------------------- 用户脚本
+
+    /**
+     * 注入启用中的用户脚本，并重新注册 document-start。
+     *
+     * 由 [com.ling.browser.ui.BrowserViewModel] 订阅
+     * [com.ling.browser.data.repo.UserScriptRepository.enabledScripts] 后调用：
+     * 导入 / 启停 / 删除都会让那个流发新值。
+     *
+     * 重注册只影响**下一次导航**：当前页已经跑过的脚本不会重跑（否则改一下开关
+     * 就会在页面上叠一份副作用）。
+     */
+    fun applyUserScripts(scripts: List<EnabledUserScript>) {
+        userScripts = scripts
+        webViews.forEach { (id, wv) -> registerDocumentStart(id, wv) }
+    }
+
+    /**
+     * 给一个 WebView 注册全部 document-start 脚本。
+     *
+     * `addDocumentStartJavaScript` 是按 WebView 注册、对**后续每次导航**生效的，
+     * 因此这里先摘掉旧句柄再按最新快照重注册。无痕标签整体跳过：脚本可能把
+     * 数据经 GM 存储写进磁盘，那与"不留痕迹"直接冲突。
+     */
+    private fun registerDocumentStart(tabId: String, wv: LingWebView) {
+        scriptHandlers.remove(tabId)?.forEach { handler -> runCatching { handler.remove() } }
+        if (!documentStartSupported || userScripts.isEmpty()) return
+        if (_tabs.value.firstOrNull { it.id == tabId }?.isIncognito == true) return
+
+        val handlers = mutableListOf<ScriptHandler>()
+        for (entry in userScripts) {
+            if (entry.script.runAt != ScriptRunAt.START) continue
+            val origins = entry.script.allowedOrigins
+            if (origins.isEmpty()) continue
+            runCatching {
+                handlers += WebViewCompat.addDocumentStartJavaScript(
+                    wv,
+                    scriptWrapper(entry.script, entry.id, entry.valuesJson),
+                    origins,
+                )
+            }
+        }
+        if (handlers.isNotEmpty()) scriptHandlers[tabId] = handlers
+    }
+
+    /**
+     * 在某个时机把匹配当前 URL 的脚本注入页面。
+     *
+     * 每个"脚本 + 时机 + URL"只注入一次：`onPageCommitVisible` 与
+     * `onPageFinished` 都可能对同一页触发多次，不设闸门会让脚本重复执行。
+     * 闸门在 [onPageStarted] 清零（新一次主框架导航）。
+     */
+    private fun injectUserScripts(
+        tabId: String,
+        wv: LingWebView,
+        url: String,
+        runAt: ScriptRunAt,
+    ) {
+        if (userScripts.isEmpty()) return
+        if (_tabs.value.firstOrNull { it.id == tabId }?.isIncognito == true) return
+
+        val injected = injectedScripts.getOrPut(tabId) { mutableSetOf() }
+        for (entry in userScripts) {
+            val actual = entry.script.runAt
+            val due = actual == runAt ||
+                // document-start 不可用时降级：END 是能拿到的最早时机。
+                (actual == ScriptRunAt.START && !documentStartSupported && runAt == ScriptRunAt.END)
+            if (!due) continue
+            if (!entry.script.matches(url)) continue
+            if (!injected.add("${entry.id}|$runAt|$url")) continue
+            wv.evaluateJavascript(scriptWrapper(entry.script, entry.id, entry.valuesJson), null)
+        }
+    }
+
     /** 命中一次拦截 +1。由后台线程经 [LingWebViewClient] 的回调调用（见 [blockedCount]）。 */
     private fun countBlocked() {
         _blockedCount.update { it + 1 }
@@ -291,11 +409,14 @@ class WebTabManager(private val context: Context) {
      * 不传 URL 时落在主页：优先用户自定义的主页，否则是「翎」的内置主页。
      */
     fun newTab(url: String? = null, incognito: Boolean = settings.incognito): TabState {
-        val target = url ?: settings.homepage
+        // 安装链接不能作为标签内容：新标签落在主页，随后弹安装确认。
+        val scriptUrl = url?.takeIf { isUserScriptUrl(it) }
+        val target = if (scriptUrl != null) settings.homepage else url ?: settings.homepage
         val tab = TabState(url = target, isIncognito = incognito)
         _tabs.update { it + tab }
         switchTo(tab.id)
         loadUrl(tab.id, target)
+        scriptUrl?.let { onUserScriptLink?.invoke(it) }
         return tab
     }
 
@@ -352,6 +473,10 @@ class WebTabManager(private val context: Context) {
             wv.loadUrl("about:blank")
             wv.destroy()
         }
+        // 用户脚本的两份簿记随标签一起清掉：句柄跟着 WebView 已销毁，
+        // 注入记录留着只会让同名 tabId 复用时误判"这页已经跑过"。
+        scriptHandlers.remove(id)
+        injectedScripts.remove(id)
 
         // 回收 favicon 的像素内存。必须在移出列表后立刻做：
         // Bitmap 的像素是非托管内存，GC 只收得回 Java 对象壳，
@@ -473,6 +598,12 @@ class WebTabManager(private val context: Context) {
     // ---------------------------------------------------------------- 导航操作
 
     fun loadUrl(id: String, url: String) {
+        // `.user.js` 安装链接不加载：原始 JS 当网页显示没有意义，交给 UI 层确认安装。
+        // 放在最前面：既不改 TabState，也不创建 WebView（新标签已在 [newTab] 落到主页）。
+        if (isUserScriptUrl(url)) {
+            onUserScriptLink?.invoke(url)
+            return
+        }
         val wv = obtainWebView(id)
         // 内置主页由原生渲染，绝不交给 WebView 解析协议 ——
         // 早期版本直接把 about:home 喂给 WebView，结果触发 onReceivedError 白屏。
@@ -1047,6 +1178,30 @@ class WebTabManager(private val context: Context) {
             applySettings(this@WebTabManager.settings, incognito, this@WebTabManager.shouldDarkenPages())
             // 无痕的清理只做**一次**（放在 applySettings 里会在每次设置变化时清空它的历史）
             if (incognito) resetForIncognito()
+
+            // GM 桥：GM_setValue / GM_openInTab 的唯一出口。
+            //
+            // 白名单用 `*`：脚本本身可以匹配任意站点，桥无法按脚本逐条收敛；
+            // 真正的门禁在消息处理端 —— 脚本 id 必须存在且处于启用状态，
+            // 写入只会进该脚本自己的值文件（见 UserScriptRepository.setValue）。
+            // 无痕标签不挂桥：与"无痕不注入用户脚本"保持一致。
+            if (!incognito) {
+                runCatching {
+                    if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
+                        WebViewCompat.addWebMessageListener(
+                            wv,
+                            USER_SCRIPT_BRIDGE,
+                            setOf("*"),
+                        ) { _, message, _, _, _ ->
+                            this@WebTabManager.onUserScriptMessage?.invoke(id, message.data.orEmpty())
+                        }
+                    }
+                }
+            }
+
+            // 这个 WebView 是新建的（或刚从 LRU 里被回收后重建），
+            // document-start 的注册随之丢失，必须重新挂上。
+            registerDocumentStart(id, wv)
             webChromeClient = object : WebChromeClient() {
                 override fun onProgressChanged(view: WebView?, newProgress: Int) {
                     updateTab(id) { it.copy(progress = newProgress) }
@@ -1093,6 +1248,9 @@ class WebTabManager(private val context: Context) {
             webViewClient = LingWebViewClient(
                 isIncognito = incognito,
                 onPageStarted = { url ->
+                    // 新一次主框架导航：用户脚本的"本页已注入"闸门清零。
+                    // 不放在 onPageFinished 里清 —— 那会把同页的第二次回调当成新页。
+                    injectedScripts.remove(id)
                     // 内置主页与阅读视图都是用 loadDataWithBaseURL 加载的，
                     // WebView 回调回来的是 baseUrl（HomePage.BASE_URL /
                     // ReaderPage.BASE_URL）而不是逻辑地址（ling://home /
@@ -1205,6 +1363,12 @@ class WebTabManager(private val context: Context) {
                         // 才是"网页内容是否该暗"的最终答案。
                         wv.injectDarkMode(this@WebTabManager.shouldDarkenPages())
 
+                        // 用户脚本：END 在这里补一次（个别页面不发 onPageCommitVisible），
+                        // 再跑 IDLE 那批。两处都有一页一次的闸门，不会重复执行。
+                        // 顺序固定为 END → IDLE，与脚本时机的语义一致。
+                        injectUserScripts(id, wv, url, ScriptRunAt.END)
+                        injectUserScripts(id, wv, url, ScriptRunAt.IDLE)
+
                         // 历史记录只记真实网址。阅读视图的 url 是合成的
                         // ling://reader，主页是 ling://home —— 两者都没有记录价值，
                         // 记进去只会在历史列表里留下点不开的条目。
@@ -1214,6 +1378,12 @@ class WebTabManager(private val context: Context) {
                     }
                 },
                 onProgress = { p -> updateTab(id) { it.copy(progress = p) } },
+                onPageVisible = { url ->
+                    // 首帧已提交：document-end 的注入点。内部页不注入。
+                    if (!InternalPage.isInternal(url, logicalUrlOf(id))) {
+                        injectUserScripts(id, wv, url, ScriptRunAt.END)
+                    }
+                },
                 onReceivedTitle = { t ->
                     // 主页保留「主页」这个标题；阅读视图的标题已是文章标题，
                     // 让它跟随 <title> 更新即可，但合成的 ling://reader 不该被覆盖。
@@ -1265,6 +1435,9 @@ class WebTabManager(private val context: Context) {
                 onExternalScheme = { uri -> onExternalUri?.invoke(uri) ?: false },
                 // 主页搜索框：只把查询串转出去，判定交给 UI 层（UrlUtils + 搜索引擎）
                 onInternalSearch = { query -> onSearchRequested?.invoke(query) },
+                // `.user.js` 以附件形式下发时不会走 shouldOverrideUrlLoading，
+                // 而是落到下载监听里：这里同样交给安装确认，而不是当普通文件下载。
+                onUserScriptLink = { url -> this@WebTabManager.onUserScriptLink?.invoke(url) },
                 // 用 lambda 而不是直接传布尔值：WebViewClient 是建 WebView 时
                 // 一次性构造的，传值会让开关"改完要重启才生效"。
                 //
@@ -1282,7 +1455,12 @@ class WebTabManager(private val context: Context) {
                 onAdBlocked = { countBlocked() },
             )
             setDownloadListener { url, _, _, mimeType, _ ->
-                onDownloadRequested?.invoke(url, mimeType)
+                // 用户脚本优先走安装流程：下载成文件后再导入多一步，且默认会存进下载目录。
+                if (isUserScriptUrl(url)) {
+                    onUserScriptLink?.invoke(url)
+                } else {
+                    onDownloadRequested?.invoke(url, mimeType)
+                }
             }
         }
 
@@ -1358,5 +1536,8 @@ class WebTabManager(private val context: Context) {
     companion object {
         /** 同时存活的 WebView 实例上限。Via 这类轻量浏览器也维持类似的少量实例。 */
         private const val MAX_WEBVIEWS = 6
+
+        /** 注入到页面的 GM 桥对象名（`window.LingGM`），与 [scriptWrapper] 里的垫片对应。 */
+        private const val USER_SCRIPT_BRIDGE = "LingGM"
     }
 }

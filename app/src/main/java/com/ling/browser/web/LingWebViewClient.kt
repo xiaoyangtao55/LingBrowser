@@ -21,6 +21,13 @@ class LingWebViewClient(
     private val isIncognito: Boolean,
     private val onPageStarted: (url: String) -> Unit,
     private val onPageFinished: (url: String, title: String) -> Unit,
+    /**
+     * 首帧已提交（`onPageCommitVisible`）。
+     *
+     * 用户脚本里 `@run-at document-end` 的注入点：这是最早能保证文档存在的
+     * 时机，比 `onPageFinished`（要等全部资源）贴近 DOMContentLoaded 得多。
+     */
+    private val onPageVisible: (url: String) -> Unit = {},
     private val onProgress: (progress: Int) -> Unit,
     private val onReceivedTitle: (title: String) -> Unit,
     private val onReceivedIcon: (Bitmap?) -> Unit,
@@ -60,6 +67,12 @@ class LingWebViewClient(
      * 这里只把查询串交出去，判定"网址还是搜索词"由 UI 层用同一套 UrlUtils 做。
      */
     private val onInternalSearch: (String) -> Unit = {},
+    /**
+     * 点开 `.user.js` 安装链接时的回调。
+     *
+     * 原始 JS 当网页渲染没有意义，这里直接取消导航，交给 UI 层弹安装确认。
+     */
+    private val onUserScriptLink: (url: String) -> Unit = {},
     /**
      * 检测到混合内容（HTTPS 页面里混入 HTTP 子资源）时回调一次。
      *
@@ -187,6 +200,7 @@ class LingWebViewClient(
     override fun onPageCommitVisible(view: WebView?, url: String?) {
         super.onPageCommitVisible(view, url)
         onProgress(100)
+        url?.let(onPageVisible)
     }
 
     override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
@@ -284,6 +298,12 @@ class LingWebViewClient(
         // → ERR_UNKNOWN_URL_SCHEME 白屏。
         HomePage.searchQueryOf(uri.toString())?.let { query ->
             onInternalSearch(query)
+            return true
+        }
+
+        // 用户脚本安装链接：取消导航（不把原始 JS 当网页显示），交给 UI 层确认安装。
+        if (isUserScriptUrl(uri.toString())) {
+            onUserScriptLink(uri.toString())
             return true
         }
 

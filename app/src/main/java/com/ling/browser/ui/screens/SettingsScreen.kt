@@ -541,6 +541,9 @@ fun BrowsingSettingsScreen(
     /** 累计拦下的广告/跟踪请求数（跨重启累加）。 */
     blockedCount: Long,
     onResetBlockedCount: () -> Unit,
+    /** 已安装的用户脚本数量，给出"有没有装过脚本"的一眼判据。 */
+    userScriptCount: Int,
+    onOpenUserScripts: () -> Unit,
     onOpenLinksExternal: (Boolean) -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
@@ -623,6 +626,19 @@ fun BrowsingSettingsScreen(
                         "累计已拦下 $blockedCount 个广告/跟踪请求，点按清零"
                     },
                     onClick = onResetBlockedCount,
+                )
+            }
+            item {
+                SettingRow(
+                    icon = LingIcons.Javascript,
+                    title = "用户脚本",
+                    // 提醒风险：脚本是整段 JS，不是沙箱，装之前该知道它能碰什么
+                    subtitle = if (userScriptCount == 0) {
+                        "从网址或本地导入 Tampermonkey 脚本（以页面权限运行，仅装可信来源）"
+                    } else {
+                        "已安装 $userScriptCount 个脚本，可导入、更新或停用"
+                    },
+                    onClick = onOpenUserScripts,
                 )
             }
             item {

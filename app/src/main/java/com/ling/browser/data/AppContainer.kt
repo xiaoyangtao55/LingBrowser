@@ -9,6 +9,7 @@ import com.ling.browser.data.repo.BookmarkRepository
 import com.ling.browser.data.repo.DownloadRepository
 import com.ling.browser.data.repo.HistoryRepository
 import com.ling.browser.data.repo.SessionRepository
+import com.ling.browser.data.repo.UserScriptRepository
 import com.ling.browser.download.DownloadEngine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -89,4 +90,13 @@ class AppContainer(context: Context) {
      * 构造即读回磁盘，`enabledDomains` 是启用中订阅的并集，供 WebView 拦截 lambda 查表。
      */
     val blockList: BlockListRepository = BlockListRepository(appContext)
+
+    /**
+     * 用户脚本的存储与启停。
+     *
+     * 与订阅名单同理：脚本源码整段落在应用私有目录（`files/userscripts`），
+     * 不塞 DataStore。仓库构造即异步读回，`enabledScripts` 是启用中脚本的
+     * 快照（含 GM 值初值），供 WebView 在 document-start / 页面就绪时注入。
+     */
+    val userScripts: UserScriptRepository = UserScriptRepository(appContext)
 }
