@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.1](https://github.com/xiaoyangtao55/LingBrowser/compare/v1.5.0...v1.5.1) (2026-10-22)
+
+
+### Bug Fixes
+
+* 消除 minSdk 23 下的 API 级别 lint 错误（CI lint 关卡恢复通过） ([7421856](https://github.com/xiaoyangtao55/LingBrowser/commit/74218564ee01541e5ec9d8cc30e8d693761cdf76))
+
 ## [1.5.0](https://github.com/xiaoyangtao55/LingBrowser/compare/v1.4.0...v1.5.0) (2026-10-22)
 
 
