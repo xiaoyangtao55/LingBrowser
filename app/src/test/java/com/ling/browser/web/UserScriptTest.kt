@@ -288,6 +288,113 @@ class UserScriptTest {
     }
 
     @Test
+    fun `GM_info 暴露元数据并正确转义`() {
+        val script = parse(
+            """
+            // ==UserScript==
+            // @name  引号"脚本
+            // @version 2.3
+            // @description 说明
+            // @match https://example.com/*
+            // @grant GM_getValue
+            // ==/UserScript==
+            """.trimIndent(),
+        )!!
+        val js = scriptWrapper(script, "u1", "{}")
+        assertTrue(js.contains("var GM_info={script:{name:\"引号\\\"脚本\""))
+        assertTrue(js.contains(",version:\"2.3\""))
+        assertTrue(js.contains("scriptHandler:'LingBrowser'"))
+        // unsafeWindow 无条件可用，指向页面自身 window
+        assertTrue(js.contains("var unsafeWindow=window;"))
+        // GM_addElement 是纯 DOM 能力，同样无条件提供
+        assertTrue(js.contains("function GM_addElement"))
+    }
+
+    @Test
+    fun `存储与剪贴板 API 按 grant 发放`() {
+        val granted = parse(
+            """
+            // ==UserScript==
+            // @name  授权
+            // @match https://example.com/*
+            // @grant GM_getValue
+            // @grant GM_deleteValue
+            // @grant GM_listValues
+            // @grant GM_setClipboard
+            // @grant GM_xmlhttpRequest
+            // ==/UserScript==
+            """.trimIndent(),
+        )!!
+        val js = scriptWrapper(granted, "u1", "{}")
+        assertTrue(js.contains("function GM_deleteValue"))
+        assertTrue(js.contains("function GM_listValues"))
+        assertTrue(js.contains("function GM_setClipboard"))
+        assertTrue(js.contains("function GM_xmlhttpRequest"))
+        assertTrue(js.contains("window.__lingGMDispatch"))
+
+        val none = parse(
+            """
+            // ==UserScript==
+            // @name  无授权
+            // @match https://example.com/*
+            // @grant none
+            // ==/UserScript==
+            """.trimIndent(),
+        )!!
+        val noJs = scriptWrapper(none, "u1", "{}")
+        assertFalse(noJs.contains("function GM_setClipboard"))
+        assertFalse(noJs.contains("function GM_deleteValue"))
+        assertFalse(noJs.contains("function GM_listValues"))
+    }
+
+    @Test
+    fun `解析 @resource 名称与地址`() {
+        val script = parse(
+            """
+            // ==UserScript==
+            // @name  资源
+            // @match https://example.com/*
+            // @resource logo https://example.com/logo.png
+            // @resource styles https://cdn.example.com/a.css?v=1
+            // @resource 坏地址 ftp://example.com/x
+            // @grant GM_getResourceText
+            // ==/UserScript==
+            """,
+        )!!
+        assertEquals(
+            mapOf(
+                "logo" to "https://example.com/logo.png",
+                "styles" to "https://cdn.example.com/a.css?v=1",
+            ),
+            script.resources,
+        )
+    }
+
+    @Test
+    fun `资源 API 按 grant 发放并内联资源表`() {
+        val script = parse(
+            """
+            // ==UserScript==
+            // @name  资源
+            // @match https://example.com/*
+            // @grant GM_getResourceText
+            // ==/UserScript==
+            """,
+        )!!
+        val js = scriptWrapper(
+            script,
+            "u1",
+            "{}",
+            "",
+            """{"logo":{"m":"image/png","b":"aGVsbG8="}}""",
+        )
+        assertTrue(js.contains("var RES={\"logo\""))
+        assertTrue(js.contains("function GM_getResourceText"))
+        assertTrue(js.contains("function GM_getResourceURL"))
+        assertTrue(js.contains("data:'+r.m+';base64,'+r.b"))
+    }
+
+    @Test
     fun `canonicalUrl 归一化规则`() {
         assertEquals("https://example.com/p?q=1", canonicalUrl("https://Example.com:443/p?q=1#h"))
         assertEquals("http://example.com/", canonicalUrl("http://example.com"))

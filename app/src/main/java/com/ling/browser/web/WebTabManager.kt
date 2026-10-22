@@ -45,6 +45,15 @@ data class CertPrompt(
 )
 
 /**
+ * 一次等待用户裁决的表单重提交。
+ *
+ * POST 结果页刷新时，WebView 不知道该不该把表单数据再发一遍（本地缓存里没有
+ * 请求体），默认行为是**什么都不做** —— 表现为"刷新没反应"。这里与 Chrome
+ * 对齐：弹窗问一次，用户确认才重新提交。
+ */
+data class FormResubmitPrompt(val host: String)
+
+/**
  * 标签页与 WebView 实例的管理者。
  *
  * 设计要点：WebView 的创建代价很高（每个实例约数 MB 原生内存），
@@ -171,6 +180,28 @@ class WebTabManager(private val context: Context) {
         val tabId: String,
         val prompt: CertPrompt,
         val handler: SslErrorHandler,
+    )
+
+    /**
+     * 尚未裁决的表单重提交（FIFO）。
+     *
+     * 与证书错误同理：`resend` / `dontResend` 两个 [Message] 必须且只能发一个，
+     * 否则 WebView 的加载会卡在等待状态。队列上限很小 —— 这本来就是低频事件，
+     * 超出的直接按"不重新提交"处理。
+     */
+    private val formQueue = ArrayDeque<PendingFormResubmit>()
+
+    /** 当前正在弹窗的那一条；null 表示没有弹窗。 */
+    private var formShown: PendingFormResubmit? = null
+
+    /** 表单重提交弹窗回调；参数为 null 表示关掉弹窗。 */
+    var onFormResubmitPrompt: ((FormResubmitPrompt?) -> Unit)? = null
+
+    private class PendingFormResubmit(
+        val tabId: String,
+        val prompt: FormResubmitPrompt,
+        val resend: Message,
+        val dontResend: Message,
     )
 
     /** 需要 UI 层处理的副作用（打开外部应用、下载等）。 */
@@ -457,7 +488,7 @@ class WebTabManager(private val context: Context) {
             runCatching {
                 handlers += WebViewCompat.addDocumentStartJavaScript(
                     wv,
-                    scriptWrapper(entry.script, entry.id, entry.valuesJson, entry.requireCode),
+                    scriptWrapper(entry.script, entry.id, entry.valuesJson, entry.requireCode, entry.resourcesJson),
                     origins,
                 )
             }
@@ -491,7 +522,7 @@ class WebTabManager(private val context: Context) {
             if (!entry.script.matches(url)) continue
             if (!injected.add("${entry.id}|$runAt|$url")) continue
             wv.evaluateJavascript(
-                scriptWrapper(entry.script, entry.id, entry.valuesJson, entry.requireCode),
+                scriptWrapper(entry.script, entry.id, entry.valuesJson, entry.requireCode, entry.resourcesJson),
                 null,
             )
         }
@@ -644,6 +675,8 @@ class WebTabManager(private val context: Context) {
         tab?.let { certExceptions.remove(it.id) }
         // 还有未裁决的证书错误也一并取消：标签都没了，没人会再回答弹窗。
         tab?.let { cancelCertPromptsFor(it.id) }
+        // 表单重提交同理：不兑现会让该 WebView 的加载一直挂着。
+        tab?.let { cancelFormResubmitsFor(it.id) }
     }
 
     /**
@@ -1193,6 +1226,17 @@ class WebTabManager(private val context: Context) {
         }
     }
 
+    /**
+     * 在指定标签页的页面主世界执行一段 JS。
+     *
+     * 用于把 `GM_xmlhttpRequest` 的原生结果回传给脚本。**必须在 UI 线程调用**，
+     * 且只做"投递"：标签已关闭或实例被 LRU 回收时静默忽略，调用方不需要
+     * 区分这些情况 —— 请求结果本来就没有人接收了。
+     */
+    fun evalInTab(id: String, js: String) {
+        webViews[id]?.evaluateJavascript(js, null)
+    }
+
     fun reload(id: String = _activeId.value) {
         val wv = obtainWebView(id)
         // 主页是原生拼接的 HTML：配色是 [loadHome] 时烘进 `:root` 的内联变量。
@@ -1351,6 +1395,89 @@ class WebTabManager(private val context: Context) {
                 errorText = "$reason，已阻断连接",
             )
         }
+    }
+
+    /**
+     * POST 结果页刷新：交给 UI 决定是否重新提交。
+     *
+     * `onFormResubmission` 给的两个 [Message] 是二选一的开关，必须发且只发一个。
+     * 与证书错误一样排队：同一时刻只弹一个，UI 还没接线时按"不重新提交"处理 ——
+     * 否则消息永远不发，刷新会停在无响应状态。
+     */
+    private fun handleFormResubmission(tabId: String, resend: Message, dontResend: Message) {
+        if (formQueue.size >= MAX_PENDING_FORMS) {
+            dontResend.sendToTarget()
+            return
+        }
+        val host = runCatching {
+            Uri.parse(_tabs.value.firstOrNull { it.id == tabId }?.url.orEmpty()).host
+        }.getOrNull().orEmpty()
+        formQueue.addLast(
+            PendingFormResubmit(
+                tabId = tabId,
+                prompt = FormResubmitPrompt(host.ifBlank { "此页面" }),
+                resend = resend,
+                dontResend = dontResend,
+            ),
+        )
+        // 弹窗只在 UI 线程上操作；onFormResubmission 本身就在 UI 线程回调。
+        showNextForm()
+    }
+
+    /** 用户对表单重提交的选择：true = 重新提交，false = 放弃。 */
+    fun resolveFormResubmit(resend: Boolean) {
+        val item = formShown ?: return
+        formShown = null
+        if (resend) item.resend.sendToTarget() else item.dontResend.sendToTarget()
+        showNextForm()
+    }
+
+    /**
+     * UI 销毁时把待裁决的表单重提交全部按"不重新提交"兑现。
+     *
+     * 不兑现就会让 WebView 的加载一直等着，页面永远停在刷新前的状态。
+     */
+    fun cancelFormResubmits() {
+        formShown?.let { it.dontResend.sendToTarget() }
+        formShown = null
+        while (true) {
+            val item = formQueue.removeFirstOrNull() ?: break
+            item.dontResend.sendToTarget()
+        }
+        onFormResubmitPrompt?.invoke(null)
+    }
+
+    /** 关标签时清理该标签的待裁决项。 */
+    private fun cancelFormResubmitsFor(tabId: String) {
+        formShown?.takeIf { it.tabId == tabId }?.let {
+            it.dontResend.sendToTarget()
+            formShown = null
+            showNextForm()
+        }
+        val iterator = formQueue.iterator()
+        while (iterator.hasNext()) {
+            val item = iterator.next()
+            if (item.tabId == tabId) {
+                item.dontResend.sendToTarget()
+                iterator.remove()
+            }
+        }
+    }
+
+    /** 队列里挑一条展示；全部处理完时向 UI 发 null 关掉弹窗。 */
+    private fun showNextForm() {
+        if (formShown == null) {
+            while (true) {
+                val next = formQueue.removeFirstOrNull() ?: break
+                if (onFormResubmitPrompt == null) {
+                    next.dontResend.sendToTarget()
+                    continue
+                }
+                formShown = next
+                break
+            }
+        }
+        onFormResubmitPrompt?.invoke(formShown?.prompt)
     }
 
     fun stopLoading(id: String = _activeId.value) {
@@ -1807,6 +1934,10 @@ class WebTabManager(private val context: Context) {
                     val handler = this@WebTabManager.onClientCertRequest
                     if (handler == null) request.cancel() else handler(request)
                 },
+                // POST 结果页刷新：交给 UI 弹窗决定是否重新提交。
+                onFormResubmission = { _, dontResend, resend ->
+                    handleFormResubmission(id, resend, dontResend)
+                },
                 onExternalScheme = { uri -> onExternalUri?.invoke(uri) ?: false },
                 // 主页搜索框：只把查询串转出去，判定交给 UI 层（UrlUtils + 搜索引擎）
                 onInternalSearch = { query -> onSearchRequested?.invoke(query) },
@@ -1967,6 +2098,9 @@ class WebTabManager(private val context: Context) {
          * 队列封顶后其余直接取消，避免内存里堆满永不兑现的 handler。
          */
         private const val MAX_PENDING_CERTS = 8
+
+        /** 表单重提交的待裁决上限：低频事件，超过就直接放弃重提交。 */
+        private const val MAX_PENDING_FORMS = 4
     }
 }
 

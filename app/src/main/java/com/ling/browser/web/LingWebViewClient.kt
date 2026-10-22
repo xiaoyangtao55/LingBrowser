@@ -3,6 +3,7 @@ package com.ling.browser.web
 import android.graphics.Bitmap
 import android.net.Uri
 import android.net.http.SslError
+import android.os.Message
 import android.webkit.ClientCertRequest
 import android.webkit.HttpAuthHandler
 import android.webkit.RenderProcessGoneDetail
@@ -136,6 +137,13 @@ class LingWebViewClient(
      * 证书选择交给系统 KeyChain 对话框，由 UI 层接线。
      */
     private val onClientCertRequest: ((ClientCertRequest) -> Unit)? = null,
+    /**
+     * POST 结果页刷新时的重提交询问（`onFormResubmission`）。
+     *
+     * WebView 默认什么都不做 —— 刷新会让页面停在原处，看起来"点了没反应"。
+     * 两个 [Message] 是二选一的开关，接管方必须且只能 `sendToTarget()` 一个。
+     */
+    private val onFormResubmission: ((WebView, Message, Message) -> Unit)? = null,
 ) : WebViewClient() {
 
     /**
@@ -332,6 +340,21 @@ class LingWebViewClient(
             return
         }
         delegate(req)
+    }
+
+    /**
+     * POST 结果页刷新。
+     *
+     * 没有接管方（或 `view` 已失效）时直接放弃重提交：两个 Message 一个都不发
+     * 会让加载永远等下去，页面卡在"刷新中"。
+     */
+    override fun onFormResubmission(view: WebView?, dontResend: Message, resend: Message) {
+        val delegate = onFormResubmission
+        if (delegate == null || view == null) {
+            dontResend.sendToTarget()
+            return
+        }
+        delegate(view, dontResend, resend)
     }
 
     /**

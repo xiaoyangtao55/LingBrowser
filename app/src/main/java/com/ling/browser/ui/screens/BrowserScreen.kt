@@ -99,6 +99,7 @@ import com.ling.browser.ui.components.IncognitoBanner
 import com.ling.browser.util.UrlUtils
 import com.ling.browser.web.SecurityState
 import com.ling.browser.web.CertPrompt
+import com.ling.browser.web.FormResubmitPrompt
 import com.ling.browser.web.JsDialogRequest
 import com.ling.browser.web.WebAuthRequest
 import kotlinx.coroutines.Dispatchers
@@ -182,6 +183,10 @@ fun BrowserScreen(
     // 与「本次浏览过程中不再询问」的勾选状态。
     var certPrompt by remember { mutableStateOf<CertPrompt?>(null) }
     var certRemember by remember { mutableStateOf(false) }
+
+    // POST 结果页刷新：WebView 自己不会重发请求体，由这里弹窗确认。
+    // 队列同样在 WebTabManager 里，这里只存当前展示的一条。
+    var formPrompt by remember { mutableStateOf<FormResubmitPrompt?>(null) }
 
     // 网页全屏（HTML5 视频的「全屏」按钮）。非 null 时用一层覆盖整个界面，
     // callback 由 WebView 提供，退出全屏时必须回调它，否则 WebView 仍以为
@@ -490,6 +495,17 @@ fun BrowserScreen(
             // 界面已销毁，没人能再回答这些 handler；不取消就会让握手悬空。
             viewModel.tabManager.cancelCertPrompts()
             certPrompt = null
+        }
+    }
+
+    // 表单重提交弹窗：与证书弹窗一样，Dispose 时必须把待裁决项兑现，
+    // 否则该 WebView 的加载会一直停在等待状态。
+    DisposableEffect(Unit) {
+        viewModel.tabManager.onFormResubmitPrompt = { prompt -> formPrompt = prompt }
+        onDispose {
+            viewModel.tabManager.onFormResubmitPrompt = null
+            viewModel.tabManager.cancelFormResubmits()
+            formPrompt = null
         }
     }
 
@@ -1114,6 +1130,30 @@ fun BrowserScreen(
             dismissButton = {
                 TextButton(onClick = {
                     viewModel.tabManager.resolveCertPrompt(proceed = false, remember = false)
+                }) { Text("取消") }
+            },
+        )
+    }
+
+    // ---- POST 结果页刷新 ----
+    //
+    // 与 Chrome 一致：明确问一次要不要重新提交表单数据。两个按钮都必须兑现
+    // WebTabManager 里的 resend / dontResend，onDismissRequest 按取消处理。
+    formPrompt?.let { prompt ->
+        AlertDialog(
+            onDismissRequest = { viewModel.tabManager.resolveFormResubmit(resend = false) },
+            title = { Text("重新提交表单？") },
+            text = {
+                Text("${prompt.host} 需要重新发送刚才提交的表单数据才能刷新此页面。")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.tabManager.resolveFormResubmit(resend = true)
+                }) { Text("重新提交") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    viewModel.tabManager.resolveFormResubmit(resend = false)
                 }) { Text("取消") }
             },
         )

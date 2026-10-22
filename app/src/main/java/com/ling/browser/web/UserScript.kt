@@ -74,6 +74,13 @@ data class UserScript(
      * 注入时不再联网，否则每次页面加载都要等一串网络请求。
      */
     val requireUrls: List<String> = emptyList(),
+    /**
+     * `@resource 名称 地址` 的映射。
+     *
+     * 与 [requireUrls] 一样只留地址，内容由仓储层在导入时抓取并缓存；
+     * 注入时随脚本一次性带进页面（`GM_getResourceText` 是同步语义）。
+     */
+    val resources: Map<String, String> = emptyMap(),
 ) {
     /** 没有任何规则时不匹配任何页面 —— 与 Tampermonkey 语义一致。 */
     fun matches(url: String): Boolean =
@@ -112,6 +119,14 @@ data class EnabledUserScript(
     val valuesJson: String,
     /** 导入时缓存的 `@require` 源码（无依赖时为空串）。 */
     val requireCode: String = "",
+    /**
+     * 导入时缓存的 `@resource` 内容，形如
+     * `{"名称":{"m":"mime","b":"base64"}}`。
+     *
+     * 用 base64 而不是直接存文本：资源可能是图片/字体，`GM_getResourceURL`
+     * 需要拼成 `data:` URL 给 CSS 用。
+     */
+    val resourcesJson: String = "{}",
 )
 
 /** 元数据头起止标记（去掉 `//` 与空白后比较）。 */
@@ -188,6 +203,20 @@ object UserScriptParser {
             .filter { it.startsWith("http://", ignoreCase = true) || it.startsWith("https://", ignoreCase = true) }
             .distinct()
 
+        // @resource 的格式是 `<名称> <地址>`，名称里不允许空格。
+        val resources = LinkedHashMap<String, String>()
+        for (line in meta["resource"].orEmpty()) {
+            val name = line.substringBefore(' ').substringBefore('\t').trim()
+            val url = line.substring(name.length).trim()
+            if (name.isEmpty() || url.isEmpty()) continue
+            if (!url.startsWith("http://", ignoreCase = true) &&
+                !url.startsWith("https://", ignoreCase = true)
+            ) {
+                continue
+            }
+            resources[name] = url
+        }
+
         // 正文：丢掉元数据头那一段。其余内容（许可证注释、'use strict' 等）原样保留。
         val code = lines.filterIndexed { index, _ -> index < begin || index > end }
             .joinToString("\n")
@@ -206,6 +235,7 @@ object UserScriptParser {
             patternLabels = labels,
             code = code,
             requireUrls = requireUrls,
+            resources = resources,
         )
     }
 
@@ -370,6 +400,7 @@ internal fun scriptWrapper(
     scriptId: String,
     valuesJson: String,
     requireCode: String = "",
+    resourcesJson: String = "{}",
 ): String {
     // 没有匹配规则 = 永远不该运行。生成一段空脚本而不是 `var inc=;` 这种语法错误。
     if (script.includes.isEmpty()) return "(function(){})();"
@@ -388,6 +419,7 @@ internal fun scriptWrapper(
         }
         if (script.noFrames) append("if(window.top!==window.self)return;")
         append("var V=").append(valuesJson.takeIf { it.isNotBlank() } ?: "{}").append(";")
+        append("var RES=").append(resourcesJson.takeIf { it.isNotBlank() } ?: "{}").append(";")
         append(gmPrelude(script, scriptId))
         append("\n")
         // 依赖必须在脚本正文之前：Greasyfork 上大量脚本直接使用 jQuery/$。
@@ -405,29 +437,90 @@ internal fun scriptWrapper(
  * GM_* 垫片。
  *
  * 按 `@grant` 发放能力：
- * - `GM_addStyle` / `GM_log` 是纯前端实现，无条件提供（不少脚本不写 @grant 也在用）；
- * - `GM_getValue` / `GM_setValue` 与 `GM_openInTab` 涉及原生桥，必须显式 @grant。
+ * - `GM_addStyle` / `GM_addElement` / `GM_log` 是纯前端实现，无条件提供
+ *   （不少脚本不写 @grant 也在用，缺了会直接 ReferenceError）；
+ * - `GM_info` / `unsafeWindow` 在所有用户脚本里都应存在，同样无条件提供；
+ * - `GM_getValue` / `GM_setValue` / `GM_deleteValue` / `GM_listValues`
+ *   与 `GM_openInTab` / `GM_setClipboard` 涉及原生桥，必须显式 @grant。
  *
  * 写入走 `window.LingGM.postMessage`（见 [WebTabManager] 的桥注册）。桥对象可能
  * 在低版本 WebView 上不存在，此时静默丢弃而不是抛错 —— 脚本不该因为一个
  * 可选能力缺失而整体崩掉。
+ *
+ * `GM_info` 只填脚本自身元数据与脚本管理器名：Tampermonkey 的 `GM_info` 还有
+ * 运行环境字段，但脚本实际只读 `script.name/version` 这几项，多填反而更容易
+ * 让脚本走 Tampermonkey 专属分支。
  */
 private fun gmPrelude(script: UserScript, scriptId: String): String {
     fun granted(name: String): Boolean =
         script.grants.contains(name) || script.grants.contains("GM.*") || script.grants.contains("*")
 
+    val storageGranted = granted("GM_getValue") || granted("GM_setValue") ||
+        granted("GM_deleteValue") || granted("GM_listValues")
+
     return buildString {
         append("var SID=").append(jsString(scriptId)).append(";")
         append("function post(m){try{m.s=SID;if(window.LingGM)window.LingGM.postMessage(JSON.stringify(m))}catch(e){}}")
+        // 原生 → 页面的回调分发：按脚本 id 分表，避免多个脚本的请求 id 互相撞车。
+        // 定义在 window 上并做幂等判断：同一页可能注入多个脚本，只需一份分发器。
+        append("var CB={};window.__lingGMCB=window.__lingGMCB||{};window.__lingGMCB[SID]=CB;")
+        append("window.__lingGMDispatch=window.__lingGMDispatch||function(s,i,e,p){")
+        append("var m=window.__lingGMCB&&window.__lingGMCB[s];")
+        append("if(m&&m[i]){try{m[i](e,p)}catch(x){}}}")
         append("function GM_log(){try{console.log.apply(console,['[翎]'].concat([].slice.call(arguments)))}catch(e){}}")
         append("function GM_addStyle(css){var s=document.createElement('style');s.textContent=css;")
         append("(document.head||document.documentElement).appendChild(s);return s}")
-        if (granted("GM_getValue") || granted("GM_setValue")) {
+        append("function GM_addElement(a,b,c){var p,t,at;")
+        append("if(typeof a==='string'){p=document.head||document.documentElement;t=a;at=b||{}}")
+        append("else{p=a;t=b;at=c||{}}")
+        append("var e=document.createElement(t);")
+        append("for(var k in at){var v=at[k];")
+        append("if(k==='textContent')e.textContent=v;")
+        append("else if(typeof v==='function'&&k.slice(0,2)==='on')e.addEventListener(k.slice(2),v);")
+        append("else e.setAttribute(k,v)}")
+        append("if(p&&p.appendChild)p.appendChild(e);return e}")
+        append("var unsafeWindow=window;")
+        append("var GM_info={script:{name:").append(jsString(script.name))
+        append(",namespace:").append(jsString(script.namespace))
+        append(",version:").append(jsString(script.version))
+        append(",description:").append(jsString(script.description))
+        append(",grant:[").append(script.grants.joinToString(",") { jsString(it) }).append("]}")
+        append(",scriptHandler:'LingBrowser',version:'1.0'};")
+        if (storageGranted) {
             append("function GM_getValue(k,d){return Object.prototype.hasOwnProperty.call(V,k)?V[k]:d}")
             append("function GM_setValue(k,v){V[k]=v;post({t:'set',k:String(k),v:v})}")
+            append("function GM_deleteValue(k){k=String(k);try{delete V[k]}catch(e){}post({t:'del',k:k})}")
+            append("function GM_listValues(){return Object.keys(V)}")
         }
         if (granted("GM_openInTab")) {
             append("function GM_openInTab(u){post({t:'open',u:String(u)})}")
+        }
+        if (granted("GM_setClipboard")) {
+            append("function GM_setClipboard(t){post({t:'clip',v:String(t)})}")
+        }
+        if (granted("GM_getResourceText") || granted("GM_getResourceURL")) {
+            // 资源在导入时已经抓成 base64 并随注入带进来，这里纯前端解码即可。
+            // TextDecoder 不可用时退回 atob（非 UTF-8 文本会乱码，但不至于抛错）。
+            append("function GM_getResourceText(n){var r=RES[n];if(!r)return null;")
+            append("try{return new TextDecoder().decode(Uint8Array.from(atob(r.b),")
+            append("function(c){return c.charCodeAt(0)}))}catch(e){try{return atob(r.b)}catch(x){return null}}}")
+            append("function GM_getResourceURL(n){var r=RES[n];")
+            append("return r?('data:'+r.m+';base64,'+r.b):null}")
+        }
+        if (granted("GM_xmlhttpRequest")) {
+            append("function GM_xmlhttpRequest(d){d=d||{};")
+            append("var i='r'+Date.now().toString(36)+Math.random().toString(36).slice(2);")
+            append("CB[i]=function(e,p){")
+            append("if(e==='load'){if(d.responseType==='json'){try{p.response=JSON.parse(p.responseText)}catch(x){p.response=null}}")
+            append("if(d.onreadystatechange){try{d.onreadystatechange(p)}catch(x){}}if(d.onload){d.onload(p)}}")
+            append("else if(e==='error'){if(d.onreadystatechange){try{d.onreadystatechange(p)}catch(x){}}")
+            append("if(d.onerror){d.onerror(p)}}")
+            append("else if(e==='timeout'){if(d.ontimeout){d.ontimeout(p)}}")
+            append("else if(e==='abort'){if(d.onabort){d.onabort(p)}}")
+            append("else if(e==='progress'){if(d.onprogress){d.onprogress(p)}}};")
+            append("post({t:'xhr',id:i,m:String(d.method||'GET').toUpperCase(),u:String(d.url||''),")
+            append("h:d.headers||{},d:typeof d.data==='undefined'?null:d.data,to:d.timeout||0,rt:d.responseType||''});")
+            append("return{abort:function(){post({t:'xa',id:i})}}}")
         }
     }
 }

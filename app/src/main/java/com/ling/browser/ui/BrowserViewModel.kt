@@ -1,7 +1,10 @@
 package com.ling.browser.ui
 
 import android.app.Application
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.net.Uri
+import android.webkit.CookieManager
 import androidx.compose.ui.graphics.Color
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -31,13 +34,21 @@ import com.ling.browser.web.HitTarget
 import com.ling.browser.web.InternalPage
 import com.ling.browser.web.ReaderPage
 import com.ling.browser.web.ReaderResult
+import com.ling.browser.web.ScriptHttpRequest
+import com.ling.browser.web.ScriptHttpResponse
+import com.ling.browser.web.ScriptHttpTooLargeException
 import com.ling.browser.web.SniffResult
 import com.ling.browser.web.TabState
 import com.ling.browser.web.UrlScheme
 import com.ling.browser.web.WebTabManager
+import com.ling.browser.web.jsString
 import java.io.ByteArrayOutputStream
+import java.net.SocketTimeoutException
+import java.util.Locale
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -218,9 +229,11 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
                 tabManager.applyUserScripts(scripts)
             }
         }
-        // 页面里 GM_* 的回调：写入值表或打开新标签。
+        // 页面里 GM_* 的回调：写入值表、打开新标签、发跨域请求或写剪贴板。
         // 消息来自 WebView 的 UI 线程，因此这里可以直接操作标签页。
-        tabManager.onUserScriptMessage = { _, message -> handleUserScriptMessage(message) }
+        tabManager.onUserScriptMessage = { tabId, message ->
+            handleUserScriptMessage(tabId, message)
+        }
         // 点开 `.user.js` 安装链接：只记下地址弹确认，不直接加载，也不直接安装。
         tabManager.onUserScriptLink = { url -> _pendingUserScript.value = url }
 
@@ -1179,6 +1192,24 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** GM_xmlhttpRequest 的在途请求：只有存着 tabId / 脚本 id 才能把结果送回页面。 */
+    private class RunningScriptRequest(
+        val tabId: String,
+        val scriptId: String,
+        val job: Job,
+        val request: ScriptHttpRequest,
+    )
+
+    private val scriptRequests = HashMap<String, RunningScriptRequest>()
+
+    private companion object {
+        /** 同时进行的脚本请求上限：跨域请求不受 CORS 约束，需要自己兜一道。 */
+        const val MAX_SCRIPT_REQUESTS = 8
+        const val DEFAULT_SCRIPT_TIMEOUT_MS = 30_000
+        const val MIN_SCRIPT_TIMEOUT_MS = 1_000
+        const val MAX_SCRIPT_TIMEOUT_MS = 120_000
+    }
+
     /**
      * 处理页面里 GM 垫片发来的消息。
      *
@@ -1186,7 +1217,7 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
      * （由 [com.ling.browser.data.repo.UserScriptRepository.setValue] 二次校验），
      * 非法 JSON 直接丢弃。写入只进该脚本自己的值文件，不碰任何其它状态。
      */
-    private fun handleUserScriptMessage(raw: String) {
+    private fun handleUserScriptMessage(tabId: String, raw: String) {
         val obj = runCatching { JSONObject(raw) }.getOrNull() ?: return
         val scriptId = obj.optString("s")
         if (scriptId.isEmpty()) return
@@ -1198,7 +1229,174 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
             "open" -> obj.optString("u").takeIf { it.isNotBlank() }?.let(::openInNewTab)
+            "del" -> {
+                val key = obj.optString("k")
+                viewModelScope.launch {
+                    container.userScripts.deleteValue(scriptId, key)
+                }
+            }
+            "clip" -> obj.optString("v").takeIf { it.isNotEmpty() }?.let { text ->
+                // 消息来自 UI 线程（WebMessageListener 的契约），可以直接碰剪贴板。
+                runCatching {
+                    getApplication<Application>()
+                        .getSystemService(ClipboardManager::class.java)
+                        ?.setPrimaryClip(ClipData.newPlainText("翎 · 用户脚本", text))
+                }
+            }
+            "xhr" -> startScriptRequest(tabId, scriptId, obj)
+            "xa" -> abortScriptRequest(obj.optString("id"))
         }
+    }
+
+    /**
+     * 发起一次 `GM_xmlhttpRequest`。
+     *
+     * 与页面自己的 `fetch` 的关键差别是不受 CORS 限制，因此这里**必须**先确认
+     * 脚本仍然存在且启用 —— 桥对象暴露给整个页面，不能让任意网页借它发跨域请求。
+     * Cookie 从 [CookieManager] 取，与页面共享登录态（Tampermonkey 默认行为）。
+     */
+    private fun startScriptRequest(tabId: String, scriptId: String, details: JSONObject) {
+        val requestId = details.optString("id").takeIf { it.isNotEmpty() } ?: return
+        if (container.userScripts.enabledScripts.value.none { it.id == scriptId }) return
+
+        fun fail(message: String) {
+            deliverScriptEvent(tabId, scriptId, requestId, "error", scriptFailurePayload(message))
+        }
+
+        if (scriptRequests.size >= MAX_SCRIPT_REQUESTS) {
+            fail("并发请求过多")
+            return
+        }
+        val url = details.optString("u")
+        val scheme = runCatching { Uri.parse(url).scheme?.lowercase(Locale.ROOT) }.getOrNull()
+        if (scheme != "http" && scheme != "https") {
+            fail("只支持 http(s) 请求")
+            return
+        }
+
+        val method = details.optString("m", "GET").uppercase(Locale.ROOT)
+        val headers = LinkedHashMap<String, String>()
+        details.optJSONObject("h")?.let { h ->
+            for (key in h.keys()) headers[key] = h.optString(key)
+        }
+        val rawData = details.opt("d")
+        val hasBody = rawData != null && rawData !== JSONObject.NULL
+        // 对象/数组形式的数据按 JSON 发送，与 Tampermonkey 的处理一致。
+        val isJsonBody = hasBody && rawData !is String
+        if (isJsonBody && headers.keys.none { it.equals("Content-Type", ignoreCase = true) }) {
+            headers["Content-Type"] = "application/json; charset=utf-8"
+        }
+        val body = when {
+            !hasBody -> null
+            rawData is String -> rawData.toByteArray(Charsets.UTF_8)
+            else -> rawData.toString().toByteArray(Charsets.UTF_8)
+        }
+        val timeout = details.optInt("to", DEFAULT_SCRIPT_TIMEOUT_MS)
+            .coerceIn(MIN_SCRIPT_TIMEOUT_MS, MAX_SCRIPT_TIMEOUT_MS)
+        val responseType = details.optString("rt")
+
+        // 已在 UI 线程（WebMessageListener 回调），CookieManager 可以安全调用。
+        val cookie = runCatching { CookieManager.getInstance().getCookie(url) }.getOrNull()
+        val request = ScriptHttpRequest(url, method, headers, body, timeout, cookie)
+
+        val job = viewModelScope.launch {
+            try {
+                val response = withContext(Dispatchers.IO) { request.execute() }
+                withContext(Dispatchers.Main) {
+                    // 脚本请求拿到的 Set-Cookie 也要落回 WebView 的 CookieStore，
+                    // 否则"用 GM_xhr 登录、页面自己刷新"这类流程会丢会话。
+                    for (value in response.setCookies) {
+                        runCatching { CookieManager.getInstance().setCookie(response.finalUrl, value) }
+                    }
+                    if (scriptRequests[requestId] != null) {
+                        deliverScriptEvent(
+                            tabId,
+                            scriptId,
+                            requestId,
+                            "load",
+                            scriptResponsePayload(response, responseType),
+                        )
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: ScriptHttpTooLargeException) {
+                if (scriptRequests[requestId] != null) fail("响应体超过 2 MiB")
+            } catch (e: SocketTimeoutException) {
+                if (scriptRequests[requestId] != null) {
+                    deliverScriptEvent(
+                        tabId,
+                        scriptId,
+                        requestId,
+                        "timeout",
+                        scriptFailurePayload("请求超时"),
+                    )
+                }
+            } catch (e: Exception) {
+                if (scriptRequests[requestId] != null) fail(e.message ?: "请求失败")
+            } finally {
+                scriptRequests.remove(requestId)
+            }
+        }
+        scriptRequests[requestId] = RunningScriptRequest(tabId, scriptId, job, request)
+    }
+
+    /** 中止在途请求：先断开 socket，再取消协程，最后把 abort 事件交给脚本。 */
+    private fun abortScriptRequest(requestId: String) {
+        val running = scriptRequests.remove(requestId) ?: return
+        running.request.abort()
+        running.job.cancel()
+        deliverScriptEvent(
+            running.tabId,
+            running.scriptId,
+            requestId,
+            "abort",
+            scriptFailurePayload("已中止"),
+        )
+    }
+
+    private fun scriptFailurePayload(message: String): JSONObject = JSONObject().apply {
+        put("readyState", 4)
+        put("status", 0)
+        put("statusText", "")
+        put("finalUrl", "")
+        put("responseHeaders", "")
+        put("responseText", "")
+        put("error", message)
+    }
+
+    private fun scriptResponsePayload(
+        response: ScriptHttpResponse,
+        responseType: String,
+    ): JSONObject = JSONObject().apply {
+        put("readyState", 4)
+        put("status", response.status)
+        put("statusText", response.statusText)
+        put("finalUrl", response.finalUrl)
+        put("responseHeaders", response.headers)
+        put("responseText", response.body)
+        put("responseType", responseType)
+    }
+
+    /**
+     * 把事件投递回页面。
+     *
+     * 走 `JSON.parse(字符串字面量)` 而不是直接把 JSON 拼进代码：响应体里可能出现
+     * 引号、反斜杠甚至 U+2028，只有先按 JS 字符串转义再解析才不会被当成代码。
+     */
+    private fun deliverScriptEvent(
+        tabId: String,
+        scriptId: String,
+        requestId: String,
+        event: String,
+        payload: JSONObject,
+    ) {
+        val js = "window.__lingGMDispatch&&window.__lingGMDispatch(" +
+            jsString(scriptId) + "," +
+            jsString(requestId) + "," +
+            jsString(event) + ",JSON.parse(" +
+            jsString(payload.toString()) + "))"
+        tabManager.evalInTab(tabId, js)
     }
     fun setDynamicColor(on: Boolean) = io { container.settings.setDynamicColor(on) }
 

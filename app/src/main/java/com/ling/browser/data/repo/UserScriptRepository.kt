@@ -2,6 +2,7 @@ package com.ling.browser.data.repo
 
 import android.content.Context
 import android.net.Uri
+import android.util.Base64
 import com.ling.browser.web.EnabledUserScript
 import com.ling.browser.web.UserScript
 import com.ling.browser.web.UserScriptParser
@@ -62,6 +63,7 @@ sealed interface ScriptImportResult {
  * ```
  * files/userscripts/<id>.user.js   # 原始源码（含元数据头，可直接导出/回灌）
  * files/userscripts/<id>.require.js # @require 依赖的源码（导入时下载，按顺序拼接）
+ * files/userscripts/<id>.resources  # @resource 资源（JSON：名称 -> mime + base64）
  * files/userscripts/<id>.meta      # 启用状态、来源网址、更新时间
  * files/userscripts/<id>.values    # GM_setValue 的键值快照（JSON）
  * ```
@@ -107,6 +109,13 @@ class UserScriptRepository(
      * 之后每次注入只读这份缓存，不再联网。
      */
     private val requires = HashMap<String, String>()
+
+    /**
+     * id -> `@resource` 资源表（`名称 -> {mime, base64}`）。
+     *
+     * 同样放内存：`GM_getResourceText/URL` 要同步返回，注入时直接内联进脚本。
+     */
+    private val resources = HashMap<String, JSONObject>()
 
     private val _scripts = MutableStateFlow<List<UserScriptEntry>>(emptyList())
     val scripts: StateFlow<List<UserScriptEntry>> = _scripts.asStateFlow()
@@ -206,6 +215,13 @@ class UserScriptRepository(
         } catch (e: RequireFailure) {
             return ScriptImportResult.Failed(e.reason)
         }
+        // 资源同理：脚本里 `GM_getResourceText` 拿不到内容时的报错很难懂，
+        // 不如在导入阶段就明确失败。
+        val resourcesJson = try {
+            fetchResources(script.resources)
+        } catch (e: ResourceFailure) {
+            return ScriptImportResult.Failed(e.reason)
+        }
         val entry = UserScriptEntry(
             id = id,
             script = script,
@@ -221,6 +237,12 @@ class UserScriptRepository(
             File(dir, id + REQUIRE_SUFFIX).writeText(requireText, Charsets.UTF_8)
         }
         requires[id] = requireText
+        if (resourcesJson.length() == 0) {
+            File(dir, id + RESOURCES_SUFFIX).delete()
+        } else {
+            File(dir, id + RESOURCES_SUFFIX).writeText(resourcesJson.toString(), Charsets.UTF_8)
+        }
+        resources[id] = resourcesJson
         writeMeta(entry)
         entries[id] = entry
         publish()
@@ -245,8 +267,10 @@ class UserScriptRepository(
             if (entries.remove(id) == null) return@withLock
             values.remove(id)
             requires.remove(id)
+            resources.remove(id)
             File(dir, id + SOURCE_SUFFIX).delete()
             File(dir, id + REQUIRE_SUFFIX).delete()
+            File(dir, id + RESOURCES_SUFFIX).delete()
             File(dir, id + META_SUFFIX).delete()
             File(dir, id + VALUES_SUFFIX).delete()
             publish()
@@ -275,6 +299,26 @@ class UserScriptRepository(
         }
     }
 
+    /**
+     * 删除一个 `GM_deleteValue` 的键。
+     *
+     * 与 [setValue] 同样校验脚本启用状态；键不存在时直接返回，不重写文件。
+     * 删空后仍保留一个 `{}` 值文件，而不是删掉 —— 下一次 `GM_getValue`
+     * 从空表读默认值即可，少一条"文件在不在"的分支。
+     */
+    suspend fun deleteValue(id: String, key: String) = withContext(Dispatchers.IO) {
+        if (key.isEmpty() || key.length > MAX_KEY_LENGTH) return@withContext
+        lock.withLock {
+            val entry = entries[id] ?: return@withLock
+            if (!entry.enabled) return@withLock
+            val obj = values[id] ?: return@withLock
+            if (!obj.has(key)) return@withLock
+            obj.remove(key)
+            writeValues(id, obj)
+            publish()
+        }
+    }
+
     // ---------------------------------------------------------------- 内部：读回磁盘
 
     private fun loadFromDisk() {
@@ -287,6 +331,7 @@ class UserScriptRepository(
         entries.clear()
         values.clear()
         requires.clear()
+        resources.clear()
         for (file in sources) {
             val id = file.name.removeSuffix(SOURCE_SUFFIX)
             val text = runCatching { file.readText() }.getOrNull() ?: continue
@@ -309,6 +354,11 @@ class UserScriptRepository(
                     values[id] = JSONObject(it)
                 }
             }
+            runCatching {
+                File(d, id + RESOURCES_SUFFIX).readText().takeIf { it.isNotBlank() }?.let {
+                    resources[id] = JSONObject(it)
+                }
+            }
         }
         publish()
     }
@@ -324,6 +374,7 @@ class UserScriptRepository(
                     script = it.script,
                     valuesJson = values[it.id]?.toString() ?: "{}",
                     requireCode = requires[it.id].orEmpty(),
+                    resourcesJson = resources[it.id]?.toString() ?: "{}",
                 )
             }
     }
@@ -332,13 +383,7 @@ class UserScriptRepository(
 
     /** 拉取脚本文本。与 [BlockListRepository.fetch] 同理，用魔数兜住无条件的 gzip。 */
     private fun fetch(url: String, maxBytes: Int = MAX_BYTES): String {
-        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
-            requestMethod = "GET"
-            connectTimeout = TIMEOUT_MS
-            readTimeout = TIMEOUT_MS
-            instanceFollowRedirects = true
-            setRequestProperty("User-Agent", USER_AGENT)
-        }
+        val conn = openConnection(url)
         try {
             val code = conn.responseCode
             if (code !in 200..299) throw IOException("HTTP $code")
@@ -347,6 +392,15 @@ class UserScriptRepository(
             runCatching { conn.disconnect() }
         }
     }
+
+    private fun openConnection(url: String): HttpURLConnection =
+        (URL(url).openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = TIMEOUT_MS
+            readTimeout = TIMEOUT_MS
+            instanceFollowRedirects = true
+            setRequestProperty("User-Agent", USER_AGENT)
+        }
 
     /**
      * 下载并拼接全部 `@require`。
@@ -379,17 +433,77 @@ class UserScriptRepository(
 
     private fun decode(stream: InputStream, maxBytes: Int = MAX_BYTES): String {
         val bytes = readCapped(stream, maxBytes)
-        val plain = if (
-            bytes.size >= 2 &&
-            bytes[0] == GZIP_MAGIC_0 &&
-            bytes[1] == GZIP_MAGIC_1
-        ) {
+        return String(gunzipIfNeeded(bytes, maxBytes), Charsets.UTF_8)
+    }
+
+    /**
+     * 抓一份 `@resource`：保留原始字节（可能是图片/字体），并记下 MIME。
+     *
+     * MIME 去掉 charset 等参数：`data:` URL 里带参数虽然合法，但部分站点的
+     * CSS 解析器会挑刺，只留主类型更稳。
+     */
+    private fun fetchResource(url: String): Pair<String, ByteArray> {
+        val conn = openConnection(url)
+        try {
+            val code = conn.responseCode
+            if (code !in 200..299) throw IOException("HTTP $code")
+            val mime = conn.contentType
+                ?.substringBefore(';')
+                ?.trim()
+                ?.takeIf { it.isNotEmpty() }
+                ?: "application/octet-stream"
+            val bytes = readCapped(conn.inputStream, MAX_RESOURCE_BYTES)
+            return mime to gunzipIfNeeded(bytes, MAX_RESOURCE_BYTES)
+        } finally {
+            runCatching { conn.disconnect() }
+        }
+    }
+
+    /**
+     * 下载全部 `@resource`，编码成 `{"名称":{"m":mime,"b":base64}}`。
+     *
+     * 为什么用 base64 而不是统一按文本存：`GM_getResourceURL` 要给出 `data:`
+     * URL，二进制资源（图标、字体）必须原样保留。文本资源由页面侧用
+     * `TextDecoder` 解回字符串。
+     */
+    private fun fetchResources(urls: Map<String, String>): JSONObject {
+        if (urls.isEmpty()) return JSONObject()
+        val out = JSONObject()
+        var total = 0
+        for ((name, url) in urls) {
+            val (mime, bytes) = try {
+                fetchResource(url)
+            } catch (e: TooLarge) {
+                throw ResourceFailure("资源超过 ${sizeLabel(MAX_RESOURCE_BYTES)}：$url")
+            } catch (e: Exception) {
+                throw ResourceFailure("资源下载失败：$url（${describe(e)}）")
+            }
+            total += bytes.size
+            if (total > MAX_RESOURCE_TOTAL_BYTES) {
+                throw ResourceFailure("脚本资源总大小超过 ${sizeLabel(MAX_RESOURCE_TOTAL_BYTES)}")
+            }
+            out.put(
+                name,
+                JSONObject()
+                    .put("m", mime)
+                    .put("b", Base64.encodeToString(bytes, Base64.NO_WRAP)),
+            )
+        }
+        return out
+    }
+
+    /**
+     * 无条件 gzip 兜底。
+     *
+     * 少数服务器不管 `Accept-Encoding` 都回 gzip（见 [BlockListRepository]），
+     * 靠魔数判断比信任响应头可靠。
+     */
+    private fun gunzipIfNeeded(bytes: ByteArray, maxBytes: Int): ByteArray =
+        if (bytes.size >= 2 && bytes[0] == GZIP_MAGIC_0 && bytes[1] == GZIP_MAGIC_1) {
             readCapped(GZIPInputStream(ByteArrayInputStream(bytes)), maxBytes)
         } else {
             bytes
         }
-        return String(plain, Charsets.UTF_8)
-    }
 
     private fun inputStreamOf(uri: Uri): InputStream =
         appContext.contentResolver.openInputStream(uri)
@@ -474,11 +588,15 @@ class UserScriptRepository(
     /** `@require` 下载失败。message 直接作为导入失败原因展示。 */
     private class RequireFailure(val reason: String) : IOException(reason)
 
+    /** `@resource` 下载/体积失败，同样直接展示给用户。 */
+    private class ResourceFailure(val reason: String) : IOException(reason)
+
     companion object {
         /** 存放目录（应用私有，无需存储权限）。 */
         private const val DIR = "userscripts"
         private const val SOURCE_SUFFIX = ".user.js"
         private const val REQUIRE_SUFFIX = ".require.js"
+        private const val RESOURCES_SUFFIX = ".resources"
         private const val META_SUFFIX = ".meta"
         private const val VALUES_SUFFIX = ".values"
 
@@ -501,6 +619,15 @@ class UserScriptRepository(
          * jQuery + 几个常见插件，又不至于让单页注入变成几 MB 的字符串。
          */
         private const val MAX_REQUIRE_BYTES = 2 * 1024 * 1024
+
+        /**
+         * 单个 `@resource` 与全部资源的合计上限。
+         *
+         * 资源最终以 base64 内联进每次注入，体积会再涨约 1/3；因此合计上限
+         * 比 `@require` 更紧，避免一个带字体/大图的脚本把每个页面都拖慢。
+         */
+        private const val MAX_RESOURCE_BYTES = 2 * 1024 * 1024
+        private const val MAX_RESOURCE_TOTAL_BYTES = 4 * 1024 * 1024
 
         private fun sizeLabel(bytes: Int): String = if (bytes % (1024 * 1024) == 0) {
             "${bytes / (1024 * 1024)} MiB"
