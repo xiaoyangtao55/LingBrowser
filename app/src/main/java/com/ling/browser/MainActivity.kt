@@ -78,6 +78,8 @@ class MainActivity : ComponentActivity() {
 
         // 冷启动：从其它应用「用翎打开链接 / 分享文本」进来
         handleExternalIntent(intent)
+        // 冷启动：点了 GM 通知
+        handleUserScriptNotificationIntent(intent)
 
         setContent {
             val viewModel: BrowserViewModel = viewModel()
@@ -128,6 +130,26 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         handleExternalIntent(intent)
+        handleUserScriptNotificationIntent(intent)
+    }
+
+    /**
+     * `GM_notification` 的通知点击。
+     *
+     * 只做 JS 回调：页面已经被导航/标签已关闭时 [BrowserViewModel] 会静默丢弃。
+     * 冷启动时标签还没恢复，回调同样会丢失 —— 这是"点通知只是把应用带到前台"
+     * 的可接受退化，不值得为它把回调持久化。
+     */
+    private fun handleUserScriptNotificationIntent(intent: Intent?) {
+        val incoming = intent ?: return
+        val tabId = incoming.getStringExtra(BrowserViewModel.EXTRA_SCRIPT_TAB) ?: return
+        val scriptId = incoming.getStringExtra(BrowserViewModel.EXTRA_SCRIPT_ID) ?: return
+        val noticeId = incoming.getStringExtra(BrowserViewModel.EXTRA_SCRIPT_NOTICE) ?: return
+        // 消费掉，避免 Activity 因配置变化重建时把同一次点击再回放一遍。
+        incoming.removeExtra(BrowserViewModel.EXTRA_SCRIPT_TAB)
+        incoming.removeExtra(BrowserViewModel.EXTRA_SCRIPT_ID)
+        incoming.removeExtra(BrowserViewModel.EXTRA_SCRIPT_NOTICE)
+        browserViewModel.onUserScriptNotificationClick(tabId, scriptId, noticeId)
     }
 
     /**

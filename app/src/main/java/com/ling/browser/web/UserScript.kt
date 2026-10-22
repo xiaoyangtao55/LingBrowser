@@ -81,6 +81,14 @@ data class UserScript(
      * 注入时随脚本一次性带进页面（`GM_getResourceText` 是同步语义）。
      */
     val resources: Map<String, String> = emptyMap(),
+    /**
+     * `@connect` 的目标白名单（域名 / `self` / `*`）。
+     *
+     * 只有**声明了**才校验：Tampermonkey 在缺失时会弹窗询问用户，我们没有
+     * 逐请求的确认 UI，静默拒绝会让大量老脚本直接失效。声明了就按它执行，
+     * 这至少让作者的安全意图生效（见 `BrowserViewModel.startScriptRequest`）。
+     */
+    val connects: Set<String> = emptySet(),
 ) {
     /** 没有任何规则时不匹配任何页面 —— 与 Tampermonkey 语义一致。 */
     fun matches(url: String): Boolean =
@@ -217,6 +225,13 @@ object UserScriptParser {
             resources[name] = url
         }
 
+        // @connect 允许一行写多个（逗号/空格分隔），域名大小写不敏感。
+        val connects = meta["connect"].orEmpty()
+            .flatMap { it.split(',', ' ', '\t') }
+            .map { it.trim().lowercase() }
+            .filter { it.isNotEmpty() }
+            .toSet()
+
         // 正文：丢掉元数据头那一段。其余内容（许可证注释、'use strict' 等）原样保留。
         val code = lines.filterIndexed { index, _ -> index < begin || index > end }
             .joinToString("\n")
@@ -236,6 +251,7 @@ object UserScriptParser {
             code = code,
             requireUrls = requireUrls,
             resources = resources,
+            connects = connects,
         )
     }
 
@@ -487,11 +503,43 @@ private fun gmPrelude(script: UserScript, scriptId: String): String {
         append(",grant:[").append(script.grants.joinToString(",") { jsString(it) }).append("]}")
         append(",scriptHandler:'LingBrowser',version:'1.0'};")
         if (storageGranted) {
+            append("var VL={},VLn=0;")
+            append("function fire(k,o,v,r){for(var i in VL){var e=VL[i];if(e.k===k){try{e.f(k,o,v,r)}catch(x){}}}}")
+            append("function GM_addValueChangeListener(k,f){var id='l'+(++VLn);VL[id]={k:String(k),f:f};return id}")
+            append("function GM_removeValueChangeListener(id){try{delete VL[String(id)]}catch(e){}}")
+            // 原生广播按脚本 id 分表：同页可能注入多个脚本，各自的 V 必须分开更新。
+            append("window.__lingGMValueMap=window.__lingGMValueMap||{};")
+            append("window.__lingGMValueMap[SID]=function(k,o,v,r){V[k]=v;fire(k,o,v,r)};")
+            append("window.__lingGMValue=window.__lingGMValue||function(s,k,o,v,r){")
+            append("var f=window.__lingGMValueMap&&window.__lingGMValueMap[s];if(f)f(k,o,v,r)};")
             append("function GM_getValue(k,d){return Object.prototype.hasOwnProperty.call(V,k)?V[k]:d}")
-            append("function GM_setValue(k,v){V[k]=v;post({t:'set',k:String(k),v:v})}")
-            append("function GM_deleteValue(k){k=String(k);try{delete V[k]}catch(e){}post({t:'del',k:k})}")
+            append("function GM_setValue(k,v){var o=V[k];V[k]=v;fire(k,o,v,false);post({t:'set',k:String(k),v:v})}")
+            append("function GM_deleteValue(k){k=String(k);var o=V[k];try{delete V[k]}catch(e){}")
+            append("fire(k,o,undefined,false);post({t:'del',k:k})}")
             append("function GM_listValues(){return Object.keys(V)}")
         }
+        // 菜单与通知不按 grant 收敛：不少脚本不写 @grant 也在用，缺了会直接
+        // ReferenceError；两者都只是转发一个消息，没有额外的系统能力。
+        append("var MC={},MCn=0;")
+        append("function GM_registerMenuCommand(n,f){var id='m'+(++MCn);MC[id]=f;")
+        append("post({t:'menu',id:id,n:String(n)});return id}")
+        append("function GM_unregisterMenuCommand(id){id=String(id);try{delete MC[id]}catch(e){}")
+        append("post({t:'menuDel',id:id})}")
+        append("window.__lingGMMenuMap=window.__lingGMMenuMap||{};window.__lingGMMenuMap[SID]=MC;")
+        append("window.__lingGMMenu=window.__lingGMMenu||function(s,id){")
+        append("var m=window.__lingGMMenuMap&&window.__lingGMMenuMap[s];var f=m&&m[id];")
+        append("if(f){try{f()}catch(e){try{console.error(e)}catch(_){}}}};")
+        append("var NT={},NTn=0;")
+        append("window.__lingGMNoticeMap=window.__lingGMNoticeMap||{};window.__lingGMNoticeMap[SID]=NT;")
+        append("window.__lingGMNotice=window.__lingGMNotice||function(s,id){")
+        append("var m=window.__lingGMNoticeMap&&window.__lingGMNoticeMap[s];var f=m&&m[id];")
+        append("if(f){try{f()}catch(e){}}};")
+        append("function GM_notification(d,t,img,oc){")
+        append("if(typeof d==='string'){d={text:d,title:t,onclick:typeof img==='function'?img:oc}}")
+        append("d=d||{};var id='n'+(++NTn);")
+        append("if(typeof d.onclick==='function')NT[id]=d.onclick;")
+        append("post({t:'notice',id:id,title:String(d.title||''),text:String(d.text||d.body||''),u:String(d.url||'')});")
+        append("return id}")
         if (granted("GM_openInTab")) {
             append("function GM_openInTab(u){post({t:'open',u:String(u)})}")
         }
@@ -541,4 +589,28 @@ internal fun jsString(value: String): String = buildString {
         }
     }
     append('"')
+}
+
+/**
+ * 判断 `GM_xmlhttpRequest` 的目标主机是否在脚本声明的 `@connect` 白名单里。
+ *
+ * 与 Tampermonkey 的语义对齐：
+ *  - 空白名单视为不限制（老脚本大量缺失 `@connect`，逐请求确认又太吵）；
+ *  - `*` 放行一切；
+ *  - `self` 只允许访问当前页所在主机；
+ *  - `*.example.com` / `.example.com` 与裸 `example.com` 都表示该域及其子域。
+ */
+internal fun connectAllowed(connects: Set<String>, targetHost: String?, pageHost: String?): Boolean {
+    if (connects.isEmpty() || "*" in connects) return true
+    val host = targetHost ?: return false
+    for (raw in connects) {
+        if (raw == "self") {
+            if (pageHost != null && host == pageHost) return true
+            continue
+        }
+        val domain = raw.removePrefix("*.").removePrefix(".")
+        if (domain.isEmpty()) continue
+        if (host == domain || host.endsWith(".$domain")) return true
+    }
+    return false
 }

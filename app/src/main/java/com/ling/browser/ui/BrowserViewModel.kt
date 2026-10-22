@@ -1,14 +1,24 @@
 package com.ling.browser.ui
 
 import android.app.Application
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.webkit.CookieManager
+import android.widget.Toast
 import androidx.compose.ui.graphics.Color
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import com.ling.browser.LingApplication
+import com.ling.browser.MainActivity
+import com.ling.browser.R
 import com.ling.browser.data.db.Bookmark
 import com.ling.browser.data.db.DownloadEntry
 import com.ling.browser.data.db.HistoryEntry
@@ -17,6 +27,7 @@ import com.ling.browser.data.repo.ImportResult
 import com.ling.browser.data.repo.MAX_BACKUP_BYTES
 import com.ling.browser.data.repo.ScriptImportResult
 import com.ling.browser.data.repo.UserScriptEntry
+import com.ling.browser.data.repo.ValueWrite
 import com.ling.browser.data.repo.deriveFolders
 import com.ling.browser.data.repo.parseNetscapeHtml
 import com.ling.browser.data.repo.planImport
@@ -40,7 +51,9 @@ import com.ling.browser.web.ScriptHttpTooLargeException
 import com.ling.browser.web.SniffResult
 import com.ling.browser.web.TabState
 import com.ling.browser.web.UrlScheme
+import com.ling.browser.web.UserScriptMenuCommand
 import com.ling.browser.web.WebTabManager
+import com.ling.browser.web.connectAllowed
 import com.ling.browser.web.jsString
 import java.io.ByteArrayOutputStream
 import java.net.SocketTimeoutException
@@ -115,6 +128,9 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
      * [WebTabManager]，注入时不需要再经 ViewModel 中转。
      */
     val userScripts: StateFlow<List<UserScriptEntry>> = container.userScripts.scripts
+
+    /** 当前页面里由 `GM_registerMenuCommand` 注册的命令，供「脚本菜单」面板展示。 */
+    val userScriptMenus: StateFlow<List<UserScriptMenuCommand>> = tabManager.userScriptMenus
 
     /**
      * 广告拦截的累计计数 = 已落盘的历史总数 + 本次运行新增。
@@ -1202,12 +1218,18 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
 
     private val scriptRequests = HashMap<String, RunningScriptRequest>()
 
-    private companion object {
+    companion object {
         /** 同时进行的脚本请求上限：跨域请求不受 CORS 约束，需要自己兜一道。 */
-        const val MAX_SCRIPT_REQUESTS = 8
-        const val DEFAULT_SCRIPT_TIMEOUT_MS = 30_000
-        const val MIN_SCRIPT_TIMEOUT_MS = 1_000
-        const val MAX_SCRIPT_TIMEOUT_MS = 120_000
+        private const val MAX_SCRIPT_REQUESTS = 8
+        private const val DEFAULT_SCRIPT_TIMEOUT_MS = 30_000
+        private const val MIN_SCRIPT_TIMEOUT_MS = 1_000
+        private const val MAX_SCRIPT_TIMEOUT_MS = 120_000
+
+        /** `GM_notification` 的通知渠道与点击回传用的 extras。 */
+        const val SCRIPT_CHANNEL_ID = "userscript"
+        const val EXTRA_SCRIPT_TAB = "ling.gm.tab"
+        const val EXTRA_SCRIPT_ID = "ling.gm.script"
+        const val EXTRA_SCRIPT_NOTICE = "ling.gm.notice"
     }
 
     /**
@@ -1224,15 +1246,23 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
         when (obj.optString("t")) {
             "set" -> {
                 val key = obj.optString("k")
+                val value = obj.opt("v")
                 viewModelScope.launch {
-                    container.userScripts.setValue(scriptId, key, obj.opt("v"))
+                    val result = container.userScripts.setValue(scriptId, key, value)
+                    if (result is ValueWrite.Changed) {
+                        // 其它标签页里的同名脚本要同步看到新值（remote=true）。
+                        tabManager.broadcastUserScriptValue(scriptId, key, result.old, value, tabId)
+                    }
                 }
             }
             "open" -> obj.optString("u").takeIf { it.isNotBlank() }?.let(::openInNewTab)
             "del" -> {
                 val key = obj.optString("k")
                 viewModelScope.launch {
-                    container.userScripts.deleteValue(scriptId, key)
+                    val result = container.userScripts.deleteValue(scriptId, key)
+                    if (result is ValueWrite.Changed) {
+                        tabManager.broadcastUserScriptValue(scriptId, key, result.old, null, tabId)
+                    }
                 }
             }
             "clip" -> obj.optString("v").takeIf { it.isNotEmpty() }?.let { text ->
@@ -1243,9 +1273,109 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
                         ?.setPrimaryClip(ClipData.newPlainText("翎 · 用户脚本", text))
                 }
             }
+            "menu" -> tabManager.registerUserScriptMenu(
+                tabId,
+                scriptId,
+                obj.optString("id"),
+                obj.optString("n"),
+            )
+            "menuDel" -> tabManager.unregisterUserScriptMenu(tabId, scriptId, obj.optString("id"))
+            "notice" -> postUserScriptNotification(tabId, scriptId, obj)
             "xhr" -> startScriptRequest(tabId, scriptId, obj)
             "xa" -> abortScriptRequest(obj.optString("id"))
         }
+    }
+
+    /**
+     * 触发一条 `GM_registerMenuCommand`。
+     *
+     * 命令是否还属于当前页由 [WebTabManager] 二次校验：UI 拿到列表到用户点击
+     * 之间可能已经导航，那里查不到命令就直接放弃。
+     */
+    fun invokeUserScriptMenu(tabId: String, scriptId: String, commandId: String) {
+        tabManager.invokeUserScriptMenu(tabId, scriptId, commandId)
+    }
+
+    /**
+     * 通知点击后回到页面触发 `details.onclick`。
+     *
+     * [MainActivity] 从 PendingIntent 的 extras 里读出三个 id 后调用这里。
+     * 标签页已经关闭或页面已导航时静默丢弃 —— 回调函数早就没了。
+     */
+    fun onUserScriptNotificationClick(tabId: String, scriptId: String, notificationId: String) {
+        tabManager.dispatchUserScriptNotificationClick(tabId, scriptId, notificationId)
+    }
+
+    /**
+     * `GM_notification`：发一条系统通知。
+     *
+     * 权限被拒时退化成 Toast：什么提示都没有比"少了一条通知"更难排查。
+     * 通知点击走 [MainActivity]（singleTask），由 Intent extras 找回标签与脚本。
+     */
+    private fun postUserScriptNotification(tabId: String, scriptId: String, details: JSONObject) {
+        val notificationId = details.optString("id").takeIf { it.isNotEmpty() } ?: return
+        val entry = container.userScripts.enabledScripts.value.firstOrNull { it.id == scriptId }
+            ?: return
+        val title = details.optString("title").ifBlank { entry.script.name }
+        val text = details.optString("text")
+        val ctx = getApplication<Application>()
+
+        val permitted = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+            androidx.core.content.ContextCompat.checkSelfPermission(
+                ctx,
+                android.Manifest.permission.POST_NOTIFICATIONS,
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (!permitted) {
+            // 借既有的权限申请通道：用户授权后，脚本下一次通知就能正常显示。
+            _requestNotificationPermission.update { it + 1 }
+            Toast.makeText(ctx, listOf(title, text).filter { it.isNotBlank() }.joinToString("："), Toast.LENGTH_LONG).show()
+            return
+        }
+
+        ensureUserScriptChannel(ctx)
+        // 通知 id 只在单个脚本内自增，不同脚本会撞成同一个 "n1"；
+        // 拼上脚本 id 再取哈希，才能让 PendingIntent 与通知槽互不覆盖。
+        val notifyId = "$scriptId|$notificationId".hashCode()
+        val intent = Intent(ctx, MainActivity::class.java).apply {
+            putExtra(EXTRA_SCRIPT_TAB, tabId)
+            putExtra(EXTRA_SCRIPT_ID, scriptId)
+            putExtra(EXTRA_SCRIPT_NOTICE, notificationId)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        }
+        val pending = PendingIntent.getActivity(
+            ctx,
+            notifyId,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val notification = NotificationCompat.Builder(ctx, SCRIPT_CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_download)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+            .setAutoCancel(true)
+            .setContentIntent(pending)
+            .build()
+        runCatching {
+            NotificationManagerCompat.from(ctx).notify(notifyId, notification)
+        }.onFailure {
+            Toast.makeText(ctx, "$title：$text", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun ensureUserScriptChannel(ctx: Application) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val nm = ctx.getSystemService(NotificationManager::class.java) ?: return
+        if (nm.getNotificationChannel(SCRIPT_CHANNEL_ID) != null) return
+        nm.createNotificationChannel(
+            NotificationChannel(
+                SCRIPT_CHANNEL_ID,
+                "用户脚本通知",
+                NotificationManager.IMPORTANCE_DEFAULT,
+            ).apply {
+                description = "由 GM_notification 发出的通知"
+            },
+        )
     }
 
     /**
@@ -1257,7 +1387,8 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
      */
     private fun startScriptRequest(tabId: String, scriptId: String, details: JSONObject) {
         val requestId = details.optString("id").takeIf { it.isNotEmpty() } ?: return
-        if (container.userScripts.enabledScripts.value.none { it.id == scriptId }) return
+        val script = container.userScripts.enabledScripts.value.firstOrNull { it.id == scriptId }
+            ?: return
 
         fun fail(message: String) {
             deliverScriptEvent(tabId, scriptId, requestId, "error", scriptFailurePayload(message))
@@ -1268,9 +1399,19 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         val url = details.optString("u")
-        val scheme = runCatching { Uri.parse(url).scheme?.lowercase(Locale.ROOT) }.getOrNull()
+        val uri = Uri.parse(url)
+        val scheme = runCatching { uri.scheme?.lowercase(Locale.ROOT) }.getOrNull()
         if (scheme != "http" && scheme != "https") {
             fail("只支持 http(s) 请求")
+            return
+        }
+        // @connect 是作者声明的目标白名单。没有声明时放行（Tampermonkey 会弹窗
+        // 询问，我们没有逐请求确认 UI，静默拒绝会让老脚本全部失效）。
+        val targetHost = uri.host?.lowercase(Locale.ROOT)
+        val pageHost = tabManager.tabs.value.firstOrNull { it.id == tabId }?.url
+            ?.let { runCatching { Uri.parse(it).host?.lowercase(Locale.ROOT) }.getOrNull() }
+        if (!connectAllowed(script.script.connects, targetHost, pageHost)) {
+            fail("@connect 未授权访问 $targetHost")
             return
         }
 

@@ -395,6 +395,84 @@ class UserScriptTest {
     }
 
     @Test
+    fun `解析 @connect 白名单`() {
+        val script = parse(
+            """
+            // ==UserScript==
+            // @name  跨域
+            // @match https://example.com/*
+            // @connect API.Example.com
+            // @connect *.cdn.example.com, self
+            // @grant GM_xmlhttpRequest
+            // ==/UserScript==
+            """,
+        )!!
+        assertEquals(
+            setOf("api.example.com", "*.cdn.example.com", "self"),
+            script.connects,
+        )
+    }
+
+    @Test
+    fun `connect 白名单匹配语义`() {
+        // 没写 @connect 时放行（兼容老脚本）；写了就只认白名单。
+        assertTrue(connectAllowed(emptySet(), "anything.test", "page.test"))
+        assertTrue(connectAllowed(setOf("*"), "anything.test", "page.test"))
+
+        val connects = setOf("example.com", "self")
+        assertTrue(connectAllowed(connects, "example.com", "page.test"))
+        assertTrue(connectAllowed(connects, "api.example.com", "page.test"))
+        assertFalse(connectAllowed(connects, "notexample.com", "page.test"))
+        // self 只认当前页主机
+        assertTrue(connectAllowed(connects, "page.test", "page.test"))
+        assertFalse(connectAllowed(connects, "page.test", "other.test"))
+
+        // *. 与裸域名等价；目标主机缺失一律拒绝。
+        assertTrue(connectAllowed(setOf("*.example.com"), "example.com", null))
+        assertTrue(connectAllowed(setOf("*.example.com"), "a.b.example.com", null))
+        assertFalse(connectAllowed(setOf("example.com"), null, "example.com"))
+    }
+
+    @Test
+    fun `菜单与通知 API 始终发放`() {
+        val script = parse(
+            """
+            // ==UserScript==
+            // @name  挂件
+            // @match https://example.com/*
+            // @grant  GM_registerMenuCommand
+            // @grant  GM_notification
+            // ==/UserScript==
+            """,
+        )!!
+        val js = scriptWrapper(script, "u1", "{}")
+        assertTrue(js.contains("function GM_registerMenuCommand"))
+        assertTrue(js.contains("function GM_unregisterMenuCommand"))
+        assertTrue(js.contains("function GM_notification"))
+        assertTrue(js.contains("window.__lingGMMenuMap"))
+        assertTrue(js.contains("window.__lingGMNoticeMap"))
+    }
+
+    @Test
+    fun `值变更监听按 grant 发放并广播到其他标签`() {
+        val script = parse(
+            """
+            // ==UserScript==
+            // @name  同步
+            // @match https://example.com/*
+            // @grant  GM_setValue
+            // @grant  GM_addValueChangeListener
+            // ==/UserScript==
+            """,
+        )!!
+        val js = scriptWrapper(script, "u1", "{}")
+        assertTrue(js.contains("function GM_addValueChangeListener"))
+        assertTrue(js.contains("function GM_removeValueChangeListener"))
+        assertTrue(js.contains("window.__lingGMValueMap[SID]="))
+        assertTrue(js.contains("fire(k,o,v,false)"))
+    }
+
+    @Test
     fun `canonicalUrl 归一化规则`() {
         assertEquals("https://example.com/p?q=1", canonicalUrl("https://Example.com:443/p?q=1#h"))
         assertEquals("http://example.com/", canonicalUrl("http://example.com"))

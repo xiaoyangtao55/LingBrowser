@@ -161,6 +161,10 @@ fun BrowserScreen(
     val pendingDownload by viewModel.pendingDownload.collectAsStateWithLifecycle()
     // 点开 `.user.js` 链接时先弹确认，不直接安装。
     val pendingUserScript by viewModel.pendingUserScript.collectAsStateWithLifecycle()
+    // 页面里 GM_registerMenuCommand 注册的命令；只展示当前标签页的。
+    val allScriptMenus by viewModel.userScriptMenus.collectAsStateWithLifecycle()
+    val installedScripts by viewModel.userScripts.collectAsStateWithLifecycle()
+    val activeScriptMenus = allScriptMenus.filter { it.tabId == activeId }
     // 阅读模式是否开启。必须 collect（而不是直接读 viewModel.readerActive），
     // 否则进入/退出后菜单文案不会刷新。
     val readerActive by viewModel.readerActive.collectAsStateWithLifecycle()
@@ -171,6 +175,8 @@ fun BrowserScreen(
     // 面板本体是 ModalBottomSheet（自屏幕底部升起），这里只留一个布尔开关。
     var showMoreSheet by remember { mutableStateOf(false) }
     var showTabsSheet by remember { mutableStateOf(false) }
+    // 「脚本菜单」只有在当前页真的注册了命令时才存在。
+    var showScriptMenuSheet by remember { mutableStateOf(false) }
     var exitConfirm by remember { mutableStateOf(false) }
 
     // 网页 JS 对话框（alert/confirm/prompt/onbeforeunload）。
@@ -272,6 +278,7 @@ fun BrowserScreen(
     val scope = rememberCoroutineScope()
     val moreSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val tabsSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val scriptMenuSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     // 关闭「更多」面板。
     val closeMoreSheet: () -> Unit = {
@@ -793,7 +800,7 @@ fun BrowserScreen(
             containerColor = MaterialTheme.colorScheme.surfaceContainer,
             dragHandle = { SheetDragHandle() },
         ) {
-            val items = listOf(
+            val items = listOfNotNull(
                 MoreItem(
                     icon = if (isBookmarked) LingIcons.Bookmark else LingIcons.BookmarkAdd,
                     label = if (isBookmarked) "取消收藏" else "添加书签",
@@ -882,6 +889,20 @@ fun BrowserScreen(
                         closeMoreSheet()
                     },
                 ),
+                // 用户脚本通过 GM_registerMenuCommand 注册的命令。只有当前页
+                // 真的注册过才出现 —— 空面板没有意义。
+                if (activeScriptMenus.isNotEmpty()) {
+                    MoreItem(
+                        icon = LingIcons.Javascript,
+                        label = "脚本菜单",
+                        onClick = {
+                            showMoreSheet = false
+                            showScriptMenuSheet = true
+                        },
+                    )
+                } else {
+                    null
+                },
                 MoreItem(
                     icon = LingIcons.Settings,
                     label = "设置",
@@ -899,6 +920,54 @@ fun BrowserScreen(
                     .verticalScroll(rememberScrollState())
                     .padding(horizontal = 8.dp, vertical = 4.dp),
             )
+        }
+    }
+
+    // ---- 「脚本菜单」面板 ----
+    // 命令属于具体页面实例：导航后 WebTabManager 会清空，列表随之变空，
+    // 这里主动收起，避免用户对着已失效的命令点击。
+    LaunchedEffect(activeScriptMenus.isEmpty()) {
+        if (activeScriptMenus.isEmpty()) showScriptMenuSheet = false
+    }
+    if (showScriptMenuSheet) {
+        ModalBottomSheet(
+            onDismissRequest = { showScriptMenuSheet = false },
+            sheetState = scriptMenuSheetState,
+            containerColor = MaterialTheme.colorScheme.surfaceContainer,
+            dragHandle = { SheetDragHandle() },
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(vertical = 8.dp),
+            ) {
+                activeScriptMenus.forEach { command ->
+                    // 前缀脚本名：同一个页面可能装了多个脚本，只给命令名会分不清。
+                    val scriptName = installedScripts
+                        .firstOrNull { it.id == command.scriptId }
+                        ?.script?.name
+                    Text(
+                        text = if (scriptName.isNullOrBlank()) {
+                            command.label
+                        } else {
+                            "$scriptName · ${command.label}"
+                        },
+                        style = MaterialTheme.typography.bodyLarge,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                showScriptMenuSheet = false
+                                viewModel.invokeUserScriptMenu(
+                                    command.tabId,
+                                    command.scriptId,
+                                    command.commandId,
+                                )
+                            }
+                            .padding(horizontal = 20.dp, vertical = 14.dp),
+                    )
+                }
+            }
         }
     }
 

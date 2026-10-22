@@ -30,6 +30,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import org.json.JSONObject
 
 /**
  * 一次等待用户裁决的证书错误。
@@ -52,6 +53,19 @@ data class CertPrompt(
  * 对齐：弹窗问一次，用户确认才重新提交。
  */
 data class FormResubmitPrompt(val host: String)
+
+/**
+ * 一条由 `GM_registerMenuCommand` 注册的菜单命令。
+ *
+ * 命令活在一个具体的页面实例里（回调函数只在那一页存在），因此必须带
+ * [tabId]；页面导航后原生侧会整批清掉，由新页重新注册。
+ */
+data class UserScriptMenuCommand(
+    val tabId: String,
+    val scriptId: String,
+    val commandId: String,
+    val label: String,
+)
 
 /**
  * 标签页与 WebView 实例的管理者。
@@ -123,6 +137,14 @@ class WebTabManager(private val context: Context) {
 
     /** tabId -> 本页已注入过的 "脚本|时机|URL"，防止同一页重复执行。 */
     private val injectedScripts = mutableMapOf<String, MutableSet<String>>()
+
+    /** tabId -> (`脚本|命令` -> 菜单项)，供 UI 展示「脚本菜单」。 */
+    private val scriptMenus = LinkedHashMap<String, MutableMap<String, UserScriptMenuCommand>>()
+
+    private val _userScriptMenus = MutableStateFlow<List<UserScriptMenuCommand>>(emptyList())
+
+    /** 当前各标签页注册的脚本菜单命令。 */
+    val userScriptMenus: StateFlow<List<UserScriptMenuCommand>> = _userScriptMenus.asStateFlow()
 
     /**
      * 系统 WebView 是否支持 document-start 注入。
@@ -466,6 +488,8 @@ class WebTabManager(private val context: Context) {
     fun applyUserScripts(scripts: List<EnabledUserScript>) {
         userScripts = scripts
         webViews.forEach { (id, wv) -> registerDocumentStart(id, wv) }
+        // 脚本被停用/删除后，它注册的菜单也不该再出现在界面里。
+        pruneMenus(scripts.mapTo(HashSet()) { it.id })
     }
 
     /**
@@ -526,6 +550,111 @@ class WebTabManager(private val context: Context) {
                 null,
             )
         }
+    }
+
+    // ---------------------------------------------------------------- 脚本菜单 / 跨页值同步
+
+    /** 页面里 `GM_registerMenuCommand` 注册一条命令。 */
+    fun registerUserScriptMenu(tabId: String, scriptId: String, commandId: String, label: String) {
+        if (commandId.isEmpty()) return
+        val clean = label.trim().ifEmpty { "未命名命令" }.take(MAX_MENU_LABEL)
+        scriptMenus.getOrPut(tabId) { LinkedHashMap() }[menuKey(scriptId, commandId)] =
+            UserScriptMenuCommand(tabId, scriptId, commandId, clean)
+        publishMenus()
+    }
+
+    /** 页面里 `GM_unregisterMenuCommand` 移除一条命令。 */
+    fun unregisterUserScriptMenu(tabId: String, scriptId: String, commandId: String) {
+        val map = scriptMenus[tabId] ?: return
+        if (map.remove(menuKey(scriptId, commandId)) == null) return
+        if (map.isEmpty()) scriptMenus.remove(tabId)
+        publishMenus()
+    }
+
+    /** 主框架导航 / 关标签时清空该页的命令：回调函数已经随旧文档销毁。 */
+    private fun clearUserScriptMenus(tabId: String) {
+        if (scriptMenus.remove(tabId) == null) return
+        publishMenus()
+    }
+
+    /** 脚本被停用或删除时，摘掉它留下的命令。 */
+    private fun pruneMenus(enabledIds: Set<String>) {
+        var changed = false
+        val iterator = scriptMenus.values.iterator()
+        while (iterator.hasNext()) {
+            val map = iterator.next()
+            if (map.values.removeAll { it.scriptId !in enabledIds }) changed = true
+            if (map.isEmpty()) {
+                iterator.remove()
+                changed = true
+            }
+        }
+        if (changed) publishMenus()
+    }
+
+    /**
+     * 执行一条菜单命令。
+     *
+     * 只查原生侧登记过的命令，再把命令 id 交给页面自己的分发器 —— 原生从不
+     * 拼接脚本体，避免把任意字符串送进 `evaluateJavascript`。
+     */
+    fun invokeUserScriptMenu(tabId: String, scriptId: String, commandId: String): Boolean {
+        val registered = scriptMenus[tabId]?.containsKey(menuKey(scriptId, commandId)) == true
+        val wv = webViews[tabId]
+        if (!registered || wv == null) return false
+        wv.evaluateJavascript(
+            "window.__lingGMMenu&&window.__lingGMMenu(${jsString(scriptId)},${jsString(commandId)})",
+            null,
+        )
+        return true
+    }
+
+    /**
+     * 把 GM 值的变更广播给**其它**标签页。
+     *
+     * 只发消息不落盘：[com.ling.browser.data.repo.UserScriptRepository] 已经写过了。
+     * 发起页自己不需要广播 —— 它的 `V` 与监听器在 `GM_setValue` 里已同步更新。
+     */
+    fun broadcastUserScriptValue(
+        scriptId: String,
+        key: String,
+        oldValue: Any?,
+        newValue: Any?,
+        exceptTabId: String?,
+    ) {
+        if (webViews.isEmpty()) return
+        val js = "window.__lingGMValue&&window.__lingGMValue(" +
+            "${jsString(scriptId)},${jsString(key)},${jsLiteral(oldValue)},${jsLiteral(newValue)},true)"
+        for ((tabId, wv) in webViews) {
+            if (tabId == exceptTabId) continue
+            if (_tabs.value.firstOrNull { it.id == tabId }?.isIncognito == true) continue
+            wv.evaluateJavascript(js, null)
+        }
+    }
+
+    /** 通知点击回传页面里的 `onclick`（详情见 [com.ling.browser.ui.BrowserViewModel.postUserScriptNotification]）。 */
+    fun dispatchUserScriptNotificationClick(tabId: String, scriptId: String, notificationId: String) {
+        val wv = webViews[tabId] ?: return
+        wv.evaluateJavascript(
+            "window.__lingGMNotice&&window.__lingGMNotice(${jsString(scriptId)},${jsString(notificationId)})",
+            null,
+        )
+    }
+
+    private fun publishMenus() {
+        _userScriptMenus.value = scriptMenus.values
+            .flatMap { it.values }
+            .sortedWith(compareBy({ it.tabId }, { it.scriptId }))
+    }
+
+    private fun menuKey(scriptId: String, commandId: String): String = "$scriptId|$commandId"
+
+    /** null / JSON null 都按 JS 的 `undefined` 传，与 Tampermonkey 的删除语义一致。 */
+    private fun jsLiteral(value: Any?): String = when (value) {
+        null, JSONObject.NULL -> "undefined"
+        is String -> jsString(value)
+        is Number, is Boolean -> value.toString()
+        else -> runCatching { JSONObject.wrap(value)?.toString() }.getOrNull() ?: "undefined"
     }
 
     /** 命中一次拦截 +1。由后台线程经 [LingWebViewClient] 的回调调用（见 [blockedCount]）。 */
@@ -641,6 +770,8 @@ class WebTabManager(private val context: Context) {
         // 注入记录留着只会让同名 tabId 复用时误判"这页已经跑过"。
         scriptHandlers.remove(id)
         injectedScripts.remove(id)
+        scriptMenus.remove(id)
+        publishMenus()
 
         // 回收 favicon 的像素内存。必须在移出列表后立刻做：
         // Bitmap 的像素是非托管内存，GC 只收得回 Java 对象壳，
@@ -1757,6 +1888,8 @@ class WebTabManager(private val context: Context) {
                     // 新一次主框架导航：用户脚本的"本页已注入"闸门清零。
                     // 不放在 onPageFinished 里清 —— 那会把同页的第二次回调当成新页。
                     injectedScripts.remove(id)
+                    // 脚本菜单的回调绑在旧文档上，导航后必然失效，整批清掉。
+                    clearUserScriptMenus(id)
                     // 内置主页与阅读视图都是用 loadDataWithBaseURL 加载的，
                     // WebView 回调回来的是 baseUrl（HomePage.BASE_URL /
                     // ReaderPage.BASE_URL）而不是逻辑地址（ling://home /
@@ -2082,6 +2215,8 @@ class WebTabManager(private val context: Context) {
         _tabs.value.forEach { recycleTab(it) }
         _tabs.value = emptyList()
         _activeId.value = ""
+        scriptMenus.clear()
+        publishMenus()
     }
 
     companion object {
@@ -2101,6 +2236,9 @@ class WebTabManager(private val context: Context) {
 
         /** 表单重提交的待裁决上限：低频事件，超过就直接放弃重提交。 */
         private const val MAX_PENDING_FORMS = 4
+
+        /** 菜单文案上限：脚本可能塞进整段说明，界面行撑不下。 */
+        private const val MAX_MENU_LABEL = 60
     }
 }
 

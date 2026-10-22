@@ -56,6 +56,17 @@ sealed interface ScriptImportResult {
 }
 
 /**
+ * 一次 GM 值写入的结果。
+ *
+ * [Changed.old] 是写入前的旧值（键原本不存在时为 null），调用方据此向**其它**
+ * 标签页广播变更；[Ignored] 表示脚本不存在/已停用或键非法，什么都没发生。
+ */
+sealed interface ValueWrite {
+    data class Changed(val old: Any?) : ValueWrite
+    data object Ignored : ValueWrite
+}
+
+/**
  * 用户脚本的存储层。
  *
  * ## 目录结构
@@ -286,16 +297,23 @@ class UserScriptRepository(
      * 这里再挡一次：脚本必须存在且处于启用状态 —— 停用的脚本不该还能写盘。
      * 值大小也设上限，避免脚本把几十 MB 塞进一个键里。
      */
-    suspend fun setValue(id: String, key: String, value: Any?) = withContext(Dispatchers.IO) {
-        if (key.isEmpty() || key.length > MAX_KEY_LENGTH) return@withContext
+    suspend fun setValue(id: String, key: String, value: Any?): ValueWrite = withContext(Dispatchers.IO) {
+        if (key.isEmpty() || key.length > MAX_KEY_LENGTH) return@withContext ValueWrite.Ignored
         lock.withLock {
-            val entry = entries[id] ?: return@withLock
-            if (!entry.enabled) return@withLock
+            val entry = entries[id] ?: return@withLock ValueWrite.Ignored
+            if (!entry.enabled) return@withLock ValueWrite.Ignored
             val obj = values.getOrPut(id) { JSONObject() }
+            val had = obj.has(key)
+            val old = obj.opt(key)
             obj.put(key, value ?: JSONObject.NULL)
-            if (obj.toString().length > MAX_VALUES_BYTES) return@withLock
+            if (obj.toString().length > MAX_VALUES_BYTES) {
+                // 写回旧值，别让超限的那份留在内存镜像里（下次加载又会超）。
+                if (had) obj.put(key, old) else obj.remove(key)
+                return@withLock ValueWrite.Ignored
+            }
             writeValues(id, obj)
             publish()
+            ValueWrite.Changed(if (had) old else null)
         }
     }
 
@@ -306,16 +324,18 @@ class UserScriptRepository(
      * 删空后仍保留一个 `{}` 值文件，而不是删掉 —— 下一次 `GM_getValue`
      * 从空表读默认值即可，少一条"文件在不在"的分支。
      */
-    suspend fun deleteValue(id: String, key: String) = withContext(Dispatchers.IO) {
-        if (key.isEmpty() || key.length > MAX_KEY_LENGTH) return@withContext
+    suspend fun deleteValue(id: String, key: String): ValueWrite = withContext(Dispatchers.IO) {
+        if (key.isEmpty() || key.length > MAX_KEY_LENGTH) return@withContext ValueWrite.Ignored
         lock.withLock {
-            val entry = entries[id] ?: return@withLock
-            if (!entry.enabled) return@withLock
-            val obj = values[id] ?: return@withLock
-            if (!obj.has(key)) return@withLock
+            val entry = entries[id] ?: return@withLock ValueWrite.Ignored
+            if (!entry.enabled) return@withLock ValueWrite.Ignored
+            val obj = values[id] ?: return@withLock ValueWrite.Ignored
+            if (!obj.has(key)) return@withLock ValueWrite.Ignored
+            val old = obj.opt(key)
             obj.remove(key)
             writeValues(id, obj)
             publish()
+            ValueWrite.Changed(old)
         }
     }
 
