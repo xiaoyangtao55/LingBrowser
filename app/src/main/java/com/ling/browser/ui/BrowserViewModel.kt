@@ -930,7 +930,9 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
                 if (conn.responseCode !in 200..299) {
                     return@runCatching probeWithRange(url)
                 }
-                val len = conn.contentLengthLong
+                // 不用 getContentLengthLong：它需要 API 24，而 minSdk 是 23。
+                // 直接解析响应头等价，且对分块传输同样返回 -1。
+                val len = conn.getHeaderField("Content-Length")?.toLongOrNull() ?: -1L
                 if (len > 0) len else probeWithRange(url)
             } finally {
                 runCatching { conn.disconnect() }

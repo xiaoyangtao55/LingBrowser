@@ -109,15 +109,18 @@ fun parseNetscapeHtml(html: String): List<ImportedBookmark> {
     // 刚遇到的 <H3> 名字，等它后面的 <DL> 来认领
     var pending: String? = null
 
+    // 按组序号取值，不用 m.groups["name"]：命名组访问走 Matcher.start(String)，
+    // 需要 API 26，而 minSdk 是 23。组号与 TOKEN 里的命名组一一对应。
     for (m in TOKEN.findAll(html)) {
         when {
-            m.groups["folder"] != null -> pending = decodeHtml(m.groups["folder"]!!.value).trim()
+            m.groups[GROUP_FOLDER] != null ->
+                pending = decodeHtml(m.groups[GROUP_FOLDER]!!.value).trim()
             // 有 attrs 组的只可能是 <A>；<DL> 那一路的命名组全是 null
-            m.groups["attrs"] != null -> {
-                val attrs = m.groups["attrs"]!!.value
+            m.groups[GROUP_ATTRS] != null -> {
+                val attrs = m.groups[GROUP_ATTRS]!!.value
                 val url = attrOf(attrs, "href")?.let(::decodeHtml)?.trim().orEmpty()
                 if (!isImportableUrl(url)) continue
-                val title = decodeHtml(m.groups["title"]?.value.orEmpty()).trim()
+                val title = decodeHtml(m.groups[GROUP_TITLE]?.value.orEmpty()).trim()
                 val createdAt = attrOf(attrs, "add_date")?.toLongOrNull()?.times(1000)
                     ?: System.currentTimeMillis()
                 out.add(
@@ -190,6 +193,11 @@ private val TOKEN = Regex(
         """|<a\b(?<attrs>[^>]*)>(?<title>.*?)</a>""",
     setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL),
 )
+
+/** [TOKEN] 里命名组对应的序号，供 minSdk 23 下按序号安全取值。 */
+private const val GROUP_FOLDER = 1
+private const val GROUP_ATTRS = 2
+private const val GROUP_TITLE = 3
 
 /** 标签属性：值可以是双引号、单引号或不加引号。 */
 private val ATTR = Regex(

@@ -6,6 +6,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import androidx.annotation.RequiresApi
 import com.ling.browser.data.prefs.DownloadLocation
 import java.io.File
 import java.io.OutputStream
@@ -81,7 +82,11 @@ object DownloadDestination {
      * Android 10+：通过 MediaStore 写入公共 Download 目录。
      *
      * 不需要存储权限。已存在的同名文件会被复用（用于断点续传）。
+     *
+     * 调用方已用 `SDK_INT >= Q` 分派；[MediaStore.Downloads.getContentUri] 是
+     * API 29 才有的，用注解把这个前提写清楚，免静态分析误报。
      */
+    @RequiresApi(Build.VERSION_CODES.Q)
     private fun resolvePublicMediaStore(context: Context, fileName: String): Target? {
         val resolver = context.contentResolver
         val collection = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)

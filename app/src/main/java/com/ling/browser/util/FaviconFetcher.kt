@@ -2,6 +2,7 @@ package com.ling.browser.util
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.os.Build
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
@@ -84,8 +85,14 @@ object FaviconFetcher {
         }
         try {
             if (conn.responseCode != HttpURLConnection.HTTP_OK) return@runCatching null
+            // getContentLengthLong 需要 API 24，minSdk 是 23，低版本退回 int 版
+            val declared = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                conn.contentLengthLong
+            } else {
+                conn.contentLength.toLong()
+            }
             // Content-Length 已经超限就根本不用读了
-            if (conn.contentLengthLong > MAX_BYTES) return@runCatching null
+            if (declared > MAX_BYTES) return@runCatching null
 
             conn.inputStream.use { input ->
                 val out = ByteArrayOutputStream()

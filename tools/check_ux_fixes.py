@@ -211,7 +211,7 @@ if re.search(r"MAX_BYTES", fetcher) and re.search(r"total > MAX_BYTES", fetcher)
 else:
     bad("未做读取体积上限，超大图会打爆内存")
 
-if re.search(r"contentLengthLong > MAX_BYTES", fetcher):
+if re.search(r"(?:contentLengthLong|declared) > MAX_BYTES", fetcher):
     ok("先看 Content-Length 提前放弃")
 else:
     bad("未用 Content-Length 提前短路")
