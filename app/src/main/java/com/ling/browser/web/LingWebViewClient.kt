@@ -3,16 +3,19 @@ package com.ling.browser.web
 import android.graphics.Bitmap
 import android.net.Uri
 import android.net.http.SslError
+import android.os.Build
 import android.os.Message
 import android.webkit.ClientCertRequest
 import android.webkit.HttpAuthHandler
 import android.webkit.RenderProcessGoneDetail
+import android.webkit.SafeBrowsingResponse
 import android.webkit.SslErrorHandler
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.annotation.RequiresApi
 import java.io.ByteArrayInputStream
 
 /**
@@ -144,6 +147,20 @@ class LingWebViewClient(
      * 两个 [Message] 是二选一的开关，接管方必须且只能 `sendToTarget()` 一个。
      */
     private val onFormResubmission: ((WebView, Message, Message) -> Unit)? = null,
+    /**
+     * Safe Browsing 命中危险站点。
+     *
+     * 默认实现直接 `backToSafety(true)` —— 用户只看到页面"退回去了"，
+     * 完全不知道原因。这里交给 UI 弹窗，让用户明确选择继续还是返回。
+     *
+     * @param callback 必须且只能兑现一次（`backToSafety` / `proceed`）
+     */
+    private val onSafeBrowsingHit: ((
+        url: String,
+        mainFrame: Boolean,
+        threatType: Int,
+        callback: SafeBrowsingResponse,
+    ) -> Unit)? = null,
 ) : WebViewClient() {
 
     /**
@@ -303,6 +320,27 @@ class LingWebViewClient(
         } else {
             delegate(failingHost, reason, mainFrame, h)
         }
+    }
+
+    /**
+     * Safe Browsing 命中（恶意软件 / 钓鱼 / 有害应用等）。
+     *
+     * 不接管时交回父类：默认会 `backToSafety(true)`，至少能保证页面被拦下。
+     * 接管后必须由 UI 兑现 callback，且只能兑现一次。
+     */
+    @RequiresApi(Build.VERSION_CODES.O_MR1)
+    override fun onSafeBrowsingHit(
+        view: WebView,
+        request: WebResourceRequest,
+        threatType: Int,
+        callback: SafeBrowsingResponse,
+    ) {
+        val delegate = onSafeBrowsingHit
+        if (delegate == null) {
+            super.onSafeBrowsingHit(view, request, threatType, callback)
+            return
+        }
+        delegate(request.url.toString(), request.isForMainFrame, threatType, callback)
     }
 
     /**

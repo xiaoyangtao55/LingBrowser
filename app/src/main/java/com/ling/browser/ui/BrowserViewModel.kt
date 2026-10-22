@@ -9,6 +9,7 @@ import android.content.ClipboardManager
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.util.Base64
 import android.webkit.CookieManager
 import android.widget.Toast
 import androidx.compose.ui.graphics.Color
@@ -41,6 +42,7 @@ import com.ling.browser.data.prefs.ReaderFontSize
 import com.ling.browser.data.prefs.SearchEngine
 import com.ling.browser.util.FaviconFetcher
 import com.ling.browser.util.UrlUtils
+import com.ling.browser.web.ConsoleEntry
 import com.ling.browser.web.HitTarget
 import com.ling.browser.web.InternalPage
 import com.ling.browser.web.ReaderPage
@@ -131,6 +133,9 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
 
     /** 当前页面里由 `GM_registerMenuCommand` 注册的命令，供「脚本菜单」面板展示。 */
     val userScriptMenus: StateFlow<List<UserScriptMenuCommand>> = tabManager.userScriptMenus
+
+    /** 页面控制台里的 ERROR 消息，供「页面错误」面板展示。 */
+    val consoleErrors: StateFlow<List<ConsoleEntry>> = tabManager.consoleErrors
 
     /**
      * 广告拦截的累计计数 = 已落盘的历史总数 + 本次运行新增。
@@ -1218,12 +1223,26 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
 
     private val scriptRequests = HashMap<String, RunningScriptRequest>()
 
+    /**
+     * `GM_openInTab` 打开的标签：requestId -> tabId。
+     *
+     * 只记原生自己开出去的，页面拿 requestId 调 `close()` 时才能映射回标签 ——
+     * 否则桥对象就成了"任意页面可关任意标签"的口子。
+     */
+    private val scriptTabs = LinkedHashMap<String, String>()
+
     companion object {
         /** 同时进行的脚本请求上限：跨域请求不受 CORS 约束，需要自己兜一道。 */
         private const val MAX_SCRIPT_REQUESTS = 8
         private const val DEFAULT_SCRIPT_TIMEOUT_MS = 30_000
         private const val MIN_SCRIPT_TIMEOUT_MS = 1_000
         private const val MAX_SCRIPT_TIMEOUT_MS = 120_000
+
+        /** `GM_openInTab` 记下的标签数上限，避免脚本无限开标签把表撑大。 */
+        private const val MAX_SCRIPT_TABS = 32
+
+        /** `GM_xmlhttpRequest` 进度事件的最小间隔（字节），避免逐块刷屏。 */
+        private const val PROGRESS_STEP_BYTES = 64L * 1024L
 
         /** `GM_notification` 的通知渠道与点击回传用的 extras。 */
         const val SCRIPT_CHANNEL_ID = "userscript"
@@ -1243,6 +1262,9 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
         val obj = runCatching { JSONObject(raw) }.getOrNull() ?: return
         val scriptId = obj.optString("s")
         if (scriptId.isEmpty()) return
+        // 桥对象对整个页面可见，消息本身不可信：脚本必须存在且启用。
+        // 这一道同时挡住"已停用脚本继续开标签 / 读剪贴板 / 发通知"。
+        if (container.userScripts.enabledScripts.value.none { it.id == scriptId }) return
         when (obj.optString("t")) {
             "set" -> {
                 val key = obj.optString("k")
@@ -1255,7 +1277,8 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
             }
-            "open" -> obj.optString("u").takeIf { it.isNotBlank() }?.let(::openInNewTab)
+            "open" -> openScriptTab(tabId, scriptId, obj)
+            "tabClose" -> scriptTabs.remove(obj.optString("id"))?.let(tabManager::closeTab)
             "del" -> {
                 val key = obj.optString("k")
                 viewModelScope.launch {
@@ -1283,6 +1306,7 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
             "notice" -> postUserScriptNotification(tabId, scriptId, obj)
             "xhr" -> startScriptRequest(tabId, scriptId, obj)
             "xa" -> abortScriptRequest(obj.optString("id"))
+            "dl" -> startScriptDownload(tabId, scriptId, obj)
         }
     }
 
@@ -1304,6 +1328,37 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun onUserScriptNotificationClick(tabId: String, scriptId: String, notificationId: String) {
         tabManager.dispatchUserScriptNotificationClick(tabId, scriptId, notificationId)
+    }
+
+    /**
+     * `GM_openInTab`：按 options 打开新标签。
+     *
+     * `active=false` 时只建标签、开始加载，不切过去（后台打开）。
+     * 页面给的 id 由原生记下来，只用于 `handle.close()` 与 onload 回调 ——
+     * 映射表之外的值一律忽略，避免成为"任意页面关任意标签"的入口。
+     */
+    private fun openScriptTab(tabId: String, scriptId: String, details: JSONObject) {
+        val requestId = details.optString("id")
+        val url = details.optString("u")
+        val scheme = runCatching { Uri.parse(url).scheme?.lowercase(Locale.ROOT) }.getOrNull()
+        if (scheme != "http" && scheme != "https") {
+            if (requestId.isNotEmpty()) {
+                deliverScriptEvent(
+                    tabId, scriptId, requestId, "error",
+                    scriptFailurePayload("只支持 http(s) 地址"),
+                )
+            }
+            return
+        }
+        val tab = tabManager.newTab(
+            url = url,
+            incognito = details.optBoolean("inc", false),
+            select = details.optBoolean("active", true),
+        )
+        if (requestId.isEmpty()) return
+        scriptTabs[requestId] = tab.id
+        while (scriptTabs.size > MAX_SCRIPT_TABS) scriptTabs.remove(scriptTabs.keys.first())
+        deliverScriptEvent(tabId, scriptId, requestId, "load", JSONObject().put("tabId", tab.id))
     }
 
     /**
@@ -1438,7 +1493,28 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
 
         // 已在 UI 线程（WebMessageListener 回调），CookieManager 可以安全调用。
         val cookie = runCatching { CookieManager.getInstance().getCookie(url) }.getOrNull()
-        val request = ScriptHttpRequest(url, method, headers, body, timeout, cookie)
+        // 进度从 IO 线程来，evalInTab 必须在主线程：这里按 64 KiB 节流后再切线程，
+        // 避免 2 MiB 响应把 dispatch 队列刷爆。
+        var lastReported = 0L
+        val request = ScriptHttpRequest(url, method, headers, body, timeout, cookie) { received, total ->
+            if (received - lastReported >= PROGRESS_STEP_BYTES || received == total) {
+                lastReported = received
+                viewModelScope.launch(Dispatchers.Main) {
+                    if (scriptRequests[requestId] != null) {
+                        deliverScriptEvent(
+                            tabId,
+                            scriptId,
+                            requestId,
+                            "progress",
+                            JSONObject()
+                                .put("loaded", received)
+                                .put("total", total)
+                                .put("lengthComputable", total > 0),
+                        )
+                    }
+                }
+            }
+        }
 
         val job = viewModelScope.launch {
             try {
@@ -1506,6 +1582,42 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
         put("error", message)
     }
 
+    /**
+     * `GM_download`：直接进下载队列，不再弹浏览器自己的确认框。
+     *
+     * 与 Tampermonkey 对齐：脚本已经明确表达了下载意图，再确认一次只会打断自动化。
+     * 文件名只取最后一段，避免 `../` 之类的路径穿越。
+     */
+    private fun startScriptDownload(tabId: String, scriptId: String, details: JSONObject) {
+        val requestId = details.optString("id").takeIf { it.isNotEmpty() } ?: return
+        fun fail(message: String) {
+            deliverScriptEvent(tabId, scriptId, requestId, "error", scriptFailurePayload(message))
+        }
+        val url = details.optString("u")
+        val scheme = runCatching { Uri.parse(url).scheme?.lowercase(Locale.ROOT) }.getOrNull()
+        if (scheme != "http" && scheme != "https") {
+            fail("只支持 http(s) 下载")
+            return
+        }
+        val fileName = details.optString("n")
+            .replace('\\', '/')
+            .substringAfterLast('/')
+            .trim()
+            .takeIf { it.isNotEmpty() }
+        maybeRequestNotificationPermission()
+        viewModelScope.launch {
+            val ok = withContext(Dispatchers.IO) { container.downloads.enqueue(url, fileName, null) }
+            if (ok) {
+                deliverScriptEvent(
+                    tabId, scriptId, requestId, "load",
+                    JSONObject().put("finalUrl", url).put("downloadId", ""),
+                )
+            } else {
+                fail("无法下载该文件")
+            }
+        }
+    }
+
     private fun scriptResponsePayload(
         response: ScriptHttpResponse,
         responseType: String,
@@ -1517,6 +1629,13 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
         put("responseHeaders", response.headers)
         put("responseText", response.body)
         put("responseType", responseType)
+        // 二进制响应体只能以 base64 过桥；垫片里再解回 ArrayBuffer / Blob。
+        if (responseType == "arraybuffer" || responseType == "blob") {
+            put(
+                "responseBase64",
+                Base64.encodeToString(response.raw, Base64.NO_WRAP),
+            )
+        }
     }
 
     /**

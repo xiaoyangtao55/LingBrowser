@@ -542,4 +542,149 @@ class UserScriptTest {
         // 依赖与正文同处一个 IIFE：依赖声明的顶层变量脚本才能看见
         assertTrue(js.startsWith("(function(){try{"))
     }
+
+    @Test
+    fun `GM 新旧两套名字互认`() {
+        // 只写新名字也应该拿到旧实现（能力是同一个）。
+        val modern = parse(
+            """
+            // ==UserScript==
+            // @name  新名字
+            // @match https://example.com/*
+            // @grant GM.getValue
+            // @grant GM.openInTab
+            // ==/UserScript==
+            """.trimIndent(),
+        )!!
+        val modernJs = scriptWrapper(modern, "u1", "{}")
+        assertTrue(modernJs.contains("function GM_getValue"))
+        assertTrue(modernJs.contains("function GM_openInTab"))
+        assertTrue(modernJs.contains("GM.getValue=function"))
+
+        // 反方向：只写旧名字仍然拿到旧实现；GM.* 命名空间不因此被打开
+        // （避免给老脚本往页面里多塞一个全局 `GM`）。
+        val legacy = parse(
+            """
+            // ==UserScript==
+            // @name  旧名字
+            // @match https://example.com/*
+            // @grant GM_getValue
+            // ==/UserScript==
+            """.trimIndent(),
+        )!!
+        val legacyJs = scriptWrapper(legacy, "u1", "{}")
+        assertTrue(legacyJs.contains("function GM_getValue"))
+        assertFalse(legacyJs.contains("var GM={}"))
+    }
+
+    @Test
+    fun `只声明新名字即可打开 GM 命名空间`() {
+        val script = parse(
+            """
+            // ==UserScript==
+            // @name  新名字
+            // @match https://example.com/*
+            // @grant GM.setValue
+            // ==/UserScript==
+            """.trimIndent(),
+        )!!
+        val js = scriptWrapper(script, "u1", "{}")
+        assertTrue(js.contains("var GM={}"))
+        assertTrue(js.contains("GM.setValue=function"))
+        assertTrue(js.contains("function GM_setValue"))
+    }
+
+    @Test
+    fun `GM 星号发放全部能力`() {
+        val script = parse(
+            """
+            // ==UserScript==
+            // @name  全量
+            // @match https://example.com/*
+            // @grant GM.*
+            // ==/UserScript==
+            """.trimIndent(),
+        )!!
+        val js = scriptWrapper(script, "u1", "{}")
+        assertTrue(js.contains("function GM_getValue"))
+        assertTrue(js.contains("function GM_openInTab"))
+        assertTrue(js.contains("function GM_download"))
+        assertTrue(js.contains("function GM_xmlhttpRequest"))
+        assertTrue(js.contains("GM.download=function"))
+        assertTrue(js.contains("GM.xmlHttpRequest=function"))
+    }
+
+    @Test
+    fun `GM_openInTab 支持对象参数并返回句柄`() {
+        val script = parse(
+            """
+            // ==UserScript==
+            // @name  开标签
+            // @match https://example.com/*
+            // @grant GM_openInTab
+            // ==/UserScript==
+            """.trimIndent(),
+        )!!
+        val js = scriptWrapper(script, "u1", "{}")
+        // 三种调用形态：字符串 / 字符串 + 布尔 / 对象。
+        assertTrue(js.contains("typeof u==='string'?{url:u}"))
+        assertTrue(js.contains("o={active:!o}"))
+        // 对象里的 active / incognito / onload 都要透传到原生。
+        assertTrue(js.contains("act: act") || js.contains("active:act!==false"))
+        assertTrue(js.contains("inc:!!inc"))
+        assertTrue(js.contains("typeof d.onload==='function'"))
+        // 句柄只能关掉自己开出去的标签。
+        assertTrue(js.contains("t:'tabClose'"))
+        assertTrue(js.contains("return{close:function()"))
+    }
+
+    @Test
+    fun `GM_download 按 grant 发放并分发回调`() {
+        val script = parse(
+            """
+            // ==UserScript==
+            // @name  下载
+            // @match https://example.com/*
+            // @grant GM_download
+            // ==/UserScript==
+            """.trimIndent(),
+        )!!
+        val js = scriptWrapper(script, "u1", "{}")
+        assertTrue(js.contains("function GM_download"))
+        assertTrue(js.contains("t:'dl'"))
+        assertTrue(js.contains("typeof d.onload==='function'"))
+        assertTrue(js.contains("typeof d.onerror==='function'"))
+
+        // 没授权就不发放。
+        val none = parse(
+            """
+            // ==UserScript==
+            // @name  无授权
+            // @match https://example.com/*
+            // @grant none
+            // ==/UserScript==
+            """.trimIndent(),
+        )!!
+        assertFalse(scriptWrapper(none, "u1", "{}").contains("function GM_download"))
+    }
+
+    @Test
+    fun `GM_xmlhttpRequest 声明二进制响应类型`() {
+        val script = parse(
+            """
+            // ==UserScript==
+            // @name  二进制
+            // @match https://example.com/*
+            // @grant GM_xmlhttpRequest
+            // ==/UserScript==
+            """.trimIndent(),
+        )!!
+        val js = scriptWrapper(script, "u1", "{}")
+        // responseType 原样透传给原生，arraybuffer / blob 由 [UserScriptHttp] 兑现。
+        assertTrue(js.contains("rt:d.responseType||''"))
+        assertTrue(js.contains("e==='progress'"))
+        // 二进制响应体以 base64 过桥，垫片负责解回 ArrayBuffer / Blob。
+        assertTrue(js.contains("d.responseType==='arraybuffer'"))
+        assertTrue(js.contains("new Blob([aa])"))
+    }
 }

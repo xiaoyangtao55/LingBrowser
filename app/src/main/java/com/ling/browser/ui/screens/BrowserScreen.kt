@@ -71,6 +71,7 @@ import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -99,8 +100,10 @@ import com.ling.browser.ui.components.IncognitoBanner
 import com.ling.browser.util.UrlUtils
 import com.ling.browser.web.SecurityState
 import com.ling.browser.web.CertPrompt
+import com.ling.browser.web.ConsoleEntry
 import com.ling.browser.web.FormResubmitPrompt
 import com.ling.browser.web.JsDialogRequest
+import com.ling.browser.web.SafeBrowsingPrompt
 import com.ling.browser.web.WebAuthRequest
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -165,6 +168,9 @@ fun BrowserScreen(
     val allScriptMenus by viewModel.userScriptMenus.collectAsStateWithLifecycle()
     val installedScripts by viewModel.userScripts.collectAsStateWithLifecycle()
     val activeScriptMenus = allScriptMenus.filter { it.tabId == activeId }
+    // 页面错误：只展示当前标签页的（每页导航后会被清空）。
+    val consoleErrors by viewModel.consoleErrors.collectAsStateWithLifecycle()
+    val activeConsoleErrors = consoleErrors.filter { it.tabId == activeId }
     // 阅读模式是否开启。必须 collect（而不是直接读 viewModel.readerActive），
     // 否则进入/退出后菜单文案不会刷新。
     val readerActive by viewModel.readerActive.collectAsStateWithLifecycle()
@@ -177,6 +183,8 @@ fun BrowserScreen(
     var showTabsSheet by remember { mutableStateOf(false) }
     // 「脚本菜单」只有在当前页真的注册了命令时才存在。
     var showScriptMenuSheet by remember { mutableStateOf(false) }
+    // 「页面错误」面板：只收录 ERROR 级控制台消息，当前页没有错误时不出现。
+    var showConsoleSheet by remember { mutableStateOf(false) }
     var exitConfirm by remember { mutableStateOf(false) }
 
     // 网页 JS 对话框（alert/confirm/prompt/onbeforeunload）。
@@ -193,6 +201,10 @@ fun BrowserScreen(
     // POST 结果页刷新：WebView 自己不会重发请求体，由这里弹窗确认。
     // 队列同样在 WebTabManager 里，这里只存当前展示的一条。
     var formPrompt by remember { mutableStateOf<FormResubmitPrompt?>(null) }
+
+    // Safe Browsing 命中（恶意软件 / 钓鱼 …）。与证书错误同样是排队弹窗，
+    // 这里只存当前展示的一条。
+    var safePrompt by remember { mutableStateOf<SafeBrowsingPrompt?>(null) }
 
     // 网页全屏（HTML5 视频的「全屏」按钮）。非 null 时用一层覆盖整个界面，
     // callback 由 WebView 提供，退出全屏时必须回调它，否则 WebView 仍以为
@@ -279,6 +291,7 @@ fun BrowserScreen(
     val moreSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val tabsSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val scriptMenuSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val consoleSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     // 关闭「更多」面板。
     val closeMoreSheet: () -> Unit = {
@@ -513,6 +526,17 @@ fun BrowserScreen(
             viewModel.tabManager.onFormResubmitPrompt = null
             viewModel.tabManager.cancelFormResubmits()
             formPrompt = null
+        }
+    }
+
+    // Safe Browsing 弹窗：命中后 WebView 会一直等 SafeBrowsingResponse 的裁决，
+    // 因此界面销毁时必须把所有待裁决项按「返回安全页」兑现。
+    DisposableEffect(Unit) {
+        viewModel.tabManager.onSafeBrowsingPrompt = { prompt -> safePrompt = prompt }
+        onDispose {
+            viewModel.tabManager.onSafeBrowsingPrompt = null
+            viewModel.tabManager.cancelSafeBrowsing()
+            safePrompt = null
         }
     }
 
@@ -889,6 +913,19 @@ fun BrowserScreen(
                         closeMoreSheet()
                     },
                 ),
+                // 页面错误：只有当前页真的报了错才出现，避免面板里多一个常年灰着的入口。
+                if (activeConsoleErrors.isNotEmpty()) {
+                    MoreItem(
+                        icon = LingIcons.Block,
+                        label = "页面错误（${activeConsoleErrors.size}）",
+                        onClick = {
+                            showMoreSheet = false
+                            showConsoleSheet = true
+                        },
+                    )
+                } else {
+                    null
+                },
                 // 用户脚本通过 GM_registerMenuCommand 注册的命令。只有当前页
                 // 真的注册过才出现 —— 空面板没有意义。
                 if (activeScriptMenus.isNotEmpty()) {
@@ -966,6 +1003,31 @@ fun BrowserScreen(
                             }
                             .padding(horizontal = 20.dp, vertical = 14.dp),
                     )
+                }
+            }
+        }
+    }
+
+    // ---- 「页面错误」面板 ----
+    // 与脚本菜单同理：导航会清空当前页的错误，列表空了就收起面板。
+    LaunchedEffect(activeConsoleErrors.isEmpty()) {
+        if (activeConsoleErrors.isEmpty()) showConsoleSheet = false
+    }
+    if (showConsoleSheet) {
+        ModalBottomSheet(
+            onDismissRequest = { showConsoleSheet = false },
+            sheetState = consoleSheetState,
+            containerColor = MaterialTheme.colorScheme.surfaceContainer,
+            dragHandle = { SheetDragHandle() },
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(vertical = 8.dp),
+            ) {
+                activeConsoleErrors.forEach { entry ->
+                    ConsoleErrorRow(entry)
                 }
             }
         }
@@ -1224,6 +1286,48 @@ fun BrowserScreen(
                 TextButton(onClick = {
                     viewModel.tabManager.resolveFormResubmit(resend = false)
                 }) { Text("取消") }
+            },
+        )
+    }
+
+    // ---- Safe Browsing 警告 ----
+    //
+    // 「返回安全页」是默认动作（onDismissRequest 同此），与 Chrome 的默认按钮一致。
+    // 「仍要继续」只在用户明确点击时兑现 proceed —— 这一页仍可能被恶意内容利用。
+    safePrompt?.let { prompt ->
+        AlertDialog(
+            onDismissRequest = { viewModel.tabManager.resolveSafeBrowsing(proceed = false) },
+            title = { Text("安全警告") },
+            text = {
+                Column {
+                    Text(
+                        text = if (prompt.host.isBlank()) "此页面" else prompt.host,
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        text = "— ${prompt.threat}",
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                    if (!prompt.mainFrame) {
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            text = "由页面内的图片 / 脚本等子资源发起，不是当前网页本身。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.tabManager.resolveSafeBrowsing(proceed = false)
+                }) { Text("返回安全页") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    viewModel.tabManager.resolveSafeBrowsing(proceed = true)
+                }) { Text("仍要继续") }
             },
         )
     }
@@ -1548,6 +1652,38 @@ private fun SheetDragHandle() {
  * 跟随明暗的行为一致。0.35 是「看得出、但不抢眼」的取值。
  */
 private const val SHEET_HANDLE_ALPHA = 0.35f
+
+/**
+ * 「页面错误」面板的一行。
+ *
+ * 只可能是 ERROR 级消息（见 `WebTabManager.onConsoleMessage`）：正文等宽字体
+ * 便于对齐缩进，来源与行号放次行小字，长消息按原样换行不截断。
+ */
+@Composable
+private fun ConsoleErrorRow(entry: ConsoleEntry) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 10.dp),
+    ) {
+        Text(
+            text = entry.message,
+            style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
+            color = MaterialTheme.colorScheme.error,
+        )
+        if (entry.source.isNotBlank() || entry.line > 0) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = listOfNotNull(
+                    entry.source.takeIf { it.isNotBlank() },
+                    entry.line.takeIf { it > 0 }?.let { "第 $it 行" },
+                ).joinToString(" · "),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
 
 /**
  * 「更多」面板的一个条目。

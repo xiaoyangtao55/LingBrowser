@@ -468,8 +468,17 @@ internal fun scriptWrapper(
  * 让脚本走 Tampermonkey 专属分支。
  */
 private fun gmPrelude(script: UserScript, scriptId: String): String {
-    fun granted(name: String): Boolean =
-        script.grants.contains(name) || script.grants.contains("GM.*") || script.grants.contains("*")
+    fun granted(name: String): Boolean {
+        if (script.grants.contains(name) || script.grants.contains("GM.*") ||
+            script.grants.contains("*")
+        ) {
+            return true
+        }
+        // `GM.setValue` 与 `GM_setValue` 是同一能力的新旧两套名字：
+        // 只写新名字的脚本也要能拿到对应实现，否则能力被静默吞掉。
+        val modern = if (name.startsWith("GM_")) "GM." + name.removePrefix("GM_") else name
+        return script.grants.contains(modern)
+    }
 
     val storageGranted = granted("GM_getValue") || granted("GM_setValue") ||
         granted("GM_deleteValue") || granted("GM_listValues")
@@ -541,10 +550,28 @@ private fun gmPrelude(script: UserScript, scriptId: String): String {
         append("post({t:'notice',id:id,title:String(d.title||''),text:String(d.text||d.body||''),u:String(d.url||'')});")
         append("return id}")
         if (granted("GM_openInTab")) {
-            append("function GM_openInTab(u){post({t:'open',u:String(u)})}")
+            // 兼容三种调用：字符串、字符串 + 布尔（新标签是否后台）、对象。
+            append("function GM_openInTab(u,o){var d=typeof u==='string'?{url:u}:(u||{});")
+            append("if(typeof o==='boolean')o={active:!o};o=o||{};")
+            append("var act=d.active!==undefined?d.active:o.active;")
+            append("var inc=d.incognito!==undefined?d.incognito:o.incognito;")
+            append("var i='o'+Date.now().toString(36)+Math.random().toString(36).slice(2);")
+            append("CB[i]=function(e,p){if(e==='load'&&typeof d.onload==='function'){try{d.onload(p)}catch(x){}}};\n")
+            append("post({t:'open',id:i,u:String(d.url||''),active:act!==false,inc:!!inc});")
+            // handle.close()：原生只认自己发出去的 id，页面无法借它关别人的标签。
+            append("return{close:function(){post({t:'tabClose',id:i})}}}")
         }
         if (granted("GM_setClipboard")) {
             append("function GM_setClipboard(t){post({t:'clip',v:String(t)})}")
+        }
+        if (granted("GM_download")) {
+            // 下载直接复用原生下载队列；onload 在入队成功后触发。
+            append("function GM_download(a,b){var d=typeof a==='string'?{url:a,name:b}:(a||{});")
+            append("d=d||{};var i='d'+Date.now().toString(36)+Math.random().toString(36).slice(2);")
+            append("CB[i]=function(e,p){")
+            append("if(e==='load'){if(typeof d.onload==='function'){try{d.onload(p)}catch(x){}}}")
+            append("else if(e==='error'){if(typeof d.onerror==='function'){try{d.onerror(p)}catch(x){}}}};\n")
+            append("post({t:'dl',id:i,u:String(d.url||''),n:String(d.name||'')})}")
         }
         if (granted("GM_getResourceText") || granted("GM_getResourceURL")) {
             // 资源在导入时已经抓成 base64 并随注入带进来，这里纯前端解码即可。
@@ -559,7 +586,12 @@ private fun gmPrelude(script: UserScript, scriptId: String): String {
             append("function GM_xmlhttpRequest(d){d=d||{};")
             append("var i='r'+Date.now().toString(36)+Math.random().toString(36).slice(2);")
             append("CB[i]=function(e,p){")
-            append("if(e==='load'){if(d.responseType==='json'){try{p.response=JSON.parse(p.responseText)}catch(x){p.response=null}}")
+            append("if(e==='load'){if(d.responseType==='arraybuffer'||d.responseType==='blob'){")
+            // 二进制响应体在原生侧转成 base64 过桥，这里解回 ArrayBuffer / Blob。
+            append("try{var bb=atob(p.responseBase64||''),aa=new Uint8Array(bb.length);")
+            append("for(var bi=0;bi<bb.length;bi++)aa[bi]=bb.charCodeAt(bi);")
+            append("p.response=d.responseType==='blob'?new Blob([aa]):aa.buffer}catch(x){p.response=null}}")
+            append("else if(d.responseType==='json'){try{p.response=JSON.parse(p.responseText)}catch(x){p.response=null}}")
             append("if(d.onreadystatechange){try{d.onreadystatechange(p)}catch(x){}}if(d.onload){d.onload(p)}}")
             append("else if(e==='error'){if(d.onreadystatechange){try{d.onreadystatechange(p)}catch(x){}}")
             append("if(d.onerror){d.onerror(p)}}")
@@ -569,6 +601,51 @@ private fun gmPrelude(script: UserScript, scriptId: String): String {
             append("post({t:'xhr',id:i,m:String(d.method||'GET').toUpperCase(),u:String(d.url||''),")
             append("h:d.headers||{},d:typeof d.data==='undefined'?null:d.data,to:d.timeout||0,rt:d.responseType||''});")
             append("return{abort:function(){post({t:'xa',id:i})}}}")
+        }
+        // ---- GM.* 命名空间（Promise 版） ----
+        // 新版脚本直接写 `GM.setValue(...)`，只声明 `@grant GM.setValue` 或 `GM.*`；
+        // 这里给同一批实现套一层 Promise，底层仍复用上面的同步函数。
+        val modernGranted = script.grants.contains("GM.*") || script.grants.contains("*") ||
+            script.grants.any { it.startsWith("GM.") }
+        if (modernGranted) {
+            append("var GM={};GM.info=GM_info;")
+            if (storageGranted) {
+                append("GM.getValue=function(k,d){return Promise.resolve(GM_getValue(k,d))};")
+                append("GM.setValue=function(k,v){return Promise.resolve().then(function(){GM_setValue(k,v)})};")
+                append("GM.deleteValue=function(k){return Promise.resolve().then(function(){GM_deleteValue(k)})};")
+                append("GM.listValues=function(){return Promise.resolve(GM_listValues())};")
+                append("GM.addValueChangeListener=function(k,f){return GM_addValueChangeListener(k,f)};")
+                append("GM.removeValueChangeListener=function(id){GM_removeValueChangeListener(id)};")
+            }
+            append("GM.registerMenuCommand=function(n,f){return GM_registerMenuCommand(n,f)};")
+            append("GM.unregisterMenuCommand=function(id){GM_unregisterMenuCommand(id)};")
+            append("GM.notification=function(d,t,img,oc){return GM_notification(d,t,img,oc)};")
+            if (granted("GM_openInTab")) {
+                append("GM.openInTab=function(u,o){return GM_openInTab(u,o)};")
+            }
+            if (granted("GM_setClipboard")) {
+                append("GM.setClipboard=function(t){GM_setClipboard(t)};")
+            }
+            if (granted("GM_download")) {
+                // Promise 版把回调错误转成 reject；用户自己的 onload/onerror 仍会先执行。
+                append("GM.download=function(a,b){return new Promise(function(res,rej){")
+                append("var d=typeof a==='string'?{url:a,name:b}:(a||{});")
+                append("var sl=d.onload,el=d.onerror;")
+                append("d.onload=function(p){if(sl){try{sl(p)}catch(x){}}res(p)};")
+                append("d.onerror=function(p){if(el){try{el(p)}catch(x){}}rej(p)};")
+                append("GM_download(d)})};")
+            }
+            if (granted("GM_getResourceText") || granted("GM_getResourceURL")) {
+                append("GM.getResourceText=function(n){return Promise.resolve(GM_getResourceText(n))};")
+                append("GM.getResourceUrl=function(n){return Promise.resolve(GM_getResourceURL(n))};")
+            }
+            if (granted("GM_xmlhttpRequest")) {
+                append("GM.xmlHttpRequest=function(d){return new Promise(function(res,rej){")
+                append("d=d||{};var sl=d.onload,el=d.onerror;")
+                append("d.onload=function(r){if(sl){try{sl(r)}catch(x){}}res(r)};")
+                append("d.onerror=function(r){if(el){try{el(r)}catch(x){}}rej(r)};")
+                append("GM_xmlhttpRequest(d)})};")
+            }
         }
     }
 }

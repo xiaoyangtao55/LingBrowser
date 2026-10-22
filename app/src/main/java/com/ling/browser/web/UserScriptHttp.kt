@@ -25,6 +25,8 @@ internal class ScriptHttpRequest(
     val body: ByteArray?,
     val timeoutMs: Int,
     val cookie: String?,
+    /** 读取响应体时的进度回调（`received` / `total`，total 未知时为 -1）。 */
+    private val onProgress: ((received: Long, total: Long) -> Unit)? = null,
 ) {
     @Volatile
     private var connection: HttpURLConnection? = null
@@ -61,8 +63,9 @@ internal class ScriptHttpRequest(
 
             val status = conn.responseCode
             val stream = if (status >= 400) conn.errorStream else conn.inputStream
+            val total = conn.contentLengthLong
             val bytes = stream?.let { input ->
-                input.use { readLimited(it) }
+                input.use { readLimited(it, total) }
             } ?: ByteArray(0)
 
             val contentType = conn.contentType.orEmpty()
@@ -72,6 +75,7 @@ internal class ScriptHttpRequest(
                 finalUrl = conn.url.toString(),
                 headers = formatHeaders(conn),
                 body = decode(bytes, charsetOf(contentType)),
+                raw = bytes,
                 setCookies = conn.headerFields.entries
                     .firstOrNull { it.key.equals("Set-Cookie", true) }
                     ?.value.orEmpty(),
@@ -82,7 +86,7 @@ internal class ScriptHttpRequest(
         }
     }
 
-    private fun readLimited(input: InputStream): ByteArray {
+    private fun readLimited(input: InputStream, total: Long): ByteArray {
         val out = ByteArrayOutputStream()
         val buffer = ByteArray(8192)
         while (true) {
@@ -92,6 +96,8 @@ internal class ScriptHttpRequest(
                 throw ScriptHttpTooLargeException(MAX_RESPONSE_BYTES)
             }
             out.write(buffer, 0, n)
+            // 真实字节进度：脚本常拿它画下载进度条，报"总大小未知"比不报更好。
+            onProgress?.invoke(out.size().toLong(), total)
         }
         return out.toByteArray()
     }
@@ -131,6 +137,8 @@ internal data class ScriptHttpResponse(
     val finalUrl: String,
     val headers: String,
     val body: String,
+    /** 原始响应字节，`arraybuffer` / `blob` 响应类型要按 base64 交回页面。 */
+    val raw: ByteArray,
     val setCookies: List<String>,
 )
 

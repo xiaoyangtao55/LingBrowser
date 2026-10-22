@@ -5,12 +5,14 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.net.Uri
 import android.webkit.ClientCertRequest
+import android.webkit.ConsoleMessage
 import android.webkit.CookieManager
 import android.webkit.GeolocationPermissions
 import android.webkit.HttpAuthHandler
 import android.webkit.JsPromptResult
 import android.webkit.JsResult
 import android.webkit.PermissionRequest
+import android.webkit.SafeBrowsingResponse
 import android.webkit.SslErrorHandler
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
@@ -65,6 +67,27 @@ data class UserScriptMenuCommand(
     val scriptId: String,
     val commandId: String,
     val label: String,
+)
+
+/**
+ * 一次等待用户裁决的 Safe Browsing 命中。
+ *
+ * [threat] 是本地化后的威胁类型（恶意软件 / 钓鱼网站 …），[host] 用于展示。
+ * 与证书错误不同，这里同一时刻通常只有一个主框架命中，队列只作为兜底。
+ */
+data class SafeBrowsingPrompt(
+    val tabId: String,
+    val host: String,
+    val threat: String,
+    val mainFrame: Boolean,
+)
+
+/** 页面控制台的一条错误记录（只收 ERROR 级别，用于「页面错误」面板）。 */
+data class ConsoleEntry(
+    val tabId: String,
+    val message: String,
+    val source: String,
+    val line: Int,
 )
 
 /**
@@ -145,6 +168,32 @@ class WebTabManager(private val context: Context) {
 
     /** 当前各标签页注册的脚本菜单命令。 */
     val userScriptMenus: StateFlow<List<UserScriptMenuCommand>> = _userScriptMenus.asStateFlow()
+
+    // ---------------------------------------------------------------- Safe Browsing
+
+    /** 尚未裁决的命中（FIFO，兜底用）。 */
+    private val safeQueue = ArrayDeque<PendingSafeBrowsing>()
+
+    /** 当前正在弹窗的那一条；null 表示没有弹窗。 */
+    private var safeShown: PendingSafeBrowsing? = null
+
+    /** Safe Browsing 弹窗回调；参数为 null 表示关掉弹窗。 */
+    var onSafeBrowsingPrompt: ((SafeBrowsingPrompt?) -> Unit)? = null
+
+    private class PendingSafeBrowsing(
+        val prompt: SafeBrowsingPrompt,
+        val callback: SafeBrowsingResponse,
+    )
+
+    // ---------------------------------------------------------------- 页面控制台错误
+
+    /** tabId -> 最近的 ERROR 级控制台消息（新页导航时清空）。 */
+    private val consoleByTab = LinkedHashMap<String, MutableList<ConsoleEntry>>()
+
+    private val _consoleErrors = MutableStateFlow<List<ConsoleEntry>>(emptyList())
+
+    /** 当前各标签页收集到的控制台错误，供「页面错误」面板展示。 */
+    val consoleErrors: StateFlow<List<ConsoleEntry>> = _consoleErrors.asStateFlow()
 
     /**
      * 系统 WebView 是否支持 document-start 注入。
@@ -701,13 +750,18 @@ class WebTabManager(private val context: Context) {
      *
      * 不传 URL 时落在主页：优先用户自定义的主页，否则是「翎」的内置主页。
      */
-    fun newTab(url: String? = null, incognito: Boolean = settings.incognito): TabState {
+    fun newTab(
+        url: String? = null,
+        incognito: Boolean = settings.incognito,
+        select: Boolean = true,
+    ): TabState {
         // 安装链接不能作为标签内容：新标签落在主页，随后弹安装确认。
         val scriptUrl = url?.takeIf { isUserScriptUrl(it) }
         val target = if (scriptUrl != null) settings.homepage else url ?: settings.homepage
         val tab = TabState(url = target, isIncognito = incognito)
         _tabs.update { it + tab }
-        switchTo(tab.id)
+        // select=false 用于 GM_openInTab 的后台打开：建标签、开始加载，但不切过去。
+        if (select) switchTo(tab.id)
         loadUrl(tab.id, target)
         scriptUrl?.let { onUserScriptLink?.invoke(it) }
         return tab
@@ -772,6 +826,9 @@ class WebTabManager(private val context: Context) {
         injectedScripts.remove(id)
         scriptMenus.remove(id)
         publishMenus()
+        // 该标签的待裁决 Safe Browsing 与控制台记录同样随标签一起清掉。
+        cancelSafeBrowsingFor(id)
+        clearConsoleErrors(id)
 
         // 回收 favicon 的像素内存。必须在移出列表后立刻做：
         // Bitmap 的像素是非托管内存，GC 只收得回 Java 对象壳，
@@ -1528,6 +1585,126 @@ class WebTabManager(private val context: Context) {
         }
     }
 
+    // ---------------------------------------------------------------- Safe Browsing
+
+    /**
+     * Safe Browsing 命中：排队弹窗，由用户决定继续还是返回。
+     *
+     * 队列上限很小 —— 主框架命中本来就是低频事件；超出时直接退回安全页，
+     * 不能让 callback 悬空（悬空等于 WebView 一直等在那里）。
+     */
+    private fun handleSafeBrowsingHit(
+        tabId: String,
+        url: String,
+        mainFrame: Boolean,
+        threatType: Int,
+        callback: SafeBrowsingResponse,
+    ) {
+        if (safeQueue.size >= MAX_PENDING_SAFE) {
+            callback.backToSafety(true)
+            return
+        }
+        val host = runCatching { Uri.parse(url).host }.getOrNull().orEmpty()
+        safeQueue.addLast(
+            PendingSafeBrowsing(
+                SafeBrowsingPrompt(tabId, host, safeThreatLabel(threatType), mainFrame),
+                callback,
+            ),
+        )
+        showNextSafe()
+    }
+
+    /** 用户对 Safe Browsing 警告的选择：true = 继续访问，false = 返回安全页。 */
+    fun resolveSafeBrowsing(proceed: Boolean) {
+        val item = safeShown ?: return
+        safeShown = null
+        if (proceed) item.callback.proceed(false) else item.callback.backToSafety(true)
+        showNextSafe()
+    }
+
+    /** UI 销毁时把待裁决项全部按「返回安全页」兑现，避免 callback 悬空。 */
+    fun cancelSafeBrowsing() {
+        val items = ArrayList<PendingSafeBrowsing>()
+        safeShown?.let { items.add(it) }
+        safeShown = null
+        while (true) {
+            items.add(safeQueue.removeFirstOrNull() ?: break)
+        }
+        for (item in items) item.callback.backToSafety(true)
+        onSafeBrowsingPrompt?.invoke(null)
+    }
+
+    /** 关标签时只清理该标签的待裁决项。 */
+    private fun cancelSafeBrowsingFor(tabId: String) {
+        safeShown?.takeIf { it.prompt.tabId == tabId }?.let {
+            it.callback.backToSafety(true)
+            safeShown = null
+            showNextSafe()
+        }
+        val iterator = safeQueue.iterator()
+        while (iterator.hasNext()) {
+            val item = iterator.next()
+            if (item.prompt.tabId == tabId) {
+                item.callback.backToSafety(true)
+                iterator.remove()
+            }
+        }
+    }
+
+    private fun showNextSafe() {
+        if (safeShown == null) {
+            while (true) {
+                val next = safeQueue.removeFirstOrNull() ?: break
+                if (onSafeBrowsingPrompt == null) {
+                    // UI 还没接线：没人能回答，直接退回安全页。
+                    next.callback.backToSafety(true)
+                    continue
+                }
+                safeShown = next
+                break
+            }
+        }
+        onSafeBrowsingPrompt?.invoke(safeShown?.prompt)
+    }
+
+    private fun safeThreatLabel(threatType: Int): String = when (threatType) {
+        WebViewClient.SAFE_BROWSING_THREAT_MALWARE -> "恶意软件"
+        WebViewClient.SAFE_BROWSING_THREAT_PHISHING -> "钓鱼网站"
+        WebViewClient.SAFE_BROWSING_THREAT_UNWANTED_SOFTWARE -> "有害软件"
+        // SAFE_BROWSING_THREAT_BILLING（值为 4）在部分编译 SDK 里没有公开常量。
+        4 -> "可能有害的应用"
+        else -> "危险网站"
+    }
+
+    // ---------------------------------------------------------------- 页面控制台错误
+
+    /**
+     * 记录一条 ERROR 级控制台消息。
+     *
+     * 只做**内存**留存（每页最多 [MAX_CONSOLE_ERRORS] 条），新页导航即清空：
+     * 它用于让用户看见"页面/脚本报了什么错"，不是调试器，不需要持久化。
+     */
+    private fun recordConsoleError(tabId: String, message: String, source: String, line: Int) {
+        if (message.isBlank()) return
+        val list = consoleByTab.getOrPut(tabId) { mutableListOf() }
+        val last = list.lastOrNull()
+        // 同一个循环里反复报同一条错误时不要刷屏。
+        if (last != null && last.message == message && last.line == line) return
+        list.add(ConsoleEntry(tabId, message.take(MAX_CONSOLE_MESSAGE), source, line))
+        while (list.size > MAX_CONSOLE_ERRORS) list.removeAt(0)
+        publishConsoleErrors()
+    }
+
+    /** 清空某标签页的控制台错误（主框架导航 / 关闭标签时调用）。 */
+    fun clearConsoleErrors(tabId: String) {
+        if (consoleByTab.remove(tabId) == null) return
+        publishConsoleErrors()
+    }
+
+    private fun publishConsoleErrors() {
+        _consoleErrors.value = consoleByTab.values.flatten()
+    }
+
     /**
      * POST 结果页刷新：交给 UI 决定是否重新提交。
      *
@@ -1748,6 +1925,16 @@ class WebTabManager(private val context: Context) {
                     applyFavicon(id, icon)
                 }
 
+                override fun onConsoleMessage(msg: ConsoleMessage?): Boolean {
+                    val m = msg ?: return false
+                    // 只留 ERROR：警告/日志量太大，对用户没有可读性。
+                    if (m.messageLevel() == ConsoleMessage.MessageLevel.ERROR) {
+                        recordConsoleError(id, m.message().orEmpty(), m.sourceId().orEmpty(), m.lineNumber())
+                    }
+                    // 返回 false 让 WebView 继续写入 logcat，方便开发时排查。
+                    return false
+                }
+
                 override fun onShowFileChooser(
                     view: WebView?,
                     filePathCallback: ValueCallback<Array<Uri>>?,
@@ -1890,6 +2077,8 @@ class WebTabManager(private val context: Context) {
                     injectedScripts.remove(id)
                     // 脚本菜单的回调绑在旧文档上，导航后必然失效，整批清掉。
                     clearUserScriptMenus(id)
+                    // 控制台错误属于旧文档，新页从零开始记。
+                    clearConsoleErrors(id)
                     // 内置主页与阅读视图都是用 loadDataWithBaseURL 加载的，
                     // WebView 回调回来的是 baseUrl（HomePage.BASE_URL /
                     // ReaderPage.BASE_URL）而不是逻辑地址（ling://home /
@@ -2071,6 +2260,10 @@ class WebTabManager(private val context: Context) {
                 onFormResubmission = { _, dontResend, resend ->
                     handleFormResubmission(id, resend, dontResend)
                 },
+                // Safe Browsing：弹出「危险网站」确认框，而不是静默退回。
+                onSafeBrowsingHit = { url, mainFrame, threatType, callback ->
+                    handleSafeBrowsingHit(id, url, mainFrame, threatType, callback)
+                },
                 onExternalScheme = { uri -> onExternalUri?.invoke(uri) ?: false },
                 // 主页搜索框：只把查询串转出去，判定交给 UI 层（UrlUtils + 搜索引擎）
                 onInternalSearch = { query -> onSearchRequested?.invoke(query) },
@@ -2217,6 +2410,10 @@ class WebTabManager(private val context: Context) {
         _activeId.value = ""
         scriptMenus.clear()
         publishMenus()
+        // UI 即将销毁：待裁决项全部退回安全页，控制台记录也没有留存的必要。
+        cancelSafeBrowsing()
+        consoleByTab.clear()
+        publishConsoleErrors()
     }
 
     companion object {
@@ -2239,6 +2436,15 @@ class WebTabManager(private val context: Context) {
 
         /** 菜单文案上限：脚本可能塞进整段说明，界面行撑不下。 */
         private const val MAX_MENU_LABEL = 60
+
+        /** Safe Browsing 待裁决上限：低频事件，超过就直接退回安全页。 */
+        private const val MAX_PENDING_SAFE = 4
+
+        /** 每个标签页保留的控制台错误条数。 */
+        private const val MAX_CONSOLE_ERRORS = 30
+
+        /** 单条控制台错误的展示长度，避免长堆栈把面板撑爆。 */
+        private const val MAX_CONSOLE_MESSAGE = 500
     }
 }
 
