@@ -41,6 +41,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -82,6 +83,7 @@ import com.ling.browser.ui.components.HomeBackgroundLayer
 import com.ling.browser.ui.components.IncognitoBanner
 import com.ling.browser.util.UrlUtils
 import com.ling.browser.web.SecurityState
+import com.ling.browser.web.JsDialogRequest
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -150,6 +152,12 @@ fun BrowserScreen(
     var showMoreSheet by remember { mutableStateOf(false) }
     var showTabsSheet by remember { mutableStateOf(false) }
     var exitConfirm by remember { mutableStateOf(false) }
+
+    // 网页 JS 对话框（alert/confirm/prompt/onbeforeunload）。
+    // 非 null 时弹对应框；处理完置 null。prompt 的输入值单独存一个 state，
+    // 因为输入过程中对话框不消失。
+    var jsDialog by remember { mutableStateOf<JsDialogRequest?>(null) }
+    var promptInput by remember { mutableStateOf("") }
 
     // 收起面板时先播完退场动画再卸载组件：直接把开关置 false 会让面板
     // "啪"地消失，跳过 ModalBottomSheet 自带的收起动画。
@@ -229,6 +237,33 @@ fun BrowserScreen(
                 }
         }
         onDispose { viewModel.tabManager.onShowFileChooser = null }
+    }
+
+    // 网页 JS 对话框：alert / confirm / prompt / onbeforeunload。
+    //
+    // 不接管时 WebView 会弹系统 Dialog（标题固定"JavaScript"，跟应用风格脱节）。
+    // 这里统一用 Compose AlertDialog 渲染。JsResult 必须且只能兑现一次：
+    // 确认走 confirm()，取消/关闭走 cancel()，关闭对话框（onDismiss）按取消处理。
+    DisposableEffect(Unit) {
+        viewModel.tabManager.onJsAlert = { url, message, result ->
+            jsDialog = JsDialogRequest.Alert(url, message, result)
+        }
+        viewModel.tabManager.onJsConfirm = { url, message, result ->
+            jsDialog = JsDialogRequest.Confirm(url, message, result)
+        }
+        viewModel.tabManager.onJsPrompt = { url, message, defaultValue, result ->
+            promptInput = defaultValue
+            jsDialog = JsDialogRequest.Prompt(url, message, defaultValue, result)
+        }
+        viewModel.tabManager.onJsBeforeUnload = { url, message, result ->
+            jsDialog = JsDialogRequest.BeforeUnload(url, message, result)
+        }
+        onDispose {
+            viewModel.tabManager.onJsAlert = null
+            viewModel.tabManager.onJsConfirm = null
+            viewModel.tabManager.onJsPrompt = null
+            viewModel.tabManager.onJsBeforeUnload = null
+        }
     }
 
     // 外部协议（zhihu: / weixin: / tel: / mailto: / intent: …）交给系统
@@ -783,6 +818,81 @@ fun BrowserScreen(
             },
             dismissButton = {
                 TextButton(onClick = { exitConfirm = false }) { Text("取消") }
+            },
+        )
+    }
+
+    // ---- 网页 JS 对话框 ----
+    jsDialog?.let { req ->
+        val dismiss: () -> Unit = { jsDialog = null }
+        val hostLabel = UrlUtils.hostOf(req.url).ifBlank { req.url }
+        AlertDialog(
+            // 关闭对话框按取消处理：JsResult.cancel()，页面拿到 false / null。
+            onDismissRequest = {
+                when (req) {
+                    is JsDialogRequest.Alert -> req.result.cancel()
+                    is JsDialogRequest.Confirm -> req.result.cancel()
+                    is JsDialogRequest.Prompt -> req.result.cancel()
+                    is JsDialogRequest.BeforeUnload -> req.result.cancel()
+                }
+                dismiss()
+            },
+            title = { Text(hostLabel) },
+            text = {
+                Column {
+                    if (req.message.isNotBlank()) {
+                        Text(
+                            text = req.message,
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                    if (req is JsDialogRequest.Prompt) {
+                        Spacer(Modifier.height(12.dp))
+                        OutlinedTextField(
+                            value = promptInput,
+                            onValueChange = { promptInput = it },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    when (req) {
+                        is JsDialogRequest.Alert -> req.result.confirm()
+                        is JsDialogRequest.Confirm -> req.result.confirm()
+                        is JsDialogRequest.Prompt -> req.result.confirm(promptInput)
+                        is JsDialogRequest.BeforeUnload -> req.result.confirm()
+                    }
+                    dismiss()
+                }) {
+                    Text(
+                        when (req) {
+                            is JsDialogRequest.Alert -> "确定"
+                            is JsDialogRequest.Confirm -> "确定"
+                            is JsDialogRequest.Prompt -> "确定"
+                            is JsDialogRequest.BeforeUnload -> "离开"
+                        }
+                    )
+                }
+            },
+            dismissButton = if (req is JsDialogRequest.Alert) {
+                null
+            } else {
+                {
+                    TextButton(onClick = {
+                        when (req) {
+                            is JsDialogRequest.Alert -> {} // alert 没有取消按钮
+                            is JsDialogRequest.Confirm -> req.result.cancel()
+                            is JsDialogRequest.Prompt -> req.result.cancel()
+                            is JsDialogRequest.BeforeUnload -> req.result.cancel()
+                        }
+                        dismiss()
+                    }) {
+                        Text(if (req is JsDialogRequest.BeforeUnload) "留在本页" else "取消")
+                    }
+                }
             },
         )
     }

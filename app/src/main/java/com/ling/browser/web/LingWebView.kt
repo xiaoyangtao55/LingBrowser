@@ -128,6 +128,10 @@ class LingWebView @JvmOverloads constructor(
             setSupportZoom(true)
             defaultTextEncodingName = "UTF-8"
             javaScriptCanOpenWindowsAutomatically = true
+            // 让 window.open() 走 WebChromeClient.onCreateWindow，而不是在
+            // 当前标签覆盖加载。配合 WebTabManager 里的 onCreateWindow 实现，
+            // 把新页面作为新标签打开，行为与桌面浏览器一致。
+            setSupportMultipleWindows(true)
             mediaPlaybackRequiresUserGesture = false
 
             // 无图模式：省流

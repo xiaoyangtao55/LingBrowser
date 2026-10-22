@@ -5,10 +5,14 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.net.Uri
 import android.webkit.CookieManager
+import android.webkit.JsPromptResult
+import android.webkit.JsResult
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebStorage
 import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.os.Message
 import android.widget.FrameLayout
 import androidx.webkit.ScriptHandler
 import androidx.webkit.WebViewCompat
@@ -176,6 +180,34 @@ class WebTabManager(private val context: Context) {
     var onShowFileChooser: (
         (params: WebChromeClient.FileChooserParams?, onResult: (Array<Uri>?) -> Unit) -> Unit
     )? = null
+
+    /**
+     * 网页 `alert()` 对话框。
+     *
+     * 由 UI 层接管渲染，用户点击后**必须且只能**调用一次 [JsResult.confirm]。
+     * 不传此回调时 WebView 走系统默认 Dialog（标题固定为"JavaScript"，
+     * 样式与应用不一致）。
+     */
+    var onJsAlert: ((url: String, message: String, result: JsResult) -> Unit)? = null
+
+    /** 网页 `confirm()` 对话框。确认走 [JsResult.confirm]，取消/关闭走 [JsResult.cancel]。 */
+    var onJsConfirm: ((url: String, message: String, result: JsResult) -> Unit)? = null
+
+    /**
+     * 网页 `prompt()` 对话框。
+     *
+     * 确认时 [JsPromptResult.confirm] 接收用户输入的字符串；取消/关闭走
+     * [JsPromptResult.cancel]，页面拿到 null。
+     */
+    var onJsPrompt: ((url: String, message: String, defaultValue: String, result: JsPromptResult) -> Unit)? = null
+
+    /**
+     * 页面 `onbeforeunload` 确认。
+     *
+     * 语义和 confirm 相同，但文案应提示"离开此页会丢失未保存内容"。用户点
+     * 离开才 confirm，留在此页就 cancel。
+     */
+    var onJsBeforeUnload: ((url: String, message: String, result: JsResult) -> Unit)? = null
 
     /** 当前标签页。 */
     val activeTab: TabState?
@@ -1244,6 +1276,67 @@ class WebTabManager(private val context: Context) {
                     handler(fileChooserParams, callback::onReceiveValue)
                     return true
                 }
+
+                override fun onJsAlert(
+                    view: WebView?, url: String?, message: String?, result: JsResult,
+                ): Boolean {
+                    val handler = this@WebTabManager.onJsAlert ?: return false
+                    handler(url.orEmpty(), message.orEmpty(), result)
+                    return true
+                }
+
+                override fun onJsConfirm(
+                    view: WebView?, url: String?, message: String?, result: JsResult,
+                ): Boolean {
+                    val handler = this@WebTabManager.onJsConfirm ?: return false
+                    handler(url.orEmpty(), message.orEmpty(), result)
+                    return true
+                }
+
+                override fun onJsPrompt(
+                    view: WebView?, url: String?, message: String?,
+                    defaultValue: String?, result: JsPromptResult,
+                ): Boolean {
+                    val handler = this@WebTabManager.onJsPrompt ?: return false
+                    handler(url.orEmpty(), message.orEmpty(), defaultValue.orEmpty(), result)
+                    return true
+                }
+
+                override fun onJsBeforeUnload(
+                    view: WebView?, url: String?, message: String?, result: JsResult,
+                ): Boolean {
+                    val handler = this@WebTabManager.onJsBeforeUnload ?: return false
+                    handler(url.orEmpty(), message.orEmpty(), result)
+                    return true
+                }
+
+                // window.open() → 新标签。
+                //
+                // 不在这里 newTab：onCreateWindow 的契约是"返回一个 WebView 让
+                // 父 WebView 把子页面加载进去"。我们给一个临时 WebView 接住，
+                // 等它的 onPageStarted 拿到目标 URL 后再 newTab，然后销毁临时
+                // WebView —— 这样 window.open 的目标地址（含 JS 跳转后的最终 URL）
+                // 才能被正确捕获。
+                override fun onCreateWindow(
+                    view: WebView?, isDialog: Boolean, isUserGesture: Boolean,
+                    resultMsg: Message?,
+                ): Boolean {
+                    val transport = resultMsg?.obj as? WebView.WebViewTransport ?: return false
+                    val tempWebView = LingWebView(context)
+                    var opened = false
+                    tempWebView.webViewClient = object : WebViewClient() {
+                        override fun onPageStarted(
+                            view: WebView?, url: String?, favicon: Bitmap?,
+                        ) {
+                            if (opened) return
+                            opened = true
+                            url?.let { this@WebTabManager.newTab(it, incognito) }
+                            view?.post { view.destroy() }
+                        }
+                    }
+                    transport.webView = tempWebView
+                    return true
+                }
             }
             webViewClient = LingWebViewClient(
                 isIncognito = incognito,
@@ -1540,4 +1633,41 @@ class WebTabManager(private val context: Context) {
         /** 注入到页面的 GM 桥对象名（`window.LingGM`），与 [scriptWrapper] 里的垫片对应。 */
         private const val USER_SCRIPT_BRIDGE = "LingGM"
     }
+}
+
+/**
+ * 网页 JS 对话框的待处理请求。
+ *
+ * UI 层用它作为 Compose state：非 null 时弹对应对话框，处理完（调用 [JsResult]
+ * 或 [JsPromptResult]）后置 null。之所以把 [JsResult] 直接包进来，是因为
+ * WebView 要求它**必须且只能**兑现一次，state 持有是最不容易漏调的方式。
+ */
+sealed interface JsDialogRequest {
+    val url: String
+    val message: String
+
+    data class Alert(
+        override val url: String,
+        override val message: String,
+        val result: JsResult,
+    ) : JsDialogRequest
+
+    data class Confirm(
+        override val url: String,
+        override val message: String,
+        val result: JsResult,
+    ) : JsDialogRequest
+
+    data class Prompt(
+        override val url: String,
+        override val message: String,
+        val defaultValue: String,
+        val result: JsPromptResult,
+    ) : JsDialogRequest
+
+    data class BeforeUnload(
+        override val url: String,
+        override val message: String,
+        val result: JsResult,
+    ) : JsDialogRequest
 }
