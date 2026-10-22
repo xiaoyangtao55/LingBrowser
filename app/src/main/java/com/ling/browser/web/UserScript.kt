@@ -66,6 +66,14 @@ data class UserScript(
     /** 展示用的原始规则文本（`@match` / `@include` 的原样值）。 */
     val patternLabels: List<String>,
     val code: String,
+    /**
+     * `@require` 的依赖地址（仅 http/https，已去重）。
+     *
+     * 这里只保留**地址**：真正的下载发生在仓储层（导入/更新时），下载结果
+     * 与脚本一起落盘（见 [com.ling.browser.data.repo.UserScriptRepository]）。
+     * 注入时不再联网，否则每次页面加载都要等一串网络请求。
+     */
+    val requireUrls: List<String> = emptyList(),
 ) {
     /** 没有任何规则时不匹配任何页面 —— 与 Tampermonkey 语义一致。 */
     fun matches(url: String): Boolean =
@@ -102,6 +110,8 @@ data class EnabledUserScript(
     val id: String,
     val script: UserScript,
     val valuesJson: String,
+    /** 导入时缓存的 `@require` 源码（无依赖时为空串）。 */
+    val requireCode: String = "",
 )
 
 /** 元数据头起止标记（去掉 `//` 与空白后比较）。 */
@@ -171,6 +181,13 @@ object UserScriptParser {
             .filter { it.isNotEmpty() && !it.equals("none", ignoreCase = true) }
             .toSet()
 
+        // 只接受 http/https：下载发生在导入时，其他 scheme（file:// 等）
+        // 在 Android 上拿不到，留着只会让脚本在运行时 ReferenceError。
+        val requireUrls = meta["require"].orEmpty()
+            .map { it.trim() }
+            .filter { it.startsWith("http://", ignoreCase = true) || it.startsWith("https://", ignoreCase = true) }
+            .distinct()
+
         // 正文：丢掉元数据头那一段。其余内容（许可证注释、'use strict' 等）原样保留。
         val code = lines.filterIndexed { index, _ -> index < begin || index > end }
             .joinToString("\n")
@@ -188,6 +205,7 @@ object UserScriptParser {
             excludes = excludeMatchers,
             patternLabels = labels,
             code = code,
+            requireUrls = requireUrls,
         )
     }
 
@@ -336,14 +354,23 @@ internal fun isUserScriptUrl(url: String): Boolean {
 /**
  * 生成注入到页面的包装代码。
  *
- * 结构固定为 IIFE，顺序是：协议守卫 → URL 匹配 → @noframes → GM 垫片 → 脚本正文。
+ * 结构固定为 IIFE，顺序是：协议守卫 → URL 匹配 → @noframes → GM 垫片 →
+ * `@require` 依赖 → 脚本正文。
  * 包 IIFE 是必须的：用户脚本常用裸 `var` / 函数声明，不隔离会与页面及我们
  * 自己的夜间模式、资源嗅探注入互相污染全局。
  *
  * 这里的内联守卫与 Kotlin 侧 [UserScript.matches] 用**同一份正则源**，
  * 因此不会出现"原生放行、页面里又拒绝"的分歧。
+ *
+ * [requireCode] 是导入时下载并缓存的依赖源码（已按 `@require` 顺序拼接）；
+ * 放在 GM 垫片之后，脚本与依赖都能拿到 `GM_*`，与 Tampermonkey 行为一致。
  */
-internal fun scriptWrapper(script: UserScript, scriptId: String, valuesJson: String): String {
+internal fun scriptWrapper(
+    script: UserScript,
+    scriptId: String,
+    valuesJson: String,
+    requireCode: String = "",
+): String {
     // 没有匹配规则 = 永远不该运行。生成一段空脚本而不是 `var inc=;` 这种语法错误。
     if (script.includes.isEmpty()) return "(function(){})();"
     return buildString {
@@ -363,6 +390,12 @@ internal fun scriptWrapper(script: UserScript, scriptId: String, valuesJson: Str
         append("var V=").append(valuesJson.takeIf { it.isNotBlank() } ?: "{}").append(";")
         append(gmPrelude(script, scriptId))
         append("\n")
+        // 依赖必须在脚本正文之前：Greasyfork 上大量脚本直接使用 jQuery/$。
+        // 与正文同处一个 IIFE，依赖里声明的顶层 var 才能被脚本看到。
+        if (requireCode.isNotBlank()) {
+            append(requireCode)
+            append("\n;\n")
+        }
         append(script.code)
         append("\n}catch(e){try{console.error('[翎] 用户脚本执行失败：'+e)}catch(_){}}})();")
     }

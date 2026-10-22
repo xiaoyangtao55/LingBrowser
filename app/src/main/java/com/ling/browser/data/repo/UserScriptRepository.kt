@@ -61,6 +61,7 @@ sealed interface ScriptImportResult {
  *
  * ```
  * files/userscripts/<id>.user.js   # 原始源码（含元数据头，可直接导出/回灌）
+ * files/userscripts/<id>.require.js # @require 依赖的源码（导入时下载，按顺序拼接）
  * files/userscripts/<id>.meta      # 启用状态、来源网址、更新时间
  * files/userscripts/<id>.values    # GM_setValue 的键值快照（JSON）
  * ```
@@ -97,6 +98,15 @@ class UserScriptRepository(
 
     /** id -> GM 值的镜像（同步读，见类注释）。 */
     private val values = HashMap<String, JSONObject>()
+
+    /**
+     * id -> `@require` 源码。
+     *
+     * 与值表同理放内存：`addDocumentStartJavaScript` / `evaluateJavascript`
+     * 都是同步拼字符串，没有空间在那儿等磁盘。依赖在导入时下载一次，
+     * 之后每次注入只读这份缓存，不再联网。
+     */
+    private val requires = HashMap<String, String>()
 
     private val _scripts = MutableStateFlow<List<UserScriptEntry>>(emptyList())
     val scripts: StateFlow<List<UserScriptEntry>> = _scripts.asStateFlow()
@@ -189,6 +199,13 @@ class UserScriptRepository(
         if (script.includes.isEmpty()) {
             return ScriptImportResult.Failed("没有 @match / @include 规则，脚本不会在任何页面运行")
         }
+        // 依赖在导入时就解析掉：宁可现在明确失败，也不要装上一个运行到
+        // 第一行就 ReferenceError 的脚本（用户只会看到"这脚本不工作"）。
+        val requireText = try {
+            fetchRequires(script.requireUrls)
+        } catch (e: RequireFailure) {
+            return ScriptImportResult.Failed(e.reason)
+        }
         val entry = UserScriptEntry(
             id = id,
             script = script,
@@ -198,6 +215,12 @@ class UserScriptRepository(
         )
         dir.mkdirs()
         File(dir, id + SOURCE_SUFFIX).writeText(text, Charsets.UTF_8)
+        if (requireText.isEmpty()) {
+            File(dir, id + REQUIRE_SUFFIX).delete()
+        } else {
+            File(dir, id + REQUIRE_SUFFIX).writeText(requireText, Charsets.UTF_8)
+        }
+        requires[id] = requireText
         writeMeta(entry)
         entries[id] = entry
         publish()
@@ -221,7 +244,9 @@ class UserScriptRepository(
         lock.withLock {
             if (entries.remove(id) == null) return@withLock
             values.remove(id)
+            requires.remove(id)
             File(dir, id + SOURCE_SUFFIX).delete()
+            File(dir, id + REQUIRE_SUFFIX).delete()
             File(dir, id + META_SUFFIX).delete()
             File(dir, id + VALUES_SUFFIX).delete()
             publish()
@@ -261,6 +286,7 @@ class UserScriptRepository(
         val sources = d.listFiles { f -> f.isFile && f.name.endsWith(SOURCE_SUFFIX) } ?: return
         entries.clear()
         values.clear()
+        requires.clear()
         for (file in sources) {
             val id = file.name.removeSuffix(SOURCE_SUFFIX)
             val text = runCatching { file.readText() }.getOrNull() ?: continue
@@ -273,6 +299,11 @@ class UserScriptRepository(
                 sourceUrl = meta?.url.orEmpty(),
                 updatedAt = meta?.updated ?: 0L,
             )
+            runCatching {
+                File(d, id + REQUIRE_SUFFIX).readText().takeIf { it.isNotBlank() }?.let {
+                    requires[id] = it
+                }
+            }
             runCatching {
                 File(d, id + VALUES_SUFFIX).readText().takeIf { it.isNotBlank() }?.let {
                     values[id] = JSONObject(it)
@@ -287,13 +318,20 @@ class UserScriptRepository(
         _scripts.value = entries.values.sortedBy { it.script.name.lowercase() }
         _enabledScripts.value = entries.values
             .filter { it.enabled }
-            .map { EnabledUserScript(it.id, it.script, values[it.id]?.toString() ?: "{}") }
+            .map {
+                EnabledUserScript(
+                    id = it.id,
+                    script = it.script,
+                    valuesJson = values[it.id]?.toString() ?: "{}",
+                    requireCode = requires[it.id].orEmpty(),
+                )
+            }
     }
 
     // ---------------------------------------------------------------- 内部：网络 / 解码
 
     /** 拉取脚本文本。与 [BlockListRepository.fetch] 同理，用魔数兜住无条件的 gzip。 */
-    private fun fetch(url: String): String {
+    private fun fetch(url: String, maxBytes: Int = MAX_BYTES): String {
         val conn = (URL(url).openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
             connectTimeout = TIMEOUT_MS
@@ -304,20 +342,49 @@ class UserScriptRepository(
         try {
             val code = conn.responseCode
             if (code !in 200..299) throw IOException("HTTP $code")
-            return decode(conn.inputStream)
+            return decode(conn.inputStream, maxBytes)
         } finally {
             runCatching { conn.disconnect() }
         }
     }
 
-    private fun decode(stream: InputStream): String {
-        val bytes = readCapped(stream)
+    /**
+     * 下载并拼接全部 `@require`。
+     *
+     * 顺序必须与元数据头一致：后一个依赖可能依赖前一个（例如插件扩展 jQuery）。
+     * 任何一个失败都整体失败 —— 少一个依赖的脚本通常跑不起来，静默装上只是
+     * 把错误推迟到用户眼前。
+     */
+    private fun fetchRequires(urls: List<String>): String {
+        if (urls.isEmpty()) return ""
+        val builder = StringBuilder()
+        var total = 0
+        for (url in urls) {
+            val code = try {
+                fetch(url, MAX_REQUIRE_BYTES)
+            } catch (e: TooLarge) {
+                throw RequireFailure("依赖超过 ${sizeLabel(MAX_REQUIRE_BYTES)}：$url")
+            } catch (e: Exception) {
+                throw RequireFailure("依赖下载失败（${describe(e)}）：$url")
+            }
+            total += code.toByteArray(Charsets.UTF_8).size
+            if (total > MAX_REQUIRE_BYTES) {
+                throw RequireFailure("脚本依赖总大小超过 ${sizeLabel(MAX_REQUIRE_BYTES)}")
+            }
+            if (builder.isNotEmpty()) builder.append("\n;\n")
+            builder.append(code).append('\n')
+        }
+        return builder.toString().trimEnd()
+    }
+
+    private fun decode(stream: InputStream, maxBytes: Int = MAX_BYTES): String {
+        val bytes = readCapped(stream, maxBytes)
         val plain = if (
             bytes.size >= 2 &&
             bytes[0] == GZIP_MAGIC_0 &&
             bytes[1] == GZIP_MAGIC_1
         ) {
-            readCapped(GZIPInputStream(ByteArrayInputStream(bytes)))
+            readCapped(GZIPInputStream(ByteArrayInputStream(bytes)), maxBytes)
         } else {
             bytes
         }
@@ -329,7 +396,7 @@ class UserScriptRepository(
             ?: throw IOException("无法读取所选文件")
 
     /** 边读边卡上限，避免"先整个读进内存再看多大"。 */
-    private fun readCapped(input: InputStream): ByteArray {
+    private fun readCapped(input: InputStream, maxBytes: Int = MAX_BYTES): ByteArray {
         val out = ByteArrayOutputStream()
         val buffer = ByteArray(16 * 1024)
         var total = 0
@@ -338,7 +405,7 @@ class UserScriptRepository(
                 val read = ins.read(buffer)
                 if (read < 0) break
                 total += read
-                if (total > MAX_BYTES) throw TooLarge()
+                if (total > maxBytes) throw TooLarge()
                 out.write(buffer, 0, read)
             }
         }
@@ -404,10 +471,14 @@ class UserScriptRepository(
     /** 超过读取上限。单独一个类型，才能与普通 IO 失败分开报错。 */
     private class TooLarge : IOException("脚本超过上限")
 
+    /** `@require` 下载失败。message 直接作为导入失败原因展示。 */
+    private class RequireFailure(val reason: String) : IOException(reason)
+
     companion object {
         /** 存放目录（应用私有，无需存储权限）。 */
         private const val DIR = "userscripts"
         private const val SOURCE_SUFFIX = ".user.js"
+        private const val REQUIRE_SUFFIX = ".require.js"
         private const val META_SUFFIX = ".meta"
         private const val VALUES_SUFFIX = ".values"
 
@@ -421,11 +492,21 @@ class UserScriptRepository(
 
         /** 上限的人类可读写法（整 MiB 时写成 MiB，避免出现 "1024 KiB"）。 */
         private val maxSizeLabel: String
-            get() = if (MAX_BYTES % (1024 * 1024) == 0) {
-                "${MAX_BYTES / (1024 * 1024)} MiB"
-            } else {
-                "${MAX_BYTES / 1024} KiB"
-            }
+            get() = sizeLabel(MAX_BYTES)
+
+        /**
+         * 全部 `@require` 的合计上限。
+         *
+         * 依赖与正文一起注入，所以它直接叠加到每页开销上；2 MiB 足够容纳
+         * jQuery + 几个常见插件，又不至于让单页注入变成几 MB 的字符串。
+         */
+        private const val MAX_REQUIRE_BYTES = 2 * 1024 * 1024
+
+        private fun sizeLabel(bytes: Int): String = if (bytes % (1024 * 1024) == 0) {
+            "${bytes / (1024 * 1024)} MiB"
+        } else {
+            "${bytes / 1024} KiB"
+        }
 
         /** 条数上限。document-start 是按条注册的，条数直接决定每页的注入开销。 */
         const val MAX_SCRIPTS = 50

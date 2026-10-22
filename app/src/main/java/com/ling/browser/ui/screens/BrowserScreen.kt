@@ -7,10 +7,12 @@ import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color as AndroidColor
 import android.net.Uri
+import android.security.KeyChain
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.PermissionRequest
@@ -40,8 +42,10 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -78,6 +82,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
+import androidx.lifecycle.viewModelScope
 import androidx.compose.ui.window.PopupProperties
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowInsetsCompat
@@ -93,10 +98,13 @@ import com.ling.browser.ui.components.HomeBackgroundLayer
 import com.ling.browser.ui.components.IncognitoBanner
 import com.ling.browser.util.UrlUtils
 import com.ling.browser.web.SecurityState
+import com.ling.browser.web.CertPrompt
 import com.ling.browser.web.JsDialogRequest
 import com.ling.browser.web.WebAuthRequest
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * 浏览器主界面：地址栏 + WebView 容器 + 底部工具栏。
@@ -169,6 +177,11 @@ fun BrowserScreen(
     // 因为输入过程中对话框不消失。
     var jsDialog by remember { mutableStateOf<JsDialogRequest?>(null) }
     var promptInput by remember { mutableStateOf("") }
+
+    // 证书错误（主框架与子资源）。队列在 WebTabManager 里，这里只存当前展示的一条
+    // 与「本次浏览过程中不再询问」的勾选状态。
+    var certPrompt by remember { mutableStateOf<CertPrompt?>(null) }
+    var certRemember by remember { mutableStateOf(false) }
 
     // 网页全屏（HTML5 视频的「全屏」按钮）。非 null 时用一层覆盖整个界面，
     // callback 由 WebView 提供，退出全屏时必须回调它，否则 WebView 仍以为
@@ -400,6 +413,83 @@ fun BrowserScreen(
             viewModel.tabManager.onPermissionRequest = null
             // 界面都销毁了，还挂着的 handler 已无人能兑现，按拒绝处理。
             denyPendingAuth()
+        }
+    }
+
+    // 网页要求客户端证书（mTLS）→ 系统 KeyChain 选择器。
+    //
+    // 系统对话框自带 UI，不需要我们再画一层；要害是三条路径**都必须**
+    // 兑现 request：没有 Activity、用户取消、证书读取失败 —— 漏一条，
+    // TLS 握手就会一直挂着，页面表现为永远加载不完。
+    DisposableEffect(Unit) {
+        val activity = context.findActivity()
+        viewModel.tabManager.onClientCertRequest = { request ->
+            if (activity == null) {
+                request.cancel()
+            } else {
+                runCatching {
+                    KeyChain.choosePrivateKeyAlias(
+                        activity,
+                        { alias ->
+                            if (alias == null) {
+                                request.cancel()
+                            } else {
+                                // 读 KeyStore 走 IO；读完后 CoroutineScope 自动回到主线程
+                                // 再 proceed()（handler 的兑现必须在主线程）。
+                                viewModel.viewModelScope.launch {
+                                    val loaded = withContext(Dispatchers.IO) {
+                                        runCatching {
+                                            val key = KeyChain.getPrivateKey(activity, alias)
+                                            val chain = KeyChain.getCertificateChain(activity, alias)
+                                            if (key == null || chain.isNullOrEmpty()) {
+                                                null
+                                            } else {
+                                                key to chain
+                                            }
+                                        }.getOrNull()
+                                    }
+                                    if (loaded == null) {
+                                        request.cancel()
+                                    } else {
+                                        request.proceed(loaded.first, loaded.second)
+                                    }
+                                }
+                            }
+                        },
+                        request.keyTypes,
+                        request.principals,
+                        request.host,
+                        request.port,
+                        null,
+                    )
+                }.onFailure {
+                    // 系统里没有证书安装器（极简 ROM）时会抛异常，
+                    // 不兜住就等于把这个请求永久挂起。
+                    request.cancel()
+                }
+            }
+        }
+        onDispose { viewModel.tabManager.onClientCertRequest = null }
+    }
+
+    // 证书错误弹窗：主框架与子资源共用一条队列（见 WebTabManager.handleSslError）。
+    // 同一时刻只展示一条；用户裁决后队列自动推下一条，全空时收到 null 关弹窗。
+    DisposableEffect(Unit) {
+        viewModel.tabManager.onCertPrompt = { prompt ->
+            if (prompt == null) {
+                certPrompt = null
+                certRemember = false
+            } else {
+                // 换了一条才清勾选：同一条的重复回调不该抹掉用户刚勾上的状态。
+                if (prompt != certPrompt) certRemember = false
+                certPrompt = prompt
+            }
+        }
+        onDispose {
+            viewModel.tabManager.onCertPrompt = null
+            // 界面已销毁，没人能再回答这些 handler；不取消就会让握手悬空。
+            viewModel.tabManager.cancelCertPrompts()
+            certPrompt = null
         }
     }
 
@@ -969,6 +1059,62 @@ fun BrowserScreen(
             },
             dismissButton = {
                 TextButton(onClick = { exitConfirm = false }) { Text("取消") }
+            },
+        )
+    }
+
+    // ---- 证书错误（主框架 / 子资源） ----
+    //
+    // 交互对齐 Via：警告 + 原因 + 「本次浏览过程中不再询问」+ 取消/确定。
+    // 必须明确二选一：onDismissRequest（返回键 / 点外部）按「取消」处理，
+    // 否则 handler 一直挂着，页面会停在半加载状态。
+    certPrompt?.let { prompt ->
+        AlertDialog(
+            onDismissRequest = {
+                viewModel.tabManager.resolveCertPrompt(proceed = false, remember = false)
+            },
+            title = { Text("警告") },
+            text = {
+                Column {
+                    Text("与 ${prompt.host} 的连接不安全：")
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        text = "— ${prompt.reason}",
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                    if (!prompt.mainFrame) {
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            text = "由页面内的图片 / 脚本等子资源发起，不是当前网页本身。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Spacer(Modifier.height(16.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { certRemember = !certRemember },
+                    ) {
+                        Checkbox(
+                            checked = certRemember,
+                            onCheckedChange = { certRemember = it },
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text("本次浏览过程中不再询问")
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.tabManager.resolveCertPrompt(proceed = true, remember = certRemember)
+                }) { Text("确定") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    viewModel.tabManager.resolveCertPrompt(proceed = false, remember = false)
+                }) { Text("取消") }
             },
         )
     }
@@ -1564,4 +1710,20 @@ private fun collectFileChooserResult(resultCode: Int, data: Intent?): Array<Uri>
         if (uris.isNotEmpty()) return uris.toTypedArray()
     }
     return data?.data?.let { arrayOf(it) }
+}
+
+/**
+ * 从 Compose 的 Context 里挖出 Activity。
+ *
+ * `LocalContext` 在 Activity 内通常就是 Activity 本身，但经过主题包装后
+ * 可能是 ContextWrapper。`KeyChain.choosePrivateKeyAlias` 只收 Activity，
+ * 因此要沿 baseContext 一路上溯。
+ */
+private fun Context.findActivity(): Activity? {
+    var current: Context = this
+    while (current is ContextWrapper) {
+        if (current is Activity) return current
+        current = current.baseContext
+    }
+    return null
 }

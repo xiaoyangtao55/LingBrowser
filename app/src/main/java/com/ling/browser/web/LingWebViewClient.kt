@@ -3,6 +3,7 @@ package com.ling.browser.web
 import android.graphics.Bitmap
 import android.net.Uri
 import android.net.http.SslError
+import android.webkit.ClientCertRequest
 import android.webkit.HttpAuthHandler
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.SslErrorHandler
@@ -83,19 +84,23 @@ class LingWebViewClient(
      */
     private val onMixedContent: () -> Unit = {},
     /**
-     * 主框架证书校验失败时回调。
+     * 证书校验失败（主框架与子资源都算）。
      *
+     * 不再替调用方决定 `proceed()` / `cancel()`：交给 [com.ling.browser.web.WebTabManager]
+     * 统一排队、弹窗，用户确认后才兑现 handler。子资源也要上报 ——
+     * 只静默取消的话，页面看起来"正常"，实际少了图片/脚本，用户毫无感知。
+     *
+     * @param host 握手失败的主机
      * @param reason 失败原因（人类可读，见 [certErrorReason]）
-     * @param proceeded 用户此前已明确放行该站点，本次连接被 `proceed()` 放行
+     * @param mainFrame 是否主框架（`onReceivedSslError` 没有该参数，按主机名比对推断）
+     * @param handler 必须且只能兑现一次
      */
-    private val onSslError: (reason: String, proceeded: Boolean) -> Unit = { _, _ -> },
-    /**
-     * 该主机是否已被用户在证书错误页明确放行（逃生口）。
-     *
-     * ⚠️ 放行**不等于**安全：页面照常加载，但地址栏仍标「证书错误」，
-     * 因为证书确实是坏的。
-     */
-    private val isCertAllowed: (host: String) -> Boolean = { false },
+    private val onSslErrorRequest: ((
+        host: String,
+        reason: String,
+        mainFrame: Boolean,
+        handler: SslErrorHandler,
+    ) -> Unit)? = null,
     /**
      * 当前标签的主框架 URL。
      *
@@ -122,6 +127,15 @@ class LingWebViewClient(
      */
     private val onHttpAuthRequest: ((host: String, realm: String, handler: HttpAuthHandler) -> Unit)? =
         null,
+    /**
+     * 客户端证书请求（mTLS）。
+     *
+     * 企业内网 / 银行站点常要求客户端证书。不接管时**必须显式 `cancel()`**：
+     * 父类默认就是取消，但把默认写出来才能保证"UI 尚未接线"的窗口期不会
+     * 留下一个悬空请求（页面会一直停在握手阶段，没有任何提示）。
+     * 证书选择交给系统 KeyChain 对话框，由 UI 层接线。
+     */
+    private val onClientCertRequest: ((ClientCertRequest) -> Unit)? = null,
 ) : WebViewClient() {
 
     /**
@@ -254,40 +268,33 @@ class LingWebViewClient(
     }
 
     /**
-     * 证书校验失败 —— 过期 / 域名不匹配 / 不受信 CA。
+     * 证书校验失败。
      *
-     * 默认行为是取消连接，这里在取消之前多做两件事：
-     *  1. 判出失败原因、以及是否来自主框架，地址栏才能给出「证书错误」标识 ——
-     *     否则用户只看到一句泛化的「页面加载失败」，根本不知道问题出在证书上；
-     *  2. 若用户此前已在该站点的证书错误页明确选择「继续访问」，则 `proceed()` 放行 ——
-     *     这是**逃生口**（不少内网 / 自签名站点确实需要），但放行后地址栏仍标
-     *     「证书错误」，绝不假装安全。
+     * 两个容易踩的点：
+     *  1. `onReceivedSslError` **没有** `isForMainFrame` 参数，只能用失败 URL 的
+     *     主机名与当前主框架主机名比对来推断；主框架握手失败时 `view.url`
+     *     常常还停在上一个页面，故优先看 [currentUrl]。
+     *  2. 子资源失败同样要上报。旧实现直接 `cancel()`，结果是页面看似正常、
+     *     实则少了图片/脚本，用户完全不知道证书有问题（Via 等浏览器会弹窗）。
      *
-     * ⚠️ `onReceivedSslError` **没有** `isForMainFrame` 参数，无法区分主框架与子资源，
-     * 因此用「失败 URL 的主机名是否等于当前主框架主机名」判定：只有主框架自身的
-     * 证书问题才给「继续访问」入口，某张图片的证书问题不该把整页拦下来问用户。
+     * handler 的兑现完全交给调用方：未接线时立即取消，避免握手悬空。
      */
     override fun onReceivedSslError(
         view: WebView?,
         handler: SslErrorHandler?,
         error: SslError?,
     ) {
-        val failingHost = error?.url?.let { Uri.parse(it).host }
-        // 主框架握手失败时 view.url 常常还停在上一个页面，故优先看标签页记录的当前 URL。
+        val h = handler ?: return
+        val failingHost = error?.url?.let { Uri.parse(it).host }.orEmpty()
         val mainHost = (currentUrl() ?: view?.url)?.let { Uri.parse(it).host }
-        if (failingHost != null && failingHost == mainHost) {
-            val reason = certErrorReason(error?.primaryError ?: 0)
-            if (isCertAllowed(failingHost)) {
-                // 用户已放行过该站点：本次连接直接放行，但 proceeded=true 让
-                // 状态栏继续显示「证书错误」——放行 ≠ 安全。
-                onSslError(reason, true)
-                handler?.proceed()
-                return
-            }
-            onSslError(reason, false)
+        val mainFrame = failingHost.isNotEmpty() && failingHost == mainHost
+        val reason = certErrorReason(error?.primaryError ?: 0)
+        val delegate = onSslErrorRequest
+        if (delegate == null) {
+            h.cancel()
+        } else {
+            delegate(failingHost, reason, mainFrame, h)
         }
-        // 主框架未放行、或只是子资源的证书问题：一律取消，绝不放行。
-        handler?.cancel()
     }
 
     /**
@@ -309,6 +316,22 @@ class LingWebViewClient(
             return
         }
         delegate(host.orEmpty(), realm.orEmpty(), authHandler)
+    }
+
+    /**
+     * 客户端证书（mTLS）。
+     *
+     * `proceed()` / `cancel()` 必须且只能调用一次 —— 由 UI 层在用户选完证书
+     * （或取消系统对话框）后兑现；这里只负责把请求转交出去。
+     */
+    override fun onReceivedClientCertRequest(view: WebView?, request: ClientCertRequest?) {
+        val req = request ?: return
+        val delegate = onClientCertRequest
+        if (delegate == null) {
+            req.cancel()
+            return
+        }
+        delegate(req)
     }
 
     /**

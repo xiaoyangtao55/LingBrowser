@@ -4,12 +4,14 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Bitmap
 import android.net.Uri
+import android.webkit.ClientCertRequest
 import android.webkit.CookieManager
 import android.webkit.GeolocationPermissions
 import android.webkit.HttpAuthHandler
 import android.webkit.JsPromptResult
 import android.webkit.JsResult
 import android.webkit.PermissionRequest
+import android.webkit.SslErrorHandler
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebStorage
@@ -28,6 +30,19 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+
+/**
+ * 一次等待用户裁决的证书错误。
+ *
+ * [mainFrame] 为 false 表示图片/脚本/iframe 等子资源 —— 这类失败以前是静默
+ * 取消的，表现成"页面正常但少了内容"；现在与主框架一样弹窗询问。
+ * 主机名给 UI 展示，[reason] 是 [certErrorReason] 的中文短句。
+ */
+data class CertPrompt(
+    val host: String,
+    val reason: String,
+    val mainFrame: Boolean,
+)
 
 /**
  * 标签页与 WebView 实例的管理者。
@@ -131,6 +146,32 @@ class WebTabManager(private val context: Context) {
      * （见 [recycleTab]），**不落盘、不跨标签**，避免一次手滑变成长期放行。
      */
     private val certExceptions = mutableMapOf<String, MutableSet<String>>()
+
+    /**
+     * 尚未裁决的证书错误（FIFO）。
+     *
+     * 一个页面可能同时触发多个子资源握手失败，而 [SslErrorHandler] 必须逐个
+     * 兑现 —— 弹窗同一时刻只显示一个，其余排队；超过 [MAX_PENDING_CERTS]
+     * 的直接取消，避免坏页面把队列撑爆。
+     */
+    private val certQueue = ArrayDeque<PendingCert>()
+
+    /** 当前正在弹窗的那一条；null 表示没有弹窗。 */
+    private var certShown: PendingCert? = null
+
+    /**
+     * 证书错误弹窗回调：参数为 null 表示"当前没有待裁决项，关掉弹窗"。
+     *
+     * 用可空参数而不是两个回调，是为了让 UI 只维护一个状态源。
+     */
+    var onCertPrompt: ((CertPrompt?) -> Unit)? = null
+
+    /** 队列里的一条：等待用户裁决的 handler 与展示信息。 */
+    private class PendingCert(
+        val tabId: String,
+        val prompt: CertPrompt,
+        val handler: SslErrorHandler,
+    )
 
     /** 需要 UI 层处理的副作用（打开外部应用、下载等）。 */
     var onExternalUri: ((Uri) -> Boolean)? = null
@@ -237,6 +278,14 @@ class WebTabManager(private val context: Context) {
      * 接管时 UI 层必须 `proceed()` 或 `cancel()` 恰好一次。
      */
     var onHttpAuthRequest: ((host: String, realm: String, handler: HttpAuthHandler) -> Unit)? = null
+
+    /**
+     * 网页要求客户端证书（mTLS）。
+     *
+     * 由 UI 层用系统 KeyChain 选择证书后 `proceed()`；不接管时直接 `cancel()`。
+     * 同一个请求只能兑现一次，UI 侧不要在对话框重复回调。
+     */
+    var onClientCertRequest: ((request: ClientCertRequest) -> Unit)? = null
 
     /**
      * 网页请求定位（`navigator.geolocation`）。
@@ -408,7 +457,7 @@ class WebTabManager(private val context: Context) {
             runCatching {
                 handlers += WebViewCompat.addDocumentStartJavaScript(
                     wv,
-                    scriptWrapper(entry.script, entry.id, entry.valuesJson),
+                    scriptWrapper(entry.script, entry.id, entry.valuesJson, entry.requireCode),
                     origins,
                 )
             }
@@ -441,7 +490,10 @@ class WebTabManager(private val context: Context) {
             if (!due) continue
             if (!entry.script.matches(url)) continue
             if (!injected.add("${entry.id}|$runAt|$url")) continue
-            wv.evaluateJavascript(scriptWrapper(entry.script, entry.id, entry.valuesJson), null)
+            wv.evaluateJavascript(
+                scriptWrapper(entry.script, entry.id, entry.valuesJson, entry.requireCode),
+                null,
+            )
         }
     }
 
@@ -590,6 +642,8 @@ class WebTabManager(private val context: Context) {
         tab?.let { readerContent.remove(it.id) }
         // 证书放行白名单同样随手清掉：逃生口不该比标签活得久
         tab?.let { certExceptions.remove(it.id) }
+        // 还有未裁决的证书错误也一并取消：标签都没了，没人会再回答弹窗。
+        tab?.let { cancelCertPromptsFor(it.id) }
     }
 
     /**
@@ -1156,7 +1210,8 @@ class WebTabManager(private val context: Context) {
      * 放行当前标签页的证书错误并重新导航（证书错误页的「继续访问」）。
      *
      * 只把**当前主机**加入本标签的临时白名单，然后重走一次导航：这一次
-     * [LingWebViewClient.onReceivedSslError] 会读到白名单并 `proceed()` 放行。
+     * [LingWebViewClient.onReceivedSslError] 上报后，[handleSslError] 会发现
+     * 白名单命中而直接 `proceed()`，不再弹窗。
      *
      * 用 [loadUrl] 而不是 `wv.reload()`：证书握手失败后 WebView 停在错误态，
      * `reload()` 未必会重新发起网络请求，显式导航更可靠。
@@ -1167,6 +1222,135 @@ class WebTabManager(private val context: Context) {
             ?.takeIf { it.isNotBlank() } ?: return
         certExceptions.getOrPut(id) { mutableSetOf() }.add(host)
         loadUrl(id, tab.url)
+    }
+
+    /**
+     * 网页证书校验失败：已放行过的主机直接 `proceed()`，否则排队弹窗。
+     *
+     * 主框架与子资源统一处理 —— 子资源静默取消会让页面"看起来正常但缺内容"。
+     */
+    private fun handleSslError(
+        tabId: String,
+        host: String,
+        reason: String,
+        mainFrame: Boolean,
+        handler: SslErrorHandler,
+    ) {
+        if (host.isBlank()) {
+            handler.cancel()
+            return
+        }
+        if (certExceptions[tabId]?.contains(host) == true) {
+            handler.proceed()
+            // 放行 ≠ 安全：地址栏继续标「证书错误」。
+            if (mainFrame) {
+                updateTab(tabId) {
+                    it.copy(security = SecurityState.INSECURE_CERT, errorText = null)
+                }
+            }
+            return
+        }
+        // 坏页面可能一口气触发几十个子资源失败；超出队列上限的直接拒绝，
+        // 不能让每个都挂一个永不兑现的 handler。
+        if (certQueue.size >= MAX_PENDING_CERTS) {
+            handler.cancel()
+            return
+        }
+        certQueue.addLast(PendingCert(tabId, CertPrompt(host, reason, mainFrame), handler))
+        showNextCert()
+    }
+
+    /**
+     * 用户对待裁决证书错误的选择。
+     *
+     * [remember] 对应 Via 的「本次浏览过程中不再询问」：把主机加入本标签的
+     * 白名单，之后同主机不再弹窗（关标签失效，不落盘）。
+     */
+    fun resolveCertPrompt(proceed: Boolean, remember: Boolean) {
+        val item = certShown ?: return
+        certShown = null
+        if (proceed) {
+            if (remember) {
+                certExceptions.getOrPut(item.tabId) { mutableSetOf() }.add(item.prompt.host)
+            }
+            item.handler.proceed()
+            if (item.prompt.mainFrame) {
+                updateTab(item.tabId) {
+                    it.copy(security = SecurityState.INSECURE_CERT, errorText = null)
+                }
+            }
+        } else {
+            item.handler.cancel()
+            if (item.prompt.mainFrame) markCertBlocked(item.tabId, item.prompt.reason)
+        }
+        showNextCert()
+    }
+
+    /**
+     * 把队列里所有待裁决项按拒绝处理并关掉弹窗。
+     *
+     * 用于 UI 销毁 / 关标签：这些 handler 已经没人能回答，留着会让 TLS
+     * 握手永远悬空（页面停在半加载状态）。
+     */
+    fun cancelCertPrompts() {
+        val items = ArrayList<PendingCert>()
+        certShown?.let { items.add(it) }
+        certShown = null
+        while (true) {
+            items.add(certQueue.removeFirstOrNull() ?: break)
+        }
+        for (item in items) {
+            item.handler.cancel()
+            if (item.prompt.mainFrame) markCertBlocked(item.tabId, item.prompt.reason)
+        }
+        onCertPrompt?.invoke(null)
+    }
+
+    /** 关标签时清理该标签的待裁决项（其余标签的继续保留）。 */
+    private fun cancelCertPromptsFor(tabId: String) {
+        certShown?.takeIf { it.tabId == tabId }?.let {
+            it.handler.cancel()
+            certShown = null
+            showNextCert()
+        }
+        val iterator = certQueue.iterator()
+        while (iterator.hasNext()) {
+            val item = iterator.next()
+            if (item.tabId == tabId) {
+                item.handler.cancel()
+                iterator.remove()
+            }
+        }
+    }
+
+    /** 队列里挑一条展示；没有待裁决项时向 UI 发 null 关掉弹窗。 */
+    private fun showNextCert() {
+        if (certShown == null) {
+            while (true) {
+                val next = certQueue.removeFirstOrNull() ?: break
+                val listener = onCertPrompt
+                if (listener == null) {
+                    // UI 还没接线：这条没人能回答，只能拒绝。
+                    next.handler.cancel()
+                    if (next.prompt.mainFrame) markCertBlocked(next.tabId, next.prompt.reason)
+                    continue
+                }
+                certShown = next
+                break
+            }
+        }
+        onCertPrompt?.invoke(certShown?.prompt)
+    }
+
+    /** 主框架被拒绝：落证书错误页，而不是留一句泛化的加载失败。 */
+    private fun markCertBlocked(tabId: String, reason: String) {
+        updateTab(tabId) {
+            it.copy(
+                isLoading = false,
+                security = SecurityState.INSECURE_CERT,
+                errorText = "$reason，已阻断连接",
+            )
+        }
     }
 
     fun stopLoading(id: String = _activeId.value) {
@@ -1486,7 +1670,7 @@ class WebTabManager(private val context: Context) {
                             url = storedUrl,
                             // 新一次主框架导航：安全状态先按协议落到**基础态**，
                             // 混合内容 / 证书错误会在加载过程中把它升级
-                            // （见 onMixedContent / onSslError）。
+                            // （见 onMixedContent / handleSslError）。
                             security = SecurityState.baseForUrl(storedUrl),
                             isLoading = !isInternal,
                             errorText = null,
@@ -1601,28 +1785,10 @@ class WebTabManager(private val context: Context) {
                         }
                     }
                 },
-                isCertAllowed = { host -> certExceptions[id]?.contains(host) == true },
                 currentUrl = { _tabs.value.firstOrNull { it.id == id }?.url },
-                onSslError = { reason, proceeded ->
-                    updateTab(id) {
-                        if (proceeded) {
-                            // 用户已放行：不显示错误页，让页面照常渲染；
-                            // 但安全状态仍锁在「证书错误」——放行 ≠ 安全。
-                            it.copy(
-                                isLoading = false,
-                                security = SecurityState.INSECURE_CERT,
-                                errorText = null,
-                            )
-                        } else {
-                            // 未放行：连接已被 cancel，给出明确原因，
-                            // 而不是让用户看到一句不知道所以然的「页面加载失败」。
-                            it.copy(
-                                isLoading = false,
-                                security = SecurityState.INSECURE_CERT,
-                                errorText = "$reason，已阻断连接",
-                            )
-                        }
-                    }
+                // 主框架与子资源统一排队：白名单命中直接放行，否则交给 UI 弹窗。
+                onSslErrorRequest = { host, reason, mainFrame, handler ->
+                    handleSslError(id, host, reason, mainFrame, handler)
                 },
                 onError = { _, desc ->
                     updateTab(id) { it.copy(isLoading = false, errorText = desc) }
@@ -1634,6 +1800,12 @@ class WebTabManager(private val context: Context) {
                 onHttpAuthRequest = { host, realm, authHandler ->
                     this@WebTabManager.onHttpAuthRequest?.invoke(host, realm, authHandler)
                         ?: authHandler.cancel()
+                },
+                // 客户端证书（mTLS）：同样动态读委托，未接线时立即取消，
+                // 别让 TLS 握手悬在半空。
+                onClientCertRequest = { request ->
+                    val handler = this@WebTabManager.onClientCertRequest
+                    if (handler == null) request.cancel() else handler(request)
                 },
                 onExternalScheme = { uri -> onExternalUri?.invoke(uri) ?: false },
                 // 主页搜索框：只把查询串转出去，判定交给 UI 层（UrlUtils + 搜索引擎）
@@ -1787,6 +1959,14 @@ class WebTabManager(private val context: Context) {
 
         /** 注入到页面的 GM 桥对象名（`window.LingGM`），与 [scriptWrapper] 里的垫片对应。 */
         private const val USER_SCRIPT_BRIDGE = "LingGM"
+
+        /**
+         * 证书错误排队上限。
+         *
+         * 子资源也弹窗后，一个引用了几十张坏证书图片的页面会连续上报；
+         * 队列封顶后其余直接取消，避免内存里堆满永不兑现的 handler。
+         */
+        private const val MAX_PENDING_CERTS = 8
     }
 }
 

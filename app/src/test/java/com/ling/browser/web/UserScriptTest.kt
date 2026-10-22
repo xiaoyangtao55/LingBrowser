@@ -312,4 +312,49 @@ class UserScriptTest {
         // 非 http(s) 一律不算
         assertFalse(isUserScriptUrl("file:///sdcard/a.user.js"))
     }
+
+    @Test
+    fun `require 只保留 http 与 https 并去重`() {
+        val script = parse(
+            """
+            // ==UserScript==
+            // @name     依赖
+            // @match    https://example.com/*
+            // @require  https://cdn.example.com/jquery.min.js
+            // @require  file:///sdcard/local.js
+            // @require  https://cdn.example.com/jquery.min.js
+            // @require  HTTP://cdn.example.com/util.js
+            // ==/UserScript==
+            """.trimIndent(),
+        )!!
+        assertEquals(
+            listOf(
+                "https://cdn.example.com/jquery.min.js",
+                "HTTP://cdn.example.com/util.js",
+            ),
+            script.requireUrls,
+        )
+    }
+
+    @Test
+    fun `依赖代码注入在脚本正文之前`() {
+        val script = parse(
+            """
+            // ==UserScript==
+            // @name  依赖顺序
+            // @match https://example.com/*
+            // @require https://cdn.example.com/jquery.min.js
+            // ==/UserScript==
+
+            console.log('user-script');
+            """.trimIndent(),
+        )!!
+        val js = scriptWrapper(script, "u1", "{}", "var jQuery={version:'3.7.1'};")
+        val dependencyAt = js.indexOf("var jQuery=")
+        val bodyAt = js.indexOf("console.log('user-script')")
+        assertTrue(dependencyAt >= 0)
+        assertTrue(bodyAt > dependencyAt)
+        // 依赖与正文同处一个 IIFE：依赖声明的顶层变量脚本才能看见
+        assertTrue(js.startsWith("(function(){try{"))
+    }
 }
