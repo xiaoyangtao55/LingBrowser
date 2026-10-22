@@ -13,6 +13,7 @@ import android.webkit.WebStorage
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.os.Message
+import android.view.View
 import android.widget.FrameLayout
 import androidx.webkit.ScriptHandler
 import androidx.webkit.WebViewCompat
@@ -208,6 +209,23 @@ class WebTabManager(private val context: Context) {
      * 离开才 confirm，留在此页就 cancel。
      */
     var onJsBeforeUnload: ((url: String, message: String, result: JsResult) -> Unit)? = null
+
+    /**
+     * 网页请求全屏（HTML5 视频的「全屏」按钮）。
+     *
+     * 契约：UI 层把 [view] 挂到自己的全屏容器上，并保存 [callback]；
+     * 用户退出全屏时调用 `callback.onCustomViewHidden()` 通知 WebView。
+     * 不设置时什么都不做 —— 网页的全屏请求被静默忽略，视频只能内联播放。
+     */
+    var onShowCustomView: ((view: View, callback: WebChromeClient.CustomViewCallback) -> Unit)? = null
+
+    /**
+     * 网页主动退出全屏（视频播完、页面自己调了 `exitFullscreen`）。
+     *
+     * 与 [onShowCustomView] 配对：UI 层据此摘掉全屏容器。
+     * 注意此时**不要**再调用 callback，WebView 已经知道全屏结束了。
+     */
+    var onHideCustomView: (() -> Unit)? = null
 
     /** 当前标签页。 */
     val activeTab: TabState?
@@ -1321,6 +1339,12 @@ class WebTabManager(private val context: Context) {
                     view: WebView?, isDialog: Boolean, isUserGesture: Boolean,
                     resultMsg: Message?,
                 ): Boolean {
+                    // 没有用户手势的 window.open 一律拒绝。
+                    //
+                    // 页面的 javaScriptCanOpenWindowsAutomatically 是开着的，
+                    // 放行就等于让广告脚本在后台无限开标签（打开一个页面弹出
+                    // 七八个新标签）。主流浏览器同样只放行点击触发的弹窗。
+                    if (!isUserGesture) return false
                     val transport = resultMsg?.obj as? WebView.WebViewTransport ?: return false
                     val tempWebView = LingWebView(context)
                     var opened = false
@@ -1336,6 +1360,22 @@ class WebTabManager(private val context: Context) {
                     }
                     transport.webView = tempWebView
                     return true
+                }
+
+                // 网页全屏：把 WebView 提供的容器 View 交给 UI 层铺满屏幕。
+                //
+                // 不接管时网页的「全屏」按钮毫无反应（视频只能内联播放），
+                // 这是宿主必须代劳的事情之一 —— WebView 只负责准备 View。
+                override fun onShowCustomView(
+                    view: View?, callback: CustomViewCallback?,
+                ) {
+                    val handler = this@WebTabManager.onShowCustomView
+                    if (view == null || callback == null || handler == null) return
+                    handler(view, callback)
+                }
+
+                override fun onHideCustomView() {
+                    this@WebTabManager.onHideCustomView?.invoke()
                 }
             }
             webViewClient = LingWebViewClient(
@@ -1525,6 +1565,8 @@ class WebTabManager(private val context: Context) {
                 onError = { _, desc ->
                     updateTab(id) { it.copy(isLoading = false, errorText = desc) }
                 },
+                // 渲染进程崩溃：同进程里所有 WebView 都已失效，统一销毁重建。
+                onRendererGone = { dead -> recoverFromRendererGone(dead) },
                 onExternalScheme = { uri -> onExternalUri?.invoke(uri) ?: false },
                 // 主页搜索框：只把查询串转出去，判定交给 UI 层（UrlUtils + 搜索引擎）
                 onInternalSearch = { query -> onSearchRequested?.invoke(query) },
@@ -1563,6 +1605,48 @@ class WebTabManager(private val context: Context) {
         if (id == _activeId.value) syncCookiePolicy(id)
         enforceCacheLimit()
         return wv
+    }
+
+    /**
+     * 渲染进程崩溃后的恢复。
+     *
+     * 为什么必须重建**全部**实例：渲染进程是按进程共享的，崩一次，同一进程里
+     * 所有 WebView 都会失效；官方要求这类实例必须从视图树摘下并 `destroy()`，
+     * 之后对它的任何调用都是未定义行为。
+     *
+     * 只重建当前标签并重新加载它原来的地址，其余标签仍按 [obtainWebView] 的
+     * 懒加载机制等用户切过去再建 —— 一次性重建所有标签会让崩溃恢复本身变成卡顿。
+     *
+     * @param dead 触发回调的那个实例。用它做身份校验：多个 WebView 会各自收到
+     *   回调，只处理第一次（此时它仍在实例表里），后续（表里已是新建实例）直接忽略。
+     */
+    private fun recoverFromRendererGone(dead: WebView) {
+        if (webViews.values.none { it === dead }) return
+
+        val deadViews = webViews.toMap()
+        webViews.clear()
+        deadViews.forEach { (tabId, wv) ->
+            // document-start 的注册句柄跟着实例一起失效，先清掉记录避免重复移除。
+            scriptHandlers.remove(tabId)?.forEach { handler ->
+                runCatching { handler.remove() }
+            }
+            injectedScripts.remove(tabId)
+            (wv.parent as? FrameLayout)?.removeView(wv)
+            runCatching {
+                wv.stopLoading()
+                wv.destroy()
+            }
+        }
+        host?.removeAllViews()
+
+        val tab = _tabs.value.firstOrNull { it.id == _activeId.value } ?: return
+        // loadUrl 内部会 obtainWebView 建新实例；内部页（主页/阅读视图）也由它分派。
+        loadUrl(tab.id, tab.url)
+        host?.let { container ->
+            val wv = webViews[tab.id] ?: return@let
+            (wv.parent as? FrameLayout)?.removeView(wv)
+            container.addView(wv)
+        }
     }
 
     /** WebView 实例上限：超过则回收最久未使用的非激活实例。 */

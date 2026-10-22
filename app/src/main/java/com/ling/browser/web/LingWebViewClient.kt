@@ -3,6 +3,7 @@ package com.ling.browser.web
 import android.graphics.Bitmap
 import android.net.Uri
 import android.net.http.SslError
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.SslErrorHandler
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -103,6 +104,14 @@ class LingWebViewClient(
      * 作为参照更可靠。
      */
     private val currentUrl: () -> String? = { null },
+    /**
+     * 渲染进程崩溃（`onRenderProcessGone`）。
+     *
+     * 渲染进程是按进程共享的：崩一次，同一进程里**所有** WebView 都不可用，
+     * 只能销毁重建。因此这里只把"哪个实例死了"报上去，销毁与重建由
+     * [WebTabManager] 统一做（它才持有实例表与宿主容器）。
+     */
+    private val onRendererGone: (WebView) -> Unit = {},
 ) : WebViewClient() {
 
     /**
@@ -269,6 +278,21 @@ class LingWebViewClient(
         }
         // 主框架未放行、或只是子资源的证书问题：一律取消，绝不放行。
         handler?.cancel()
+    }
+
+    /**
+     * 渲染进程崩溃。
+     *
+     * 必须返回 true 表示"已接管"：不处理时系统会**直接杀掉应用进程**
+     * （官方文档原话：the application will be killed）。崩溃后的 WebView
+     * 已不可再用，这里绝不能再碰它除 `destroy()` 之外的任何方法。
+     */
+    override fun onRenderProcessGone(
+        view: WebView?,
+        detail: RenderProcessGoneDetail?,
+    ): Boolean {
+        view?.let(onRendererGone)
+        return true
     }
 
     override fun shouldOverrideUrlLoading(

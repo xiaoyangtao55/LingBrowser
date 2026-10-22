@@ -8,6 +8,7 @@ import android.content.ClipboardManager
 import android.content.Intent
 import android.graphics.Color as AndroidColor
 import android.net.Uri
+import android.view.View
 import android.view.ViewGroup
 import android.webkit.WebChromeClient
 import android.widget.FrameLayout
@@ -61,6 +62,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
@@ -72,6 +74,8 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.ling.browser.data.prefs.NightMode
 import com.ling.browser.ui.BrowserViewModel
@@ -158,6 +162,25 @@ fun BrowserScreen(
     // 因为输入过程中对话框不消失。
     var jsDialog by remember { mutableStateOf<JsDialogRequest?>(null) }
     var promptInput by remember { mutableStateOf("") }
+
+    // 网页全屏（HTML5 视频的「全屏」按钮）。非 null 时用一层覆盖整个界面，
+    // callback 由 WebView 提供，退出全屏时必须回调它，否则 WebView 仍以为
+    // 自己在全屏状态，之后再点全屏不会有任何反应。
+    var fullscreenView by remember { mutableStateOf<View?>(null) }
+    var fullscreenCallback by remember {
+        mutableStateOf<WebChromeClient.CustomViewCallback?>(null)
+    }
+    // 退出全屏：先清状态摘掉覆盖层，再通知 WebView 把视频切回内联。
+    // 顺序反了会出现"覆盖层已摘、WebView 又触发一次 onHideCustomView"的抖动。
+    val exitFullscreen: () -> Unit = {
+        val callback: WebChromeClient.CustomViewCallback? = fullscreenCallback
+        fullscreenCallback = null
+        fullscreenView = null
+        if (callback != null) {
+            runCatching { callback.onCustomViewHidden() }
+        }
+        Unit
+    }
 
     // 收起面板时先播完退场动画再卸载组件：直接把开关置 false 会让面板
     // "啪"地消失，跳过 ModalBottomSheet 自带的收起动画。
@@ -264,6 +287,31 @@ fun BrowserScreen(
             viewModel.tabManager.onJsPrompt = null
             viewModel.tabManager.onJsBeforeUnload = null
         }
+    }
+
+    // 网页全屏：WebView 只负责把容器 View 准备好，铺满屏幕是宿主的事。
+    // 与 onShowFileChooser 同一套委托模式 —— 不在用时置 null，避免残留引用。
+    DisposableEffect(Unit) {
+        viewModel.tabManager.onShowCustomView = { view, callback ->
+            fullscreenView = view
+            fullscreenCallback = callback
+        }
+        // 网页自己退出全屏（视频播完 / 调了 exitFullscreen）：只摘覆盖层，
+        // 不再回调 callback —— WebView 已经知道全屏结束了。
+        viewModel.tabManager.onHideCustomView = {
+            fullscreenView = null
+            fullscreenCallback = null
+        }
+        onDispose {
+            viewModel.tabManager.onShowCustomView = null
+            viewModel.tabManager.onHideCustomView = null
+        }
+    }
+
+    // 切标签时退出全屏：全屏容器里装的是上一个标签的 View，留着会盖住新页面，
+    // 而那个 View 的宿主 WebView 可能已经被回收销毁。
+    LaunchedEffect(activeTab?.id) {
+        if (fullscreenView != null) exitFullscreen()
     }
 
     // 外部协议（zhihu: / weixin: / tel: / mailto: / intent: …）交给系统
@@ -483,6 +531,14 @@ fun BrowserScreen(
             onTabs = { showTabsSheet = true },
             onMore = { showMoreSheet = true },
         )
+    }
+
+    // ---- 网页全屏覆盖层 ----
+    // 盖住整个界面（含地址栏与工具栏），排在 Column 之后绘制。
+    // 刻意不用 Dialog 承载：Dialog 另开窗口，部分机型上视频纹理在独立
+    // 窗口里会黑屏（SurfaceView 不跟随宿主窗口的合成）。
+    fullscreenView?.let { view ->
+        FullscreenMediaOverlay(view = view, onExit = exitFullscreen)
     }
 
     // ---- 「标签页」面板 ----
@@ -1078,6 +1134,65 @@ private fun MoreGridItem(
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
         )
+    }
+}
+
+/**
+ * 网页全屏（HTML5 视频）的承载层。
+ *
+ * [view] 是 WebView 在 `onShowCustomView` 里给出的容器，视频画面就在里面，
+ * 只能原样挂上来、不能重建。退出只有两条路径：
+ *  - 用户按返回键 → [onExit]，由调用方回调 `CustomViewCallback` 通知 WebView；
+ *  - 网页自己退出 → `onHideCustomView` 把状态清掉，本层随之卸载。
+ */
+@Composable
+private fun FullscreenMediaOverlay(view: View, onExit: () -> Unit) {
+    val rootView = LocalView.current
+    val window = (rootView.context as? Activity)?.window
+
+    // 全屏期间藏起系统栏，退出时必须还原 —— 不还原会把状态栏/导航栏永久藏掉。
+    DisposableEffect(Unit) {
+        window?.let {
+            WindowInsetsControllerCompat(it, rootView).apply {
+                hide(WindowInsetsCompat.Type.systemBars())
+                // 允许边缘滑动临时呼出系统栏，避免用户"彻底出不去"
+                systemBarsBehavior =
+                    WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            }
+        }
+        onDispose {
+            window?.let {
+                WindowInsetsControllerCompat(it, rootView)
+                    .show(WindowInsetsCompat.Type.systemBars())
+            }
+        }
+    }
+
+    // 返回键只退出全屏，不再触发网页后退或"退出应用"。
+    BackHandler { onExit() }
+
+    AndroidView(
+        factory = { ctx ->
+            FrameLayout(ctx).apply {
+                // WebView 给的 View 可能仍挂在别的父容器上，先摘再挂
+                (view.parent as? ViewGroup)?.removeView(view)
+                addView(
+                    view,
+                    FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                    ),
+                )
+            }
+        },
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black),
+    )
+
+    // 本层卸载时把 View 从容器摘下，否则它会一直被这棵视图树引用着。
+    DisposableEffect(view) {
+        onDispose { (view.parent as? ViewGroup)?.removeView(view) }
     }
 }
 
