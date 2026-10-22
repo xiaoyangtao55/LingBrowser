@@ -133,6 +133,11 @@ class LingWebView @JvmOverloads constructor(
             // 把新页面作为新标签打开，行为与桌面浏览器一致。
             setSupportMultipleWindows(true)
             mediaPlaybackRequiresUserGesture = false
+            // 定位开关：默认关时 `navigator.geolocation` 连询问回调都不会触发，
+            // 网页拿到的直接就是 PERMISSION_DENIED。真正是否放行由
+            // WebChromeClient.onGeolocationPermissionsShowPrompt 决定。
+            @Suppress("DEPRECATION")
+            setGeolocationEnabled(true)
 
             // 无图模式：省流
             blockNetworkImage = settings.blockImages

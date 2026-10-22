@@ -5,8 +5,11 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.net.Uri
 import android.webkit.CookieManager
+import android.webkit.GeolocationPermissions
+import android.webkit.HttpAuthHandler
 import android.webkit.JsPromptResult
 import android.webkit.JsResult
+import android.webkit.PermissionRequest
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebStorage
@@ -226,6 +229,34 @@ class WebTabManager(private val context: Context) {
      * 注意此时**不要**再调用 callback，WebView 已经知道全屏结束了。
      */
     var onHideCustomView: (() -> Unit)? = null
+
+    /**
+     * HTTP 基础认证（401 + `WWW-Authenticate`）。
+     *
+     * 不接管时由 [LingWebViewClient] 直接 `cancel()`，页面停在 401；
+     * 接管时 UI 层必须 `proceed()` 或 `cancel()` 恰好一次。
+     */
+    var onHttpAuthRequest: ((host: String, realm: String, handler: HttpAuthHandler) -> Unit)? = null
+
+    /**
+     * 网页请求定位（`navigator.geolocation`）。
+     *
+     * 不接管时按拒绝兑现（`callback.invoke(origin, false, false)`）——
+     * callback 不调用，页面会一直等结果。
+     */
+    var onGeolocationRequest: ((origin: String, callback: GeolocationPermissions.Callback) -> Unit)? = null
+
+    /**
+     * 网页请求设备能力（`getUserMedia` 的摄像头/麦克风等）。
+     *
+     * [resources] 是 [PermissionRequest.resources] 的只读副本，取值见
+     * [PermissionRequest.RESOURCE_VIDEO_CAPTURE] 等常量。不接管时 `deny()`。
+     */
+    var onPermissionRequest: ((
+        origin: String,
+        resources: List<String>,
+        request: PermissionRequest,
+    ) -> Unit)? = null
 
     /** 当前标签页。 */
     val activeTab: TabState?
@@ -1377,6 +1408,37 @@ class WebTabManager(private val context: Context) {
                 override fun onHideCustomView() {
                     this@WebTabManager.onHideCustomView?.invoke()
                 }
+
+                // navigator.geolocation：不接管时按拒绝兑现，页面才不会一直等。
+                override fun onGeolocationPermissionsShowPrompt(
+                    origin: String?,
+                    callback: GeolocationPermissions.Callback?,
+                ) {
+                    val cb = callback ?: return
+                    val delegate = this@WebTabManager.onGeolocationRequest
+                    if (delegate == null) {
+                        cb.invoke(origin, false, false)
+                        return
+                    }
+                    delegate(origin.orEmpty(), cb)
+                }
+
+                // getUserMedia（摄像头/麦克风）：不接管时 deny()。
+                // 未接管**不能什么都不做**：request 不兑现，页面的 getUserMedia
+                // Promise 会永远挂起（表现为点了拍照没反应、也不报错）。
+                override fun onPermissionRequest(request: PermissionRequest?) {
+                    val req = request ?: return
+                    val delegate = this@WebTabManager.onPermissionRequest
+                    if (delegate == null) {
+                        req.deny()
+                        return
+                    }
+                    delegate(
+                        req.origin?.toString().orEmpty(),
+                        req.resources?.toList().orEmpty(),
+                        req,
+                    )
+                }
             }
             webViewClient = LingWebViewClient(
                 isIncognito = incognito,
@@ -1567,6 +1629,12 @@ class WebTabManager(private val context: Context) {
                 },
                 // 渲染进程崩溃：同进程里所有 WebView 都已失效，统一销毁重建。
                 onRendererGone = { dead -> recoverFromRendererGone(dead) },
+                // HTTP 认证（401）。与上面几个同理用 lambda 动态读委托：
+                // UI 的接线在 composition 之后，直接传值会永久拿到 null。
+                onHttpAuthRequest = { host, realm, authHandler ->
+                    this@WebTabManager.onHttpAuthRequest?.invoke(host, realm, authHandler)
+                        ?: authHandler.cancel()
+                },
                 onExternalScheme = { uri -> onExternalUri?.invoke(uri) ?: false },
                 // 主页搜索框：只把查询串转出去，判定交给 UI 层（UrlUtils + 搜索引擎）
                 onInternalSearch = { query -> onSearchRequested?.invoke(query) },
@@ -1599,6 +1667,9 @@ class WebTabManager(private val context: Context) {
             }
         }
 
+        // HTTP 认证回调挂在 WebViewClient 上（不是 WebChromeClient）。
+        // 这里必须传"读委托的 lambda"而不是把委托本身拷进来：UI 的接线
+        // 发生在 composition 之后，直接拷会永久拿到 null、401 永远被取消。
         webViews[id] = wv
         // Cookie 策略是进程级的：新建的 WebView 只有正好是当前激活标签时才动全局策略，
         // 后台标签（例如 ensureHomeRendered 给非激活标签补建实例）等切过去时再对齐。
@@ -1754,4 +1825,38 @@ sealed interface JsDialogRequest {
         override val message: String,
         val result: JsResult,
     ) : JsDialogRequest
+}
+
+/**
+ * 网页发起的宿主级授权请求。
+ *
+ * 与 [JsDialogRequest] 分开：那类是网页弹给用户的对话框，这类是网页向浏览器
+ * 索要**宿主能力**（身份凭证 / 位置 / 摄像头麦克风），三者的兑现方式完全不同
+ * （`HttpAuthHandler.proceed/cancel`、`GeolocationPermissions.Callback.invoke`、
+ * `PermissionRequest.grant/deny`），但都必须**恰好兑现一次** —— 漏调会让
+ * 页面一直等待（401 卡住 / 定位不返回 / getUserMedia 的 Promise 永不落地）。
+ */
+sealed interface WebAuthRequest {
+    /** 发起方标识：认证是 host，定位与设备能力是 origin。 */
+    val origin: String
+
+    /** HTTP 基础认证：401 + `WWW-Authenticate`。 */
+    data class HttpAuth(
+        override val origin: String,
+        val realm: String,
+        val handler: HttpAuthHandler,
+    ) : WebAuthRequest
+
+    /** 网页请求定位。 */
+    data class Geolocation(
+        override val origin: String,
+        val callback: GeolocationPermissions.Callback,
+    ) : WebAuthRequest
+
+    /** 网页请求设备能力（摄像头/麦克风等）。 */
+    data class Device(
+        override val origin: String,
+        val resources: List<String>,
+        val request: PermissionRequest,
+    ) : WebAuthRequest
 }

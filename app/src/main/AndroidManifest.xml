@@ -16,8 +16,23 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
+    <!-- 网页权限：定位 / 摄像头 / 麦克风。
+         全部按"网页请求 → 应用内确认 → 系统运行时授权"两段式申请，
+         未授权时网页拿到的就是拒绝，不影响其他功能。 -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
     <uses-feature
         android:name="android.hardware.touchscreen"
+        android:required="false" />
+    <!-- 浏览器不能因为"没有摄像头/麦克风"被商店过滤掉：硬件按可选处理 -->
+    <uses-feature
+        android:name="android.hardware.camera"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.microphone"
         android:required="false" />
 
     <application

@@ -3,6 +3,7 @@ package com.ling.browser.web
 import android.graphics.Bitmap
 import android.net.Uri
 import android.net.http.SslError
+import android.webkit.HttpAuthHandler
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.SslErrorHandler
 import android.webkit.WebResourceError
@@ -112,6 +113,15 @@ class LingWebViewClient(
      * [WebTabManager] 统一做（它才持有实例表与宿主容器）。
      */
     private val onRendererGone: (WebView) -> Unit = {},
+    /**
+     * HTTP 基础认证（401 + `WWW-Authenticate`）。
+     *
+     * ⚠️ 这个回调属于 **WebViewClient**，不是 WebChromeClient（容易记错）。
+     * 传进来的 lambda 内部动态读委托，为 null 时必须 `cancel()` ——
+     * 否则请求一直悬挂、页面停在 401。
+     */
+    private val onHttpAuthRequest: ((host: String, realm: String, handler: HttpAuthHandler) -> Unit)? =
+        null,
 ) : WebViewClient() {
 
     /**
@@ -278,6 +288,27 @@ class LingWebViewClient(
         }
         // 主框架未放行、或只是子资源的证书问题：一律取消，绝不放行。
         handler?.cancel()
+    }
+
+    /**
+     * HTTP 基础认证。
+     *
+     * 父类默认实现就是取消；这里显式写出，保证接管时也能兜住"UI 尚未接线"
+     * 的窗口期（例如启动恢复标签时）。
+     */
+    override fun onReceivedHttpAuthRequest(
+        view: WebView?,
+        handler: HttpAuthHandler?,
+        host: String?,
+        realm: String?,
+    ) {
+        val authHandler = handler ?: return
+        val delegate = onHttpAuthRequest
+        if (delegate == null) {
+            authHandler.cancel()
+            return
+        }
+        delegate(host.orEmpty(), realm.orEmpty(), authHandler)
     }
 
     /**
