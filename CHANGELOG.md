@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.0](https://github.com/xiaoyangtao55/LingBrowser/compare/v1.4.0...v1.5.0) (2026-10-22)
+
+
+### Features
+
+* 支持网页原生 JS 对话框与 window.open 新标签 ([79af68a](https://github.com/xiaoyangtao55/LingBrowser/commit/79af68a5788bf9b77f9eca02d09b220862ba3a2b))
+
 ## [1.4.0](https://github.com/xiaoyangtao55/LingBrowser/compare/v1.3.0...v1.4.0) (2026-10-21)
 
 
