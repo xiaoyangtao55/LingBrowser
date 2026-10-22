@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.0](https://github.com/xiaoyangtao55/LingBrowser/compare/v1.5.1...v1.6.0) (2026-10-22)
+
+
+### Features
+
+* 网页全屏视频、渲染进程崩溃恢复与弹窗手势过滤 ([63a688e](https://github.com/xiaoyangtao55/LingBrowser/commit/63a688eedfca4e4574160f9241bde5ce6014c298))
+
 ## [1.5.1](https://github.com/xiaoyangtao55/LingBrowser/compare/v1.5.0...v1.5.1) (2026-10-22)
 
 
