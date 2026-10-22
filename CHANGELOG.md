@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.7.0](https://github.com/xiaoyangtao55/LingBrowser/compare/v1.6.0...v1.7.0) (2026-10-22)
+
+
+### Features
+
+* 支持 HTTP 认证、网页定位与设备权限请求 ([2a153c7](https://github.com/xiaoyangtao55/LingBrowser/commit/2a153c7bf78bcae1958ec205f4ad340ca934ca1c))
+
 ## [1.6.0](https://github.com/xiaoyangtao55/LingBrowser/compare/v1.5.1...v1.6.0) (2026-10-22)
 
 
