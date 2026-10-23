@@ -289,8 +289,10 @@ class UserScriptTest {
         // 同一文档内只跑一次的标记：END 的探测式补注入靠它避免重复执行。
         assertTrue(js.contains("window.__lingGMInjected[\"u123\"]=1"))
         assertTrue(js.indexOf("if(!inc)return;") < js.indexOf("window.__lingGMInjected[\"u123\"]=1"))
-        // 元数据头不该被带进页面
-        assertFalse(js.contains("==UserScript=="))
+        // 元数据头只作为 `GM_info.script.metaStr` 的数据带进页面（供 GM_config
+        // 之类解析自定义字段的库使用），不会被当成脚本正文执行。
+        assertTrue(js.contains("metaStr:\"// ==UserScript=="))
+        assertEquals(1, Regex("==UserScript==").findAll(js).count())
     }
 
     @Test
@@ -400,6 +402,106 @@ class UserScriptTest {
         assertTrue(js.contains("function GM_getResourceText"))
         assertTrue(js.contains("function GM_getResourceURL"))
         assertTrue(js.contains("data:'+r.m+';base64,'+r.b"))
+    }
+
+    @Test
+    fun `GM_info 带 scriptMetaStr 与 resources 清单`() {
+        val script = parse(
+            """
+            // ==UserScript==
+            // @name  元数据
+            // @match https://example.com/*
+            // @resource logo https://cdn.example.com/logo.png
+            // @grant GM_getResourceText
+            // ==/UserScript==
+            """.trimIndent(),
+        )!!
+        val js = scriptWrapper(
+            script,
+            "u1",
+            "{}",
+            "",
+            """{"logo":{"m":"image/png","b":"aGVsbG8="}}""",
+        )
+        // 声明地址与内容一起进页面：前者给 GM_info 的清单，后者给 GM_getResourceText。
+        assertTrue(js.contains("var RESU={\"logo\":\"https://cdn.example.com/logo.png\"}"))
+        assertTrue(
+            js.contains(
+                "RSRC.push({name:rk,mimetype:(RES[rk]&&RES[rk].m)||'',url:RESU[rk]||''})",
+            ),
+        )
+        assertTrue(js.contains(",resources:RSRC"))
+    }
+
+    @Test
+    fun `GM_getTab 家族按 grant 发放并向原生取数据`() {
+        val granted = parse(
+            """
+            // ==UserScript==
+            // @name  标签态
+            // @match https://example.com/*
+            // @grant GM_getTab
+            // @grant GM_saveTab
+            // @grant GM_getTabs
+            // ==/UserScript==
+            """.trimIndent(),
+        )!!
+        val js = scriptWrapper(granted, "u1", "{}")
+        assertTrue(js.contains("function GM_getTab(cb)"))
+        assertTrue(js.contains("function GM_saveTab(o)"))
+        assertTrue(js.contains("function GM_getTabs(cb)"))
+        // 回调由原生投递：id 挂在 CB 上，取完即删，避免重复回调。
+        assertTrue(js.contains("post({t:'tabGet',id:i})"))
+        assertTrue(js.contains("post({t:'tabSave',v:o||{}})"))
+        assertTrue(js.contains("post({t:'tabsGet',id:i})"))
+
+        val none = parse(
+            """
+            // ==UserScript==
+            // @name  无授权
+            // @match https://example.com/*
+            // @grant none
+            // ==/UserScript==
+            """.trimIndent(),
+        )!!
+        val noJs = scriptWrapper(none, "u1", "{}")
+        assertFalse(noJs.contains("function GM_getTab"))
+        assertFalse(noJs.contains("function GM_saveTab"))
+    }
+
+    @Test
+    fun `GM_getTab 的新名字也发同一能力`() {
+        val script = parse(
+            """
+            // ==UserScript==
+            // @name  Promise 标签态
+            // @match https://example.com/*
+            // @grant GM.getTab
+            // @grant GM.saveTab
+            // @grant GM.getTabs
+            // ==/UserScript==
+            """.trimIndent(),
+        )!!
+        val js = scriptWrapper(script, "u1", "{}")
+        assertTrue(js.contains("function GM_getTab(cb)"))
+        assertTrue(js.contains("GM.getTab=function(){return new Promise("))
+        assertTrue(js.contains("GM.saveTab=function(o){"))
+        assertTrue(js.contains("GM.getTabs=function(){return new Promise("))
+    }
+
+    @Test
+    fun `window_close 接到原生桥`() {
+        val script = parse(
+            """
+            // ==UserScript==
+            // @name  关窗
+            // @match https://example.com/*
+            // ==/UserScript==
+            """.trimIndent(),
+        )!!
+        val js = scriptWrapper(script, "u1", "{}")
+        // 无条件提供：不写 @grant 的脚本也在用 window.close。
+        assertTrue(js.contains("window.close=function(){post({t:'winClose'})};"))
     }
 
     @Test

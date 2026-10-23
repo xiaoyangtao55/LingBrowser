@@ -236,7 +236,11 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
             _hitTarget.value = target
         }
         // 脚本开的标签被用户关掉时，把 onclose 送回发起页。
-        tabManager.onTabClosed = { closedId -> notifyScriptTabClosed(closedId) }
+        tabManager.onTabClosed = { closedId ->
+            notifyScriptTabClosed(closedId)
+            // GM_getTab 的数据只在该标签存活期间有意义。
+            scriptTabData.remove(closedId)
+        }
 
         // 订阅名单（启用中的域名并集）变化时同步给 WebTabManager 的拦截 lambda。
         // 与设置同理：拦截发生在 shouldInterceptRequest 里现读，改完立即生效，
@@ -1264,6 +1268,14 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
 
     private val scriptDownloads = HashMap<String, ScriptDownloadHandle>()
 
+    /**
+     * `GM_getTab` / `GM_saveTab` 的**按标签**内存态：tabId -> 数据。
+     *
+     * 与 `GM_setValue` 不同，它不落盘、也不跨标签广播：同一标签页里的所有脚本
+     * 共享这一份，标签关掉就随之丢弃（见 [tabManager.onTabClosed]）。
+     */
+    private val scriptTabData = HashMap<String, JSONObject>()
+
     companion object {
         /** 同时进行的脚本请求上限：跨域请求不受 CORS 约束，需要自己兜一道。 */
         private const val MAX_SCRIPT_REQUESTS = 8
@@ -1317,6 +1329,26 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
             }
             "open" -> openScriptTab(tabId, scriptId, obj)
             "tabClose" -> scriptTabs.remove(obj.optString("id"))?.let { tabManager.closeTab(it.tabId) }
+            // `window.close()`：只关脚本自己开出来的标签。用户手动打开的标签
+            // 在浏览器里也不允许脚本关掉，这里同样拒绝。
+            "winClose" -> if (scriptTabs.values.any { it.tabId == tabId }) {
+                tabManager.closeTab(tabId)
+            }
+            "tabGet" -> deliverScriptEvent(
+                tabId, scriptId, obj.optString("id"), "tab",
+                scriptTabData[tabId] ?: JSONObject(),
+            )
+            "tabSave" -> {
+                scriptTabData[tabId] = obj.optJSONObject("v") ?: JSONObject()
+            }
+            "tabsGet" -> {
+                // 按标签 id 分表，键就是其它标签能看到的标识。
+                val all = JSONObject()
+                for (t in tabManager.tabs.value) {
+                    all.put(t.id, scriptTabData[t.id] ?: JSONObject())
+                }
+                deliverScriptEvent(tabId, scriptId, obj.optString("id"), "tab", all)
+            }
             "del" -> {
                 val key = obj.optString("k")
                 viewModelScope.launch {

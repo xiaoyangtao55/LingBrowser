@@ -57,6 +57,13 @@ data class UserScript(
     val namespace: String,
     val version: String,
     val description: String,
+    /**
+     * 原始元数据头（含 `// ==UserScript==` 两行）。
+     *
+     * 脚本读不到自己的源码，`GM_info.scriptMetaStr` 是它们拿回 `@updateURL`、
+     * `@icon` 等自定义字段的唯一途径，GM_config 这类库就靠正则解析它。
+     */
+    val metaStr: String = "",
     val runAt: ScriptRunAt,
     val noFrames: Boolean,
     val grants: Set<String>,
@@ -236,12 +243,16 @@ object UserScriptParser {
         val code = lines.filterIndexed { index, _ -> index < begin || index > end }
             .joinToString("\n")
             .trimStart('\n', '\r')
+        // 头部原样留一份给 GM_info.scriptMetaStr；缩进与 `//` 都不动，
+        // 脚本里常见的 `/\/\/\s*@(\w+)/` 解析才能对上。
+        val metaStr = lines.subList(begin, end + 1).joinToString("\n")
 
         return UserScript(
             name = meta["name"]?.lastOrNull()?.takeIf { it.isNotBlank() } ?: "未命名脚本",
             namespace = meta["namespace"]?.lastOrNull().orEmpty(),
             version = meta["version"]?.lastOrNull().orEmpty(),
             description = meta["description"]?.lastOrNull().orEmpty(),
+            metaStr = metaStr,
             runAt = runAt,
             noFrames = meta.containsKey("noframes"),
             grants = grants,
@@ -447,6 +458,9 @@ internal fun scriptWrapper(
         append("window.__lingGMInjected[").append(jsString(scriptId)).append("]=1;")
         append("var V=").append(valuesJson.takeIf { it.isNotBlank() } ?: "{}").append(";")
         append("var RES=").append(resourcesJson.takeIf { it.isNotBlank() } ?: "{}").append(";")
+        // 资源名称 → 声明时的地址：`GM_info.script.resources[].url` 要的是这个，
+        // 内容里的 base64 给不了。
+        append("var RESU=").append(resourceUrlsJson(script)).append(";")
         append(gmPrelude(script, scriptId))
         append("\n")
         // 依赖必须在脚本正文之前：Greasyfork 上大量脚本直接使用 jQuery/$。
@@ -461,8 +475,17 @@ internal fun scriptWrapper(
 }
 
 /**
- * GM_* 垫片。
+ * `@resource` 名称 → 声明时的地址，形如 `{"logo":"https://…"}`。
  *
+ * 只给 `GM_info.script.resources[].url` 用；实际内容走 [resourcesJson]。
+ */
+private fun resourceUrlsJson(script: UserScript): String =
+    script.resources.entries.joinToString(",", "{", "}") {
+        "${jsString(it.key)}:${jsString(it.value)}"
+    }
+
+/**
+ * GM_* 垫片。
  * 按 `@grant` 发放能力：
  * - `GM_addStyle` / `GM_addElement` / `GM_log` 是纯前端实现，无条件提供
  *   （不少脚本不写 @grant 也在用，缺了会直接 ReferenceError）；
@@ -518,10 +541,16 @@ private fun gmPrelude(script: UserScript, scriptId: String): String {
         append("else e.setAttribute(k,v)}")
         append("if(p&&p.appendChild)p.appendChild(e);return e}")
         append("var unsafeWindow=window;")
+        // 资源清单：`GM_info.script.resources` 是 Tampermonkey 的公开字段，
+        // 少数脚本据此判断自己声明的图片/样式是否真的被安装器缓存。
+        append("var RSRC=[];for(var rk in RES){")
+        append("RSRC.push({name:rk,mimetype:(RES[rk]&&RES[rk].m)||'',url:RESU[rk]||''})}")
         append("var GM_info={script:{name:").append(jsString(script.name))
         append(",namespace:").append(jsString(script.namespace))
         append(",version:").append(jsString(script.version))
         append(",description:").append(jsString(script.description))
+        append(",metaStr:").append(jsString(script.metaStr))
+        append(",resources:RSRC")
         append(",grant:[").append(script.grants.joinToString(",") { jsString(it) }).append("]}")
         append(",scriptHandler:'LingBrowser',version:'1.0'};")
         if (storageGranted) {
@@ -573,6 +602,30 @@ private fun gmPrelude(script: UserScript, scriptId: String): String {
         append("post({t:'notice',id:id,title:String(d.title||''),text:String(d.text||d.body||''),")
         append("u:String(d.url||''),img:String(d.image||''),to:Number(d.timeout)||0,silent:!!d.silent});")
         append("return id}")
+        // `window.close()`：页面自己调它本来在 WebView 里是空操作，接入后只有
+        // **脚本开出来的标签**才会真的被关掉（原生侧核对，见 BrowserViewModel），
+        // 用户手动打开的标签不受影响 —— 与浏览器对脚本关窗的限制一致。
+        append("window.close=function(){post({t:'winClose'})};")
+        if (granted("GM_getTab") || granted("GM_saveTab") || granted("GM_getTabs")) {
+            // 这三个是**按标签**的内存态（不落盘）：跟 GM_setValue 的跨标签持久化
+            // 不是一回事，多标签脚本靠它在同一标签内传递临时状态。
+            append("var TABn=0;")
+            if (granted("GM_getTab")) {
+                append("function GM_getTab(cb){var i='g'+(++TABn);")
+                append("CB[i]=function(e,p){try{delete CB[i]}catch(x){};")
+                append("if(typeof cb==='function'){try{cb(p)}catch(x){}}};")
+                append("post({t:'tabGet',id:i})}")
+            }
+            if (granted("GM_saveTab")) {
+                append("function GM_saveTab(o){post({t:'tabSave',v:o||{}})}")
+            }
+            if (granted("GM_getTabs")) {
+                append("function GM_getTabs(cb){var i='g'+(++TABn);")
+                append("CB[i]=function(e,p){try{delete CB[i]}catch(x){};")
+                append("if(typeof cb==='function'){try{cb(p)}catch(x){}}};")
+                append("post({t:'tabsGet',id:i})}")
+            }
+        }
         if (granted("GM_openInTab")) {
             // 三种调用都要认：
             //   GM_openInTab(url)                       → 前台打开
@@ -673,6 +726,16 @@ private fun gmPrelude(script: UserScript, scriptId: String): String {
                 append("GM.listValues=function(){return Promise.resolve(GM_listValues())};")
                 append("GM.addValueChangeListener=function(k,f){return GM_addValueChangeListener(k,f)};")
                 append("GM.removeValueChangeListener=function(id){GM_removeValueChangeListener(id)};")
+            }
+            if (granted("GM_getTab")) {
+                append("GM.getTab=function(){return new Promise(function(res){GM_getTab(res)})};")
+            }
+            if (granted("GM_saveTab")) {
+                append("GM.saveTab=function(o){")
+                append("return Promise.resolve().then(function(){GM_saveTab(o)})};")
+            }
+            if (granted("GM_getTabs")) {
+                append("GM.getTabs=function(){return new Promise(function(res){GM_getTabs(res)})};")
             }
             append("GM.registerMenuCommand=function(n,f,o){return GM_registerMenuCommand(n,f,o)};")
             append("GM.unregisterMenuCommand=function(id){GM_unregisterMenuCommand(id)};")
