@@ -39,6 +39,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -1191,28 +1192,68 @@ fun BrowserScreen(
     // ---- 用户脚本安装确认 ----
     // 打开 `.user.js` 链接时不加载原始代码，先问一句再装。与下载确认同理：
     // 点了一个链接，不代表用户愿意让任意 JS 长期跑在所有匹配页面上。
-    pendingUserScript?.let { url ->
+    // 元数据头在弹窗打开后并行拉取，拿到后补上"脚本会跑在哪些页面"。
+    pendingUserScript?.let { pending ->
+        val preview = pending.preview
         AlertDialog(
             onDismissRequest = viewModel::dismissUserScriptInstall,
             icon = { Icon(LingIcons.Javascript, contentDescription = null) },
             title = { Text("安装这个用户脚本？") },
             text = {
-                Column {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
                     Text(
-                        text = url.substringAfterLast('/').substringBefore('?').ifBlank { "user.js" },
+                        text = preview?.name?.takeIf { it.isNotBlank() }
+                            ?: pending.url.substringAfterLast('/').substringBefore('?')
+                                .ifBlank { "user.js" },
                         style = MaterialTheme.typography.bodyLarge,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    Spacer(Modifier.height(8.dp))
+                    Spacer(Modifier.height(4.dp))
                     Text(
-                        text = UrlUtils.hostOf(url),
+                        text = buildString {
+                            if (!preview?.version.isNullOrBlank()) append("v${preview?.version} · ")
+                            append(UrlUtils.hostOf(pending.url))
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    Spacer(Modifier.height(8.dp))
+
+                    Spacer(Modifier.height(12.dp))
+                    Text("生效范围", style = MaterialTheme.typography.labelMedium)
+                    Spacer(Modifier.height(4.dp))
+                    when {
+                        pending.loading -> Text(
+                            text = "正在读取脚本信息…",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        preview?.error != null -> Text(
+                            text = "无法读取脚本信息：${preview.error}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                        preview == null -> Unit
+                        // 没有 @match/@include 的脚本装上也不会运行，直说比让用户
+                        // 装完发现"没反应"更好。
+                        preview.patterns.isEmpty() -> Text(
+                            text = "没有声明 @match / @include，安装后不会在任何页面运行。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        else -> preview.patterns.forEach { pattern ->
+                            Text(
+                                text = "· $pattern",
+                                style = MaterialTheme.typography.bodySmall.copy(
+                                    fontFamily = FontFamily.Monospace,
+                                ),
+                            )
+                        }
+                    }
+
+                    Spacer(Modifier.height(12.dp))
                     Text(
                         text = "脚本会以网页权限运行，能读写页面内容与 Cookie。" +
                             "请只安装可信来源的脚本。",
@@ -1222,7 +1263,12 @@ fun BrowserScreen(
                 }
             },
             confirmButton = {
-                TextButton(onClick = viewModel::confirmUserScriptInstall) { Text("安装") }
+                TextButton(
+                    onClick = viewModel::confirmUserScriptInstall,
+                    // 读不到元数据也不拦着：真正安装会再报一次同样的错误，
+                    // 这里只是不让人在"还在读"的时候就点下去。
+                    enabled = !pending.loading,
+                ) { Text("安装") }
             },
             dismissButton = {
                 TextButton(onClick = viewModel::dismissUserScriptInstall) { Text("取消") }

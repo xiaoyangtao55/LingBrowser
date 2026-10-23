@@ -56,6 +56,22 @@ sealed interface ScriptImportResult {
 }
 
 /**
+ * 安装确认弹窗用的预览信息。
+ *
+ * 只读元数据头，**不**落盘、不抓 `@require` / `@resource` —— 用户还没同意安装，
+ * 不该替他把依赖也拉一遍。抓取失败时 [error] 有值，其余字段留空。
+ */
+data class ScriptPreview(
+    val name: String = "",
+    val version: String = "",
+    val description: String = "",
+    /** `@match` / `@include` 原样文本，即"脚本会跑在哪些页面"。 */
+    val patterns: List<String> = emptyList(),
+    val grants: Set<String> = emptySet(),
+    val error: String? = null,
+)
+
+/**
  * 一次 GM 值写入的结果。
  *
  * [Changed.old] 是写入前的旧值（键原本不存在时为 null），调用方据此向**其它**
@@ -169,8 +185,41 @@ class UserScriptRepository(
     }
 
     /**
-     * 从本地文件导入。
+     * 只抓取 + 解析元数据头，给安装确认弹窗展示"脚本会跑在哪些页面"。
      *
+     * 不落盘、不抓 `@require` / `@resource`：用户还没同意安装，不该替他把依赖
+     * 也拉一遍。抓取与大小上限跟 [importFromUrl] 共用，所以预览成功基本代表
+     * 真正安装也能拉到，失败原因也是同一套文案。
+     */
+    suspend fun preview(rawUrl: String): ScriptPreview = withContext(Dispatchers.IO) {
+        val url = rawUrl.trim()
+        if (!url.startsWith("http://", ignoreCase = true) &&
+            !url.startsWith("https://", ignoreCase = true)
+        ) {
+            return@withContext ScriptPreview(error = "只支持 http/https 地址")
+        }
+        val text = try {
+            fetch(url)
+        } catch (e: TooLarge) {
+            return@withContext ScriptPreview(error = "脚本超过 $maxSizeLabel")
+        } catch (e: Exception) {
+            return@withContext ScriptPreview(error = describe(e))
+        }
+        val script = UserScriptParser.parse(text)
+            ?: return@withContext ScriptPreview(
+                error = "不是有效的用户脚本：缺少 ==UserScript== 元数据头",
+            )
+        ScriptPreview(
+            name = script.name,
+            version = script.version,
+            description = script.description,
+            patterns = script.patternLabels,
+            grants = script.grants,
+        )
+    }
+
+    /**
+     * 从本地文件导入。
      * 每次都是**新**脚本（随机 id）：本地文件没有稳定标识，按内容或文件名
      * 去重都不可靠，硬做反而会把两次导入的不同版本合成一条。
      */

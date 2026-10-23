@@ -27,6 +27,7 @@ import com.ling.browser.data.repo.BlockSubscription
 import com.ling.browser.data.repo.ImportResult
 import com.ling.browser.data.repo.MAX_BACKUP_BYTES
 import com.ling.browser.data.repo.ScriptImportResult
+import com.ling.browser.data.repo.ScriptPreview
 import com.ling.browser.data.repo.UserScriptEntry
 import com.ling.browser.data.repo.ValueWrite
 import com.ling.browser.data.repo.deriveFolders
@@ -264,7 +265,7 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
             handleUserScriptMessage(tabId, message)
         }
         // 点开 `.user.js` 安装链接：只记下地址弹确认，不直接加载，也不直接安装。
-        tabManager.onUserScriptLink = { url -> _pendingUserScript.value = url }
+        tabManager.onUserScriptLink = { url -> promptUserScriptInstall(url) }
 
         // 启动时恢复上次的会话；没有可恢复的内容才开一个主页。
         //
@@ -798,9 +799,12 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
      *
      * 链接本身不加载，先由 UI 弹确认框；确认后走 [importUserScriptFromUrl]，
      * 与在管理页里粘贴网址是**同一条**导入路径（同样有大小/条数上限与解析校验）。
+     *
+     * [PendingUserScript.preview] 是弹窗期间顺带拉回来的元数据：用户最关心的
+     * 是"它会跑在哪些网站"，只给文件名等于让人盲签。
      */
-    private val _pendingUserScript = MutableStateFlow<String?>(null)
-    val pendingUserScript: StateFlow<String?> = _pendingUserScript.asStateFlow()
+    private val _pendingUserScript = MutableStateFlow<PendingUserScript?>(null)
+    val pendingUserScript: StateFlow<PendingUserScript?> = _pendingUserScript.asStateFlow()
 
     /**
      * `GM_download({ saveAs: true })` 等待用户挑保存位置。
@@ -1200,11 +1204,28 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
     /** 删除脚本（连同源码、元信息与 GM 值表）。 */
     fun removeUserScript(id: String) = io { container.userScripts.remove(id) }
 
+    /**
+     * 弹安装确认，并在后台把元数据头拉回来。
+     *
+     * 拉取是并行的：确认框立刻出现，拿到 `@match` 后再回填。回填前要核对
+     * 弹窗仍停在同一个地址 —— 用户可能已经取消、或者又点了另一个链接。
+     */
+    private fun promptUserScriptInstall(url: String) {
+        _pendingUserScript.value = PendingUserScript(url)
+        viewModelScope.launch {
+            val preview = runCatching { container.userScripts.preview(url) }
+                .getOrElse { ScriptPreview(error = it.message ?: "读取脚本信息失败") }
+            val current = _pendingUserScript.value ?: return@launch
+            if (current.url != url) return@launch
+            _pendingUserScript.value = current.copy(loading = false, preview = preview)
+        }
+    }
+
     /** 确认安装待确认的脚本链接。 */
     fun confirmUserScriptInstall() {
-        val url = _pendingUserScript.value ?: return
+        val pending = _pendingUserScript.value ?: return
         _pendingUserScript.value = null
-        importUserScriptFromUrl(url)
+        importUserScriptFromUrl(pending.url)
     }
 
     /**
@@ -2354,6 +2375,19 @@ data class ScriptSaveAsRequest(
     val scriptId: String,
     val headers: Map<String, String>,
     val conflict: ConflictAction,
+)
+
+/**
+ * 待确认的用户脚本安装。
+ *
+ * [preview] 在弹窗打开后异步拉取：确认框不该等网络才出现，但"会跑在哪些
+ * 网站"必须在用户点安装之前看到。拉取失败（[ScriptPreview.error]）只影响
+ * 展示，不改变确认/安装按钮本身的行为。
+ */
+data class PendingUserScript(
+    val url: String,
+    val loading: Boolean = true,
+    val preview: ScriptPreview? = null,
 )
 
 /** 大小探测超时。设短一些：探测只是锦上添花，不该让确认框卡着不显示。 */
