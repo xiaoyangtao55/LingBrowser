@@ -283,6 +283,12 @@ class UserScriptTest {
         assertTrue(js.contains("u.protocol!=='http:'"))
         assertTrue(js.contains("new RegExp("))
         assertTrue(js.contains("var V={\"k\":\"v\"}"))
+        // 内部页（主页 / 阅读视图的假域名）不是网页，@match *://*/* 也不该圈进来；
+        // 守卫必须放在标记之前，否则会把内部页误标成"已注入"。
+        assertTrue(js.contains("u.hostname==='home.ling.invalid'||u.hostname==='reader.ling.invalid'"))
+        // 同一文档内只跑一次的标记：END 的探测式补注入靠它避免重复执行。
+        assertTrue(js.contains("window.__lingGMInjected[\"u123\"]=1"))
+        assertTrue(js.indexOf("if(!inc)return;") < js.indexOf("window.__lingGMInjected[\"u123\"]=1"))
         // 元数据头不该被带进页面
         assertFalse(js.contains("==UserScript=="))
     }
@@ -329,6 +335,8 @@ class UserScriptTest {
         assertTrue(js.contains("function GM_deleteValue"))
         assertTrue(js.contains("function GM_listValues"))
         assertTrue(js.contains("function GM_setClipboard"))
+        // 第二个参数 type 要透传：'html' 走富文本剪贴板。
+        assertTrue(js.contains("ty:String(ty||'text')"))
         assertTrue(js.contains("function GM_xmlhttpRequest"))
         assertTrue(js.contains("window.__lingGMDispatch"))
 
@@ -448,9 +456,18 @@ class UserScriptTest {
         val js = scriptWrapper(script, "u1", "{}")
         assertTrue(js.contains("function GM_registerMenuCommand"))
         assertTrue(js.contains("function GM_unregisterMenuCommand"))
+        // options.accessKey：对象与老式的裸按键两种写法都认，只留单个字母/数字。
+        assertTrue(js.contains("o&&typeof o==='object'&&o.accessKey!=null"))
+        assertTrue(js.contains("ak:m?m[1].toUpperCase():''"))
         assertTrue(js.contains("function GM_notification"))
         assertTrue(js.contains("window.__lingGMMenuMap"))
         assertTrue(js.contains("window.__lingGMNoticeMap"))
+        // 通知的完整参数：大图 / 超时 / 静默 / 点击打开的地址 / ondone。
+        assertTrue(js.contains("img:String(d.image||'')"))
+        assertTrue(js.contains("to:Number(d.timeout)||0"))
+        assertTrue(js.contains("silent:!!d.silent"))
+        assertTrue(js.contains("NT[id]={click:d.onclick,done:d.ondone}"))
+        assertTrue(js.contains("ev==='done'?e.done:e.click"))
     }
 
     @Test
@@ -627,12 +644,20 @@ class UserScriptTest {
         )!!
         val js = scriptWrapper(script, "u1", "{}")
         // 三种调用形态：字符串 / 字符串 + 布尔 / 对象。
-        assertTrue(js.contains("typeof u==='string'?{url:u}"))
-        assertTrue(js.contains("o={active:!o}"))
+        assertTrue(js.contains("if(typeof u==='string')"))
+        assertTrue(js.contains("d={active:!o}"))
+        // 第二参数是对象时必须逐字段合并：onload / onclose / insert 只写在 o 上，
+        // 只认 active/incognito 会让这些回调永远不触发。
+        assertTrue(js.contains("for(var k in o)d[k]=o[k]"))
+        assertTrue(js.contains("if(d.active===undefined)d.active=o.active"))
         // 对象里的 active / incognito / onload 都要透传到原生。
-        assertTrue(js.contains("act: act") || js.contains("active:act!==false"))
+        assertTrue(js.contains("active:act!==false"))
         assertTrue(js.contains("inc:!!inc"))
         assertTrue(js.contains("typeof d.onload==='function'"))
+        // onclose 与 insert：回调要登记，位置要透传，且要告诉原生"这个脚本等着关标签"。
+        assertTrue(js.contains("e==='close'&&typeof d.onclose==='function'"))
+        assertTrue(js.contains("var ins=d.insert"))
+        assertTrue(js.contains("oc:typeof d.onclose==='function'"))
         // 句柄只能关掉自己开出去的标签。
         assertTrue(js.contains("t:'tabClose'"))
         assertTrue(js.contains("return{close:function()"))
@@ -654,6 +679,14 @@ class UserScriptTest {
         assertTrue(js.contains("t:'dl'"))
         assertTrue(js.contains("typeof d.onload==='function'"))
         assertTrue(js.contains("typeof d.onerror==='function'"))
+        // headers 透传给原生；进度回调与 abort 句柄也要有。
+        assertTrue(js.contains("h:d.headers||{}"))
+        assertTrue(js.contains("e==='progress'"))
+        assertTrue(js.contains("return{abort:function()"))
+        assertTrue(js.contains("t:'dlAbort'"))
+        // saveAs / conflictAction 也要透传，否则原生只能按默认落点写。
+        assertTrue(js.contains("sa:!!d.saveAs"))
+        assertTrue(js.contains("ca:String(d.conflictAction||'')"))
 
         // 没授权就不发放。
         val none = parse(
@@ -685,6 +718,66 @@ class UserScriptTest {
         assertTrue(js.contains("e==='progress'"))
         // 二进制响应体以 base64 过桥，垫片负责解回 ArrayBuffer / Blob。
         assertTrue(js.contains("d.responseType==='arraybuffer'"))
-        assertTrue(js.contains("new Blob([aa])"))
+        assertTrue(js.contains("new Blob([aa],{type:ct})"))
+        // Blob.type 从 Content-Type 响应头取，空 type 会让 image/* 判断落空。
+        assertTrue(js.contains("/content-type:"))
+        // 老写法 binary:true 等价于 arraybuffer；回调 this 绑定 context；
+        // loadstart / loadend 覆盖请求的起止两端。
+        assertTrue(js.contains("if(d.binary&&!d.responseType)d.responseType='arraybuffer'"))
+        assertTrue(js.contains("var c=d.context||d"))
+        assertTrue(js.contains("f.call(c,p)"))
+        // onloadstart 是同步触发的，作用域里没有 CB 内部的 `c`，必须自己重算 context。
+        assertTrue(js.contains("d.onloadstart.call(d.context||d,"))
+        assertTrue(js.contains("if(e!=='progress')call(d.onloadend)"))
+    }
+
+    @Test
+    fun `GM 命名空间的通知与下载返回 Promise 句柄`() {
+        val script = parse(
+            """
+            // ==UserScript==
+            // @name  新版
+            // @match https://example.com/*
+            // @grant GM.*
+            // ==/UserScript==
+            """.trimIndent(),
+        )!!
+        val js = scriptWrapper(script, "u1", "{}")
+        // GM.notification 返回 Promise；GM.download 的 Promise 额外带 abort。
+        assertTrue(js.contains("GM.notification=function"))
+        assertTrue(js.contains("return Promise.resolve(GM_notification"))
+        assertTrue(js.contains("p.abort=function()"))
+        assertTrue(js.contains("GM.setClipboard=function(t,ty)"))
+        // 新版命名空间要把 options 一并转给底层实现。
+        assertTrue(js.contains("GM.registerMenuCommand=function(n,f,o)"))
+    }
+
+    @Test
+    fun `全量 grant 的注入代码不会因为缺少分号而整段失效`() {
+        val script = parse(
+            """
+            // ==UserScript==
+            // @name  全量
+            // @match https://example.com/*
+            // @grant GM.*
+            // @grant GM_openInTab
+            // @grant GM_setClipboard
+            // @grant GM_download
+            // @grant GM_xmlhttpRequest
+            // @grant GM_getResourceText
+            // @grant GM_getResourceURL
+            // ==/UserScript==
+
+            var marker = 1;
+            """.trimIndent(),
+        )!!
+        val js = scriptWrapper(script, "u1", "{}")
+        // 垫片是**无缝拼接**的：赋值表达式（`x = function(){…}`）后面紧跟
+        // `function …` 且同一行内没有分号时，解析器会把它当成表达式的延续，
+        // 整个 IIFE 抛 SyntaxError、脚本一行都不执行（真机已踩过）。
+        assertFalse(js.contains("catch(x){}}}function"))
+        // 每个顶层声明都得以 `;` 或 `}` 正确收尾，抽查几处拼接边界。
+        assertTrue(js.contains("}}};function GM_log"))
+        assertTrue(js.contains("return{abort:function(){post({t:'xa',id:i})}}}"))
     }
 }

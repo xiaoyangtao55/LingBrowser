@@ -70,6 +70,20 @@ class DownloadEngine(
     private val jobs = mutableMapOf<Long, Job>()
 
     /**
+     * taskId -> 调用方附加的请求头（目前只有用户脚本的 `GM_download` 会用）。
+     *
+     * 只存在内存里：进程被杀后恢复下载会丢掉这些头，与"下载任务本身也不重启"
+     * 的行为一致；为它加一列数据库迁移不值得。
+     */
+    private val taskHeaders = mutableMapOf<Long, Map<String, String>>()
+
+    /** taskId -> SAF 选定的目标 URI（`GM_download` 的 `saveAs`）。与请求头一样只存内存。 */
+    private val taskUris = mutableMapOf<Long, String>()
+
+    /** 需要在开写前删掉同名旧文件的任务（`conflictAction: 'overwrite'`）。 */
+    private val taskOverwrite = mutableSetOf<Long>()
+
+    /**
      * taskId -> 上一次进度采样的快照，用于估算速度。
      *
      * 只在 [writeBody] 写盘期间读写（同一协程），因此不需要 [stateMutex] 保护。
@@ -101,20 +115,33 @@ class DownloadEngine(
      * 发起一次下载。
      *
      * 先写库拿到自增 ID（= taskId），再启动下载协程。
-     * 返回 false 表示 URL 不合法或写库失败。
+     * 返回任务 id；null 表示 URL 不合法或写库失败。
+     *
+     * @param targetUri 用户脚本 `saveAs` 选定的 SAF 文档；给出时忽略 [location]。
+     * @param conflict 同名文件的处理策略（`GM_download` 的 `conflictAction`）；
+     *   `UNIQUE` 在入队时改名，`OVERWRITE` 在开写前删掉旧文件。
      */
     suspend fun enqueue(
         url: String,
         fileName: String?,
         mimeType: String?,
         location: DownloadLocation,
-    ): Boolean = withContext(Dispatchers.IO) {
+        headers: Map<String, String> = emptyMap(),
+        targetUri: String? = null,
+        conflict: ConflictAction? = null,
+    ): Long? = withContext(Dispatchers.IO) {
             if (!url.startsWith("http://") && !url.startsWith("https://")) {
-                return@withContext false
+                return@withContext null
             }
-            val name = fileName?.takeIf { it.isNotBlank() }
+            val requested = fileName?.takeIf { it.isNotBlank() }
                 ?: url.substringAfterLast('/').substringBefore('?').takeIf { it.isNotBlank() }
                 ?: "download"
+            // 选了 SAF 目标时文件名由用户决定，不再做唯一化。
+            val name = if (targetUri == null && conflict == ConflictAction.UNIQUE) {
+                DownloadDestination.uniqueName(appContext, requested, location)
+            } else {
+                requested
+            }
 
             val id = insertTask(
                 fileName = name,
@@ -122,8 +149,11 @@ class DownloadEngine(
                 mimeType = mimeType,
                 status = DownloadStatus.PENDING,
                 location = location,
-            ) ?: return@withContext false
+            ) ?: return@withContext null
 
+            if (headers.isNotEmpty()) taskHeaders[id] = headers
+            if (targetUri != null) taskUris[id] = targetUri
+            if (targetUri == null && conflict == ConflictAction.OVERWRITE) taskOverwrite.add(id)
             val entry = DownloadEntry(
                 id = id,
                 downloadId = id,
@@ -139,7 +169,7 @@ class DownloadEngine(
             }
             publish()
             startDownload(id)
-            true
+            id
         }
 
     /** 暂停：取消下载协程，保留已下载部分，状态置 PAUSED。 */
@@ -191,6 +221,9 @@ class DownloadEngine(
             db.writableDatabase.delete("downloads", "id = ?", arrayOf(taskId.toString()))
             tasks.update { it - taskId }
             speedSamples.remove(taskId)
+            taskHeaders.remove(taskId)
+            taskUris.remove(taskId)
+            taskOverwrite.remove(taskId)
         }
         publish()
         stopServiceIfIdle()
@@ -206,6 +239,9 @@ class DownloadEngine(
             db.writableDatabase.delete("downloads", null, null)
             tasks.value = emptyMap()
             speedSamples.clear()
+            taskHeaders.clear()
+            taskUris.clear()
+            taskOverwrite.clear()
         }
         publish()
         stopServiceIfIdle()
@@ -305,18 +341,42 @@ class DownloadEngine(
     }
 
     private suspend fun executeDownload(taskId: Long, entry: DownloadEntry) {
-        // 用下载条目里记录的位置解析目标。续传时把 entry.localPath 也传进去 ——
-        // 若上次落在 MediaStore（公共目录），它会复用同一个 URI，而不是仅凭
-        // 文件名重建（未完成的 MediaStore 条目对查询不可见，靠文件名找不到）。
-        val target = DownloadDestination.resolve(
-            appContext, entry.fileName, entry.downloadLocation, entry.localPath,
-        ) ?: throw java.io.IOException("无法创建下载目标（请检查存储权限）")
+        val safUri = taskUris[taskId]
+        val target = if (safUri != null) {
+            // saveAs：写用户通过系统选择器指定的文档，不参与续传。
+            DownloadDestination.resolveUri(appContext, android.net.Uri.parse(safUri))
+        } else {
+            // overwrite：先把同名旧文件删掉，否则它的字节数会被当成续传起点。
+            if (taskOverwrite.remove(taskId)) {
+                DownloadDestination.deleteExisting(
+                    appContext, entry.fileName, entry.downloadLocation,
+                )
+            }
+            // 用下载条目里记录的位置解析目标。续传时把 entry.localPath 也传进去 ——
+            // 若上次落在 MediaStore（公共目录），它会复用同一个 URI，而不是仅凭
+            // 文件名重建（未完成的 MediaStore 条目对查询不可见，靠文件名找不到）。
+            DownloadDestination.resolve(
+                appContext, entry.fileName, entry.downloadLocation, entry.localPath,
+            ) ?: throw java.io.IOException("无法创建下载目标（请检查存储权限）")
+        }
+        downloadTo(taskId, entry, target)
+    }
 
+    /** 把一次请求写进已解析好的目标；成功路径统一在这里收尾。 */
+    private suspend fun downloadTo(
+        taskId: Long,
+        entry: DownloadEntry,
+        target: DownloadDestination.Target,
+    ) {
         // 续传起点取**目标上真实的字节数**，而不是库里的进度：进度是节流写库的，
         // 回退用它当起点会和真实文件错位，追加时拼出脏数据。
         val existing = target.length()
 
         val request = Request.Builder().url(entry.url).apply {
+            // 脚本给的请求头（如 Referer / Authorization）；Range 由引擎自己算，不让脚本覆盖。
+            taskHeaders[taskId]?.forEach { (key, value) ->
+                if (!key.equals("Range", ignoreCase = true)) header(key, value)
+            }
             if (existing > 0) header("Range", "bytes=$existing-")
         }.build()
 
@@ -373,6 +433,10 @@ class DownloadEngine(
      */
     private suspend fun markSuccess(taskId: Long, target: DownloadDestination.Target) {
         target.finalize()
+        // 任务已完成，附加请求头没有保留价值（重试/续传才会用到）。
+        taskHeaders.remove(taskId)
+        taskUris.remove(taskId)
+        taskOverwrite.remove(taskId)
         stateMutex.withLock {
             tasks.value[taskId]?.let { cur ->
                 val done = cur.copy(

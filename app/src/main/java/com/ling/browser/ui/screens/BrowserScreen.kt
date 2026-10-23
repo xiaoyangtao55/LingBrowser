@@ -24,6 +24,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -66,9 +67,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.key.utf16CodePoint
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontFamily
@@ -164,6 +171,16 @@ fun BrowserScreen(
     val pendingDownload by viewModel.pendingDownload.collectAsStateWithLifecycle()
     // 点开 `.user.js` 链接时先弹确认，不直接安装。
     val pendingUserScript by viewModel.pendingUserScript.collectAsStateWithLifecycle()
+    // `GM_download({ saveAs: true })`：非 null 时拉起系统文件选择器。
+    val scriptSaveAs by viewModel.scriptSaveAs.collectAsStateWithLifecycle()
+    val scriptSaveAsLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("*/*"),
+    ) { uri -> viewModel.completeScriptSaveAs(uri) }
+    LaunchedEffect(scriptSaveAs?.requestId) {
+        val req = scriptSaveAs ?: return@LaunchedEffect
+        // 脚本没给 name 时用占位名，用户可以在选择器里改。
+        scriptSaveAsLauncher.launch(req.fileName ?: "download")
+    }
     // 页面里 GM_registerMenuCommand 注册的命令；只展示当前标签页的。
     val allScriptMenus by viewModel.userScriptMenus.collectAsStateWithLifecycle()
     val installedScripts by viewModel.userScripts.collectAsStateWithLifecycle()
@@ -973,9 +990,25 @@ fun BrowserScreen(
             containerColor = MaterialTheme.colorScheme.surfaceContainer,
             dragHandle = { SheetDragHandle() },
         ) {
+            // 面板一出现就把焦点拿过来，accessKey 才收得到按键。
+            val menuFocus = remember { FocusRequester() }
+            LaunchedEffect(Unit) { runCatching { menuFocus.requestFocus() } }
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .focusRequester(menuFocus)
+                    .focusable()
+                    // 外接键盘：按 accessKey 直接触发对应命令（桌面端菜单助记键的等价物）。
+                    .onPreviewKeyEvent { event ->
+                        if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                        val key = event.utf16CodePoint.toChar().uppercaseChar()
+                        val hit = activeScriptMenus.firstOrNull {
+                            it.accessKey.isNotEmpty() && it.accessKey[0] == key
+                        } ?: return@onPreviewKeyEvent false
+                        showScriptMenuSheet = false
+                        viewModel.invokeUserScriptMenu(hit.tabId, hit.scriptId, hit.commandId)
+                        true
+                    }
                     .verticalScroll(rememberScrollState())
                     .padding(vertical = 8.dp),
             ) {
@@ -984,11 +1017,16 @@ fun BrowserScreen(
                     val scriptName = installedScripts
                         .firstOrNull { it.id == command.scriptId }
                         ?.script?.name
+                    val base = if (scriptName.isNullOrBlank()) {
+                        command.label
+                    } else {
+                        "$scriptName · ${command.label}"
+                    }
                     Text(
-                        text = if (scriptName.isNullOrBlank()) {
-                            command.label
+                        text = if (command.accessKey.isEmpty()) {
+                            base
                         } else {
-                            "$scriptName · ${command.label}"
+                            "$base（快捷键 ${command.accessKey}）"
                         },
                         style = MaterialTheme.typography.bodyLarge,
                         modifier = Modifier

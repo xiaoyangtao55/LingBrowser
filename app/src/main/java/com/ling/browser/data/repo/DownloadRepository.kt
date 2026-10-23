@@ -13,6 +13,7 @@ import com.ling.browser.data.db.toDownload
 import com.ling.browser.data.prefs.DownloadLocation
 import com.ling.browser.data.prefs.DownloaderType
 import com.ling.browser.data.prefs.LingSettings
+import com.ling.browser.download.ConflictAction
 import com.ling.browser.download.DownloadEngine
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.StateFlow
@@ -48,14 +49,36 @@ class DownloadRepository(
     /**
      * 发起一次下载。
      *
-     * 返回 false 表示请求没能交给后端（URL 不合法、系统下载服务不可用、
-     * 或公共目录存储权限不足）。
+     * [headers] 供用户脚本的 `GM_download({ headers })` 使用：内建引擎在每次
+     * 请求（含续传）时带上；系统下载器交给 [DownloadManager]。
+     * [targetUri] 与 [conflict] 同样来自 `GM_download`（`saveAs` / `conflictAction`）：
+     * 前者只有内建引擎能兑现（系统 DownloadManager 无法写任意 URI），
+     * 因此给出时直接走内建引擎。
+     * 返回下载任务 id（供脚本 abort），null 表示请求没能交给后端
+     * （URL 不合法、系统下载服务不可用、或公共目录存储权限不足）。
      */
-    suspend fun enqueue(url: String, fileName: String?, mimeType: String?): Boolean {
+    suspend fun enqueue(
+        url: String,
+        fileName: String?,
+        mimeType: String?,
+        headers: Map<String, String> = emptyMap(),
+        targetUri: String? = null,
+        conflict: ConflictAction? = null,
+    ): Long? {
         val settings = settingsProvider()
+        if (targetUri != null) {
+            return engine.enqueue(
+                url, fileName, mimeType, settings.downloadLocation, headers, targetUri, conflict,
+            )
+        }
         return when (settings.downloaderType) {
-            DownloaderType.BUILT_IN -> engine.enqueue(url, fileName, mimeType, settings.downloadLocation)
-            DownloaderType.SYSTEM -> enqueueSystem(url, fileName, mimeType, settings.downloadLocation)
+            DownloaderType.BUILT_IN ->
+                engine.enqueue(
+                    url, fileName, mimeType, settings.downloadLocation, headers,
+                    conflict = conflict,
+                )
+            DownloaderType.SYSTEM ->
+                enqueueSystem(url, fileName, mimeType, settings.downloadLocation, headers)
         }
     }
 
@@ -107,10 +130,11 @@ class DownloadRepository(
         fileName: String?,
         mimeType: String?,
         location: DownloadLocation,
-    ): Boolean = withContext(Dispatchers.IO) {
-        val dm = manager ?: return@withContext false
+        headers: Map<String, String> = emptyMap(),
+    ): Long? = withContext(Dispatchers.IO) {
+        val dm = manager ?: return@withContext null
         if (!url.startsWith("http://") && !url.startsWith("https://")) {
-            return@withContext false
+            return@withContext null
         }
 
         val name = fileName?.takeIf { it.isNotBlank() }
@@ -126,6 +150,11 @@ class DownloadRepository(
                 DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED
             )
             mimeType?.let { setMimeType(it) }
+            // 只接受脚本显式给的请求头；DownloadManager 会拒绝部分受保护的头，
+            // 单个头失败不影响整次下载。
+            headers.forEach { (key, value) ->
+                runCatching { addRequestHeader(key, value) }
+            }
             when (location) {
                 DownloadLocation.APP_PRIVATE ->
                     setDestinationInExternalFilesDir(
@@ -139,7 +168,7 @@ class DownloadRepository(
         }
 
         val id = runCatching { dm.enqueue(request) }.getOrNull()
-            ?: return@withContext false
+            ?: return@withContext null
 
         db.writableDatabase.insertWithOnConflict(
             "downloads",
@@ -159,7 +188,7 @@ class DownloadRepository(
             android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE,
         )
         refreshSystem()
-        true
+        id
     }
 
     private suspend fun removeSystem(entry: DownloadEntry, deleteFile: Boolean) =

@@ -58,14 +58,95 @@ object DownloadDestination {
         }
     }
 
+    // -------------------------------------------------------------- 冲突处理 / SAF
+
+    /**
+     * 给同名文件挑一个不冲突的名字（`GM_download` 的 `conflictAction: 'uniquify'`）。
+     *
+     * 只在当前落点里查重：`name (1).ext`、`name (2).ext` …… 找到空位为止。
+     * 试满 [MAX_UNIQUE_TRIES] 次仍有冲突时退到时间戳后缀，保证一定返回可用名。
+     */
+    fun uniqueName(context: Context, fileName: String, location: DownloadLocation): String {
+        if (!exists(context, fileName, location)) return fileName
+        val dot = fileName.lastIndexOf('.')
+        val base = if (dot > 0) fileName.substring(0, dot) else fileName
+        val ext = if (dot > 0) fileName.substring(dot) else ""
+        for (i in 1..MAX_UNIQUE_TRIES) {
+            val candidate = "$base ($i)$ext"
+            if (!exists(context, candidate, location)) return candidate
+        }
+        return "$base-${System.currentTimeMillis()}$ext"
+    }
+
+    /**
+     * `conflictAction: 'overwrite'`：开写前删掉同名旧文件。
+     *
+     * 必须删掉而不是直接用：解析目标时会把已有字节数当成续传起点，
+     * 不删就会把新内容追加到旧文件尾部，拼出一个坏文件。
+     */
+    fun deleteExisting(context: Context, fileName: String, location: DownloadLocation) {
+        when (location) {
+            DownloadLocation.APP_PRIVATE ->
+                runCatching { File(privateDir(context), fileName).delete() }
+            DownloadLocation.PUBLIC_DOWNLOADS ->
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    mediaStoreId(context, fileName)?.let { id ->
+                        runCatching {
+                            context.contentResolver.delete(
+                                Uri.withAppendedPath(mediaStoreCollection(), id.toString()),
+                                null,
+                                null,
+                            )
+                        }
+                    }
+                } else {
+                    runCatching { File(publicDir(), fileName).delete() }
+                }
+        }
+    }
+
+    /** 用户通过 SAF 选定的目标（`GM_download` 的 `saveAs`）。 */
+    fun resolveUri(context: Context, uri: Uri): Target = UriTarget(context, uri)
+
+    private fun exists(context: Context, fileName: String, location: DownloadLocation): Boolean =
+        when (location) {
+            DownloadLocation.APP_PRIVATE -> File(privateDir(context), fileName).exists()
+            DownloadLocation.PUBLIC_DOWNLOADS ->
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    mediaStoreId(context, fileName) != null
+                } else {
+                    File(publicDir(), fileName).exists()
+                }
+        }
+
+    private fun privateDir(context: Context): File =
+        context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+            ?: File(context.filesDir, "downloads")
+
+    private fun publicDir(): File =
+        Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+
+    @RequiresApi(Build.VERSION_CODES.Q)
+    private fun mediaStoreCollection(): Uri =
+        MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+
+    @RequiresApi(Build.VERSION_CODES.Q)
+    private fun mediaStoreId(context: Context, fileName: String): Long? = runCatching {
+        context.contentResolver.query(
+            mediaStoreCollection(),
+            arrayOf(MediaStore.Downloads._ID),
+            "${MediaStore.Downloads.DISPLAY_NAME} = ?",
+            arrayOf(fileName),
+            null,
+        )?.use { c -> if (c.moveToFirst()) c.getLong(0) else null }
+    }.getOrNull()
+
     // -------------------------------------------------------------- 私有目录
 
     private fun resolvePrivate(context: Context, fileName: String): Target {
-        val dir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
-            ?: File(context.filesDir, "downloads")
+        val dir = privateDir(context)
         if (!dir.exists()) dir.mkdirs()
-        val file = File(dir, fileName)
-        return FileTarget(file)
+        return FileTarget(File(dir, fileName))
     }
 
     // -------------------------------------------------------------- 公共目录
@@ -89,21 +170,10 @@ object DownloadDestination {
     @RequiresApi(Build.VERSION_CODES.Q)
     private fun resolvePublicMediaStore(context: Context, fileName: String): Target? {
         val resolver = context.contentResolver
-        val collection = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        val collection = mediaStoreCollection()
 
         // 先查有没有同名文件（断点续传时复用）
-        val existing = runCatching {
-            resolver.query(
-                collection,
-                arrayOf(MediaStore.Downloads._ID),
-                "${MediaStore.Downloads.DISPLAY_NAME} = ?",
-                arrayOf(fileName),
-                null,
-            )?.use { c ->
-                if (c.moveToFirst()) c.getLong(c.getColumnIndexOrThrow(MediaStore.Downloads._ID))
-                else null
-            }
-        }.getOrNull()
+        val existing = mediaStoreId(context, fileName)
 
         val uri = if (existing != null) {
             Uri.withAppendedPath(collection, existing.toString())
@@ -125,7 +195,7 @@ object DownloadDestination {
      * 需要 WRITE_EXTERNAL_STORAGE 权限。调用方负责申请。
      */
     private fun resolvePublicLegacy(fileName: String): Target? {
-        val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+        val dir = publicDir()
         if (!dir.exists() && !dir.mkdirs()) return null
         return FileTarget(File(dir, fileName))
     }
@@ -223,7 +293,47 @@ object DownloadDestination {
             runCatching { context.contentResolver.delete(uri, null, null) }
         }
     }
+
+    /**
+     * 用户通过 SAF（`ACTION_CREATE_DOCUMENT`）选定的文档。
+     *
+     * 一律从头写：用户已经在系统对话框里确认过覆盖，`length()` 固定为 0 也就
+     * 不会触发 Range 续传 —— 对任意 provider 做跨进程续传没有可靠语义。
+     */
+    class UriTarget(
+        private val context: Context,
+        private val uri: Uri,
+    ) : Target {
+        override fun length(): Long = 0L
+
+        override fun outputStream(append: Boolean): OutputStream {
+            val resolver = context.contentResolver
+            // "wt" 会截断已有内容；个别 provider 不认这个模式，退回默认写模式。
+            return runCatching { resolver.openOutputStream(uri, "wt") }.getOrNull()
+                ?: resolver.openOutputStream(uri)
+                ?: throw java.io.IOException("无法写入所选文件")
+        }
+
+        override fun displayPath(): String = uri.toString()
+
+        override fun delete() {
+            runCatching {
+                android.provider.DocumentsContract.deleteDocument(context.contentResolver, uri)
+            }
+        }
+    }
 }
+
+/**
+ * 同名文件的处理策略，对应 `GM_download` 的 `conflictAction`。
+ *
+ * `prompt` 在移动端退化成 [UNIQUE]：弹一个"是否覆盖"的对话框打断自动化并不合适，
+ * 而默认覆盖会静默毁掉用户已有的文件。
+ */
+enum class ConflictAction { UNIQUE, OVERWRITE }
 
 /** `content://` URI 前缀，用于判断记录的落点是否是 MediaStore 目标。 */
 private const val CONTENT_SCHEME = "content://"
+
+/** `uniquify` 时最多尝试的序号，超过就退到时间戳，避免病态情况下死循环。 */
+private const val MAX_UNIQUE_TRIES = 100

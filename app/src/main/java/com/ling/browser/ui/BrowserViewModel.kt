@@ -40,6 +40,7 @@ import com.ling.browser.data.prefs.LingSettings
 import com.ling.browser.data.prefs.NightMode
 import com.ling.browser.data.prefs.ReaderFontSize
 import com.ling.browser.data.prefs.SearchEngine
+import com.ling.browser.download.ConflictAction
 import com.ling.browser.util.FaviconFetcher
 import com.ling.browser.util.UrlUtils
 import com.ling.browser.web.ConsoleEntry
@@ -64,6 +65,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -233,6 +235,8 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
         tabManager.onLongPress = { target ->
             _hitTarget.value = target
         }
+        // 脚本开的标签被用户关掉时，把 onclose 送回发起页。
+        tabManager.onTabClosed = { closedId -> notifyScriptTabClosed(closedId) }
 
         // 订阅名单（启用中的域名并集）变化时同步给 WebTabManager 的拦截 lambda。
         // 与设置同理：拦截发生在 shouldInterceptRequest 里现读，改完立即生效，
@@ -795,6 +799,16 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
     val pendingUserScript: StateFlow<String?> = _pendingUserScript.asStateFlow()
 
     /**
+     * `GM_download({ saveAs: true })` 等待用户挑保存位置。
+     *
+     * 非 null 时 UI 拉起系统文件选择器（`ACTION_CREATE_DOCUMENT`），结果通过
+     * [completeScriptSaveAs] 回传。同一时刻只允许一个：选择器是模态的，
+     * 叠两个请求会分不清结果属于谁。
+     */
+    private val _scriptSaveAs = MutableStateFlow<ScriptSaveAsRequest?>(null)
+    val scriptSaveAs: StateFlow<ScriptSaveAsRequest?> = _scriptSaveAs.asStateFlow()
+
+    /**
      * 「去申请存储权限」的信号，值只增不减。
      *
      * 当用户选择公共下载目录且系统是 Android 9 及以下时，下载前需要
@@ -907,8 +921,8 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
      */
     private fun enqueueDownload(req: PendingDownload) {
         viewModelScope.launch {
-            val ok = container.downloads.enqueue(req.url, req.fileName, req.mimeType)
-            _message.value = if (ok) "已开始下载" else "无法下载该文件"
+            val id = container.downloads.enqueue(req.url, req.fileName, req.mimeType)
+            _message.value = if (id != null) "已开始下载" else "无法下载该文件"
         }
     }
 
@@ -1224,12 +1238,31 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
     private val scriptRequests = HashMap<String, RunningScriptRequest>()
 
     /**
-     * `GM_openInTab` 打开的标签：requestId -> tabId。
+     * 一个由脚本打开的标签。
      *
-     * 只记原生自己开出去的，页面拿 requestId 调 `close()` 时才能映射回标签 ——
-     * 否则桥对象就成了"任意页面可关任意标签"的口子。
+     * [originTabId] 是发起 `GM_openInTab` 的那一页 —— `onclose` 回调要送回那里，
+     * 因为回调函数只存在于那个页面的 JS 环境里。`close()` 与 `onclose` 都只认
+     * 原生自己登记的 requestId，页面拿 id 关不掉别人的标签。
      */
-    private val scriptTabs = LinkedHashMap<String, String>()
+    private class ScriptTabHandle(
+        val tabId: String,
+        val originTabId: String,
+        val scriptId: String,
+        /** 脚本是否声明了 `onclose`；没有就不用留着簿记等关闭。 */
+        val notifyClose: Boolean,
+    )
+
+    /** `GM_openInTab`：requestId -> 打开出去的标签。 */
+    private val scriptTabs = LinkedHashMap<String, ScriptTabHandle>()
+
+    /** `GM_download`：requestId -> 下载任务，用于 abort 与终态去重。 */
+    private class ScriptDownloadHandle(
+        val id: Long,
+        val tabId: String,
+        val scriptId: String,
+    )
+
+    private val scriptDownloads = HashMap<String, ScriptDownloadHandle>()
 
     companion object {
         /** 同时进行的脚本请求上限：跨域请求不受 CORS 约束，需要自己兜一道。 */
@@ -1246,9 +1279,14 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
 
         /** `GM_notification` 的通知渠道与点击回传用的 extras。 */
         const val SCRIPT_CHANNEL_ID = "userscript"
+        const val SCRIPT_SILENT_CHANNEL_ID = "userscript_silent"
         const val EXTRA_SCRIPT_TAB = "ling.gm.tab"
         const val EXTRA_SCRIPT_ID = "ling.gm.script"
         const val EXTRA_SCRIPT_NOTICE = "ling.gm.notice"
+        const val EXTRA_SCRIPT_NOTICE_URL = "ling.gm.notice.url"
+
+        /** 通知大图的上限：超过就放弃，免得为一条通知冒 OOM 风险。 */
+        private const val MAX_NOTIFICATION_ICON_BYTES = 2 * 1024 * 1024
     }
 
     /**
@@ -1278,7 +1316,7 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
             "open" -> openScriptTab(tabId, scriptId, obj)
-            "tabClose" -> scriptTabs.remove(obj.optString("id"))?.let(tabManager::closeTab)
+            "tabClose" -> scriptTabs.remove(obj.optString("id"))?.let { tabManager.closeTab(it.tabId) }
             "del" -> {
                 val key = obj.optString("k")
                 viewModelScope.launch {
@@ -1288,12 +1326,23 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
             }
-            "clip" -> obj.optString("v").takeIf { it.isNotEmpty() }?.let { text ->
-                // 消息来自 UI 线程（WebMessageListener 的契约），可以直接碰剪贴板。
-                runCatching {
-                    getApplication<Application>()
-                        .getSystemService(ClipboardManager::class.java)
-                        ?.setPrimaryClip(ClipData.newPlainText("翎 · 用户脚本", text))
+            "clip" -> {
+                val text = obj.optString("v")
+                if (text.isNotEmpty()) {
+                    // type 缺省是纯文本；'html' / 'text/html' 走富文本剪贴板。
+                    val type = obj.optString("ty", "text")
+                    val html = type.equals("html", true) || type.contains("html", true)
+                    // 消息来自 UI 线程（WebMessageListener 的契约），可以直接碰剪贴板。
+                    runCatching {
+                        val ctx = getApplication<Application>()
+                        val clip = if (html) {
+                            ClipData.newHtmlText("翎 · 用户脚本", text, text)
+                        } else {
+                            ClipData.newPlainText("翎 · 用户脚本", text)
+                        }
+                        ctx.getSystemService(ClipboardManager::class.java)
+                            ?.setPrimaryClip(clip)
+                    }
                 }
             }
             "menu" -> tabManager.registerUserScriptMenu(
@@ -1301,12 +1350,14 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
                 scriptId,
                 obj.optString("id"),
                 obj.optString("n"),
+                obj.optString("ak"),
             )
             "menuDel" -> tabManager.unregisterUserScriptMenu(tabId, scriptId, obj.optString("id"))
             "notice" -> postUserScriptNotification(tabId, scriptId, obj)
             "xhr" -> startScriptRequest(tabId, scriptId, obj)
             "xa" -> abortScriptRequest(obj.optString("id"))
             "dl" -> startScriptDownload(tabId, scriptId, obj)
+            "dlAbort" -> abortScriptDownload(obj.optString("id"))
         }
     }
 
@@ -1326,8 +1377,45 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
      * [MainActivity] 从 PendingIntent 的 extras 里读出三个 id 后调用这里。
      * 标签页已经关闭或页面已导航时静默丢弃 —— 回调函数早就没了。
      */
-    fun onUserScriptNotificationClick(tabId: String, scriptId: String, notificationId: String) {
+    fun onUserScriptNotificationClick(
+        tabId: String,
+        scriptId: String,
+        notificationId: String,
+        url: String? = null,
+    ) {
+        // details.url 表示"点通知就打开这个地址"；没有 url 才是纯回调。
+        if (!url.isNullOrBlank()) {
+            val scheme = runCatching { Uri.parse(url).scheme?.lowercase(Locale.ROOT) }.getOrNull()
+            if (scheme == "http" || scheme == "https") {
+                val incognito = tabManager.tabs.value.firstOrNull { it.id == tabId }?.isIncognito == true
+                tabManager.newTab(url, incognito = incognito, select = true)
+            }
+        }
         tabManager.dispatchUserScriptNotificationClick(tabId, scriptId, notificationId)
+        tabManager.dispatchUserScriptNotificationDone(tabId, scriptId, notificationId)
+    }
+
+    /**
+     * 脚本开的标签被关闭：把 `onclose` 送回发起页，并清掉簿记。
+     *
+     * 脚本自己调 `close()` 时映射已被提前摘除，这里查不到 —— 符合 Tampermonkey
+     * 的语义（自己关掉不算"被动关闭"）。
+     */
+    private fun notifyScriptTabClosed(closedTabId: String) {
+        val stale = scriptTabs.filterValues { it.tabId == closedTabId }
+        if (stale.isEmpty()) return
+        for ((requestId, handle) in stale) {
+            scriptTabs.remove(requestId)
+            if (handle.notifyClose) {
+                deliverScriptEvent(
+                    handle.originTabId,
+                    handle.scriptId,
+                    requestId,
+                    "close",
+                    JSONObject().put("tabId", closedTabId),
+                )
+            }
+        }
     }
 
     /**
@@ -1350,13 +1438,27 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
             }
             return
         }
+        // insert：0 = 末尾（默认），1 = 当前标签之后，>1 按 1 起算的位置。
+        val insert = details.optInt("ins", 0)
+        val originIndex = tabManager.tabs.value.indexOfFirst { it.id == tabId }
+        val position = when {
+            insert == 1 && originIndex >= 0 -> originIndex + 1
+            insert > 1 -> insert - 1
+            else -> null
+        }
         val tab = tabManager.newTab(
             url = url,
             incognito = details.optBoolean("inc", false),
             select = details.optBoolean("active", true),
+            position = position,
         )
         if (requestId.isEmpty()) return
-        scriptTabs[requestId] = tab.id
+        scriptTabs[requestId] = ScriptTabHandle(
+            tabId = tab.id,
+            originTabId = tabId,
+            scriptId = scriptId,
+            notifyClose = details.optBoolean("oc", false),
+        )
         while (scriptTabs.size > MAX_SCRIPT_TABS) scriptTabs.remove(scriptTabs.keys.first())
         deliverScriptEvent(tabId, scriptId, requestId, "load", JSONObject().put("tabId", tab.id))
     }
@@ -1391,10 +1493,12 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
         // 通知 id 只在单个脚本内自增，不同脚本会撞成同一个 "n1"；
         // 拼上脚本 id 再取哈希，才能让 PendingIntent 与通知槽互不覆盖。
         val notifyId = "$scriptId|$notificationId".hashCode()
+        val clickUrl = details.optString("u")
         val intent = Intent(ctx, MainActivity::class.java).apply {
             putExtra(EXTRA_SCRIPT_TAB, tabId)
             putExtra(EXTRA_SCRIPT_ID, scriptId)
             putExtra(EXTRA_SCRIPT_NOTICE, notificationId)
+            if (clickUrl.isNotBlank()) putExtra(EXTRA_SCRIPT_NOTICE_URL, clickUrl)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
         }
         val pending = PendingIntent.getActivity(
@@ -1403,34 +1507,103 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
             intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val notification = NotificationCompat.Builder(ctx, SCRIPT_CHANNEL_ID)
+        // 静默必须换一个低优先级渠道：Android 8+ 的提示音由渠道决定，
+        // 单靠 setSilent 在默认渠道上压不住声音。
+        val silent = details.optBoolean("silent", false)
+        val channel = if (silent) SCRIPT_SILENT_CHANNEL_ID else SCRIPT_CHANNEL_ID
+        val builder = NotificationCompat.Builder(ctx, channel)
             .setSmallIcon(R.drawable.ic_download)
             .setContentTitle(title)
             .setContentText(text)
             .setStyle(NotificationCompat.BigTextStyle().bigText(text))
             .setAutoCancel(true)
             .setContentIntent(pending)
-            .build()
-        runCatching {
-            NotificationManagerCompat.from(ctx).notify(notifyId, notification)
-        }.onFailure {
-            Toast.makeText(ctx, "$title：$text", Toast.LENGTH_LONG).show()
+        // timeout：到点自动收起，脚本不用自己记着删。
+        details.optLong("to", 0L).takeIf { it > 0 }?.let { builder.setTimeoutAfter(it) }
+        if (silent) builder.setSilent(true)
+
+        fun show(b: NotificationCompat.Builder) {
+            runCatching {
+                NotificationManagerCompat.from(ctx).notify(notifyId, b.build())
+            }.onFailure {
+                Toast.makeText(ctx, "$title：$text", Toast.LENGTH_LONG).show()
+            }
+        }
+        show(builder)
+
+        // image 是网络地址（少数脚本用 data: URL）：先发文字版，图解码好再原地替换，
+        // 避免网络慢时整条通知都不出现。
+        val imageUrl = details.optString("img")
+        if (imageUrl.isNotBlank()) {
+            viewModelScope.launch {
+                val icon = loadNotificationImage(imageUrl) ?: return@launch
+                show(builder.setLargeIcon(icon))
+            }
         }
     }
+
+    /**
+     * 拉取 `GM_notification` 的图片。
+     *
+     * 上限 2 MiB：解码整张图很吃内存，不值得为一条通知冒 OOM 的险；
+     * 超限就当没有图，通知照常显示。
+     */
+    private suspend fun loadNotificationImage(raw: String): android.graphics.Bitmap? =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val bytes = if (raw.startsWith("data:", ignoreCase = true)) {
+                    val comma = raw.indexOf(',')
+                    if (comma < 0) return@runCatching null
+                    android.util.Base64.decode(raw.substring(comma + 1), android.util.Base64.DEFAULT)
+                } else {
+                    val conn = java.net.URL(raw).openConnection()
+                    conn.connectTimeout = 5_000
+                    conn.readTimeout = 5_000
+                    conn.getInputStream().use { input ->
+                        val out = ByteArrayOutputStream()
+                        val buf = ByteArray(8192)
+                        while (true) {
+                            val n = input.read(buf)
+                            if (n < 0) break
+                            if (out.size() + n > MAX_NOTIFICATION_ICON_BYTES) return@use null
+                            out.write(buf, 0, n)
+                        }
+                        out.toByteArray()
+                    }
+                } ?: return@runCatching null
+                if (bytes.size > MAX_NOTIFICATION_ICON_BYTES) return@runCatching null
+                android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            }.getOrNull()
+        }
 
     private fun ensureUserScriptChannel(ctx: Application) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val nm = ctx.getSystemService(NotificationManager::class.java) ?: return
-        if (nm.getNotificationChannel(SCRIPT_CHANNEL_ID) != null) return
-        nm.createNotificationChannel(
-            NotificationChannel(
-                SCRIPT_CHANNEL_ID,
-                "用户脚本通知",
-                NotificationManager.IMPORTANCE_DEFAULT,
-            ).apply {
-                description = "由 GM_notification 发出的通知"
-            },
-        )
+        if (nm.getNotificationChannel(SCRIPT_CHANNEL_ID) == null) {
+            nm.createNotificationChannel(
+                NotificationChannel(
+                    SCRIPT_CHANNEL_ID,
+                    "用户脚本通知",
+                    NotificationManager.IMPORTANCE_DEFAULT,
+                ).apply {
+                    description = "由 GM_notification 发出的通知"
+                },
+            )
+        }
+        // 静默通知单独一个低优先级渠道：IMPORTANCE_LOW 才真的不响铃、不弹横幅。
+        if (nm.getNotificationChannel(SCRIPT_SILENT_CHANNEL_ID) == null) {
+            nm.createNotificationChannel(
+                NotificationChannel(
+                    SCRIPT_SILENT_CHANNEL_ID,
+                    "用户脚本静默通知",
+                    NotificationManager.IMPORTANCE_LOW,
+                ).apply {
+                    description = "GM_notification({ silent: true }) 发出的通知"
+                    setSound(null, null)
+                    enableVibration(false)
+                },
+            )
+        }
     }
 
     /**
@@ -1604,17 +1777,190 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
             .substringAfterLast('/')
             .trim()
             .takeIf { it.isNotEmpty() }
+        val headers = LinkedHashMap<String, String>()
+        details.optJSONObject("h")?.let { h ->
+            for (key in h.keys()) headers[key] = h.optString(key)
+        }
+        // Tampermonkey 的缺省是 uniquify；'prompt' 在移动端也按 uniquify 处理
+        // （不弹"是否覆盖"打断自动化，也绝不静默覆盖用户文件）。
+        val conflict = when (details.optString("ca").lowercase(Locale.ROOT)) {
+            "overwrite" -> ConflictAction.OVERWRITE
+            else -> ConflictAction.UNIQUE
+        }
+        val request = ScriptSaveAsRequest(
+            requestId = requestId,
+            url = url,
+            fileName = fileName,
+            tabId = tabId,
+            scriptId = scriptId,
+            headers = headers,
+            conflict = conflict,
+        )
+        if (details.optBoolean("sa", false)) {
+            // saveAs：先让用户挑位置，拿到 URI 再从 completeScriptSaveAs 入队。
+            if (_scriptSaveAs.value != null) {
+                fail("已有保存请求进行中")
+                return
+            }
+            _scriptSaveAs.value = request
+            return
+        }
+        enqueueScriptDownload(request, targetUri = null)
+    }
+
+    /**
+     * 系统文件选择器返回后继续入队；[uri] 为 null 表示用户取消。
+     *
+     * 取消也要回 `onerror`：脚本那边正 await 这个下载，不回调就会一直挂着。
+     */
+    fun completeScriptSaveAs(uri: Uri?) {
+        val request = _scriptSaveAs.value ?: return
+        _scriptSaveAs.value = null
+        if (uri == null) {
+            deliverScriptEvent(
+                request.tabId, request.scriptId, request.requestId, "error",
+                scriptFailurePayload("已取消保存"),
+            )
+            return
+        }
+        enqueueScriptDownload(request, targetUri = uri.toString())
+    }
+
+    /** 把一次 `GM_download` 交给下载队列，并开始跟踪它的生命周期。 */
+    private fun enqueueScriptDownload(request: ScriptSaveAsRequest, targetUri: String?) {
         maybeRequestNotificationPermission()
         viewModelScope.launch {
-            val ok = withContext(Dispatchers.IO) { container.downloads.enqueue(url, fileName, null) }
-            if (ok) {
-                deliverScriptEvent(
-                    tabId, scriptId, requestId, "load",
-                    JSONObject().put("finalUrl", url).put("downloadId", ""),
+            val id = withContext(Dispatchers.IO) {
+                container.downloads.enqueue(
+                    request.url, request.fileName, null, request.headers,
+                    targetUri, request.conflict,
                 )
-            } else {
-                fail("无法下载该文件")
+            } ?: run {
+                deliverScriptEvent(
+                    request.tabId, request.scriptId, request.requestId, "error",
+                    scriptFailurePayload("无法下载该文件"),
+                )
+                return@launch
             }
+            scriptDownloads[request.requestId] = ScriptDownloadHandle(id, request.tabId, request.scriptId)
+            trackScriptDownload(request.requestId, id, request.url, request.tabId, request.scriptId)
+        }
+    }
+
+    /**
+     * 跟踪一次 `GM_download` 的生命周期。
+     *
+     * [com.ling.browser.data.repo.DownloadRepository.downloads] 已经汇总了内建引擎与
+     * 系统下载器的进度，这里只用轮询把「进度 / 成功 / 失败」翻译成页面里的回调：
+     *  - 成功：`onload`（此时文件真的下完了，而不是入队成功）；
+     *  - 失败或被取消：`onerror`；
+     *  - 进行中：`onprogress`。
+     */
+    private suspend fun trackScriptDownload(
+        requestId: String,
+        downloadId: Long,
+        url: String,
+        tabId: String,
+        scriptId: String,
+    ) {
+        var lastBytes = -1L
+        var missingSince = 0L
+        var ticks = 0
+        while (true) {
+            // 已被 abort：映射被摘掉，静默退出（abort 自己发过回调了）。
+            if (scriptDownloads[requestId]?.id != downloadId) return
+            // 系统下载器的进度靠回查，隔几秒刷一次即可，没必要每秒查全表。
+            if (ticks++ % 3 == 1) {
+                withContext(Dispatchers.IO) { container.downloads.refresh() }
+            }
+            val entry = container.downloads.downloads.value.firstOrNull { it.downloadId == downloadId }
+            if (entry == null) {
+                // 刚入队时流里可能还没这条；连续 3 秒都找不到才当作用户在下载列表里删掉了。
+                val now = System.currentTimeMillis()
+                if (missingSince == 0L) {
+                    missingSince = now
+                } else if (now - missingSince > 3_000) {
+                    scriptDownloads.remove(requestId)
+                    deliverScriptEvent(
+                        tabId, scriptId, requestId, "error",
+                        scriptFailurePayload("下载已取消"),
+                    )
+                    return
+                }
+            } else {
+                missingSince = 0L
+                when (entry.status) {
+                    com.ling.browser.data.db.DownloadStatus.SUCCESS -> {
+                        scriptDownloads.remove(requestId)
+                        // 补一条终态进度：小文件常在两次轮询之间就下完了，
+                        // 只发 load 会让脚本的进度条永远停在 0。Tampermonkey 的
+                        // onprogress 末次也是 loaded === total。
+                        val total = entry.totalBytes
+                        if (total > 0 && lastBytes < total) {
+                            deliverScriptEvent(
+                                tabId, scriptId, requestId, "progress",
+                                JSONObject()
+                                    .put("loaded", total)
+                                    .put("total", total)
+                                    .put("lengthComputable", true),
+                            )
+                        }
+                        deliverScriptEvent(
+                            tabId, scriptId, requestId, "load",
+                            JSONObject()
+                                .put("finalUrl", url)
+                                .put("downloadId", downloadId.toString())
+                                .put("name", entry.fileName),
+                        )
+                        return
+                    }
+                    com.ling.browser.data.db.DownloadStatus.FAILED -> {
+                        scriptDownloads.remove(requestId)
+                        deliverScriptEvent(
+                            tabId, scriptId, requestId, "error",
+                            scriptFailurePayload("下载失败"),
+                        )
+                        return
+                    }
+                    else -> {
+                        val loaded = entry.downloadedBytes
+                        if (loaded != lastBytes) {
+                            if (lastBytes < 0 || loaded - lastBytes >= PROGRESS_STEP_BYTES || loaded == entry.totalBytes) {
+                                lastBytes = loaded
+                                deliverScriptEvent(
+                                    tabId, scriptId, requestId, "progress",
+                                    JSONObject()
+                                        .put("loaded", loaded)
+                                        .put("total", entry.totalBytes)
+                                        .put("lengthComputable", entry.totalBytes > 0),
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+            delay(1_000)
+        }
+    }
+
+    /**
+     * `GM_download` 返回句柄的 `abort()`。
+     *
+     * 先把映射摘掉再去取消：跟踪协程看到映射没了就会退出，避免它再补一条 error
+     * 与这里的回调重复。
+     */
+    private fun abortScriptDownload(requestId: String) {
+        val handle = scriptDownloads.remove(requestId) ?: return
+        viewModelScope.launch {
+            val entry = container.downloads.downloads.value
+                .firstOrNull { it.downloadId == handle.id }
+            if (entry != null) {
+                withContext(Dispatchers.IO) { container.downloads.cancel(entry) }
+            }
+            deliverScriptEvent(
+                handle.tabId, handle.scriptId, requestId, "error",
+                scriptFailurePayload("已取消"),
+            )
         }
     }
 
@@ -1960,6 +2306,22 @@ data class PendingDownload(
     val mimeType: String?,
     val sizeBytes: Long?,
     val probing: Boolean,
+)
+
+/**
+ * 一次等待用户挑保存位置的 `GM_download({ saveAs: true })`。
+ *
+ * [conflict] 在用户挑完位置后仍要带进队列：SAF 目标由用户确认，
+ * 但下载记录、abort、onprogress 都还走同一条队列。
+ */
+data class ScriptSaveAsRequest(
+    val requestId: String,
+    val url: String,
+    val fileName: String?,
+    val tabId: String,
+    val scriptId: String,
+    val headers: Map<String, String>,
+    val conflict: ConflictAction,
 )
 
 /** 大小探测超时。设短一些：探测只是锦上添花，不该让确认框卡着不显示。 */

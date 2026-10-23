@@ -145,11 +145,13 @@ class MainActivity : ComponentActivity() {
         val tabId = incoming.getStringExtra(BrowserViewModel.EXTRA_SCRIPT_TAB) ?: return
         val scriptId = incoming.getStringExtra(BrowserViewModel.EXTRA_SCRIPT_ID) ?: return
         val noticeId = incoming.getStringExtra(BrowserViewModel.EXTRA_SCRIPT_NOTICE) ?: return
+        val url = incoming.getStringExtra(BrowserViewModel.EXTRA_SCRIPT_NOTICE_URL)
         // 消费掉，避免 Activity 因配置变化重建时把同一次点击再回放一遍。
         incoming.removeExtra(BrowserViewModel.EXTRA_SCRIPT_TAB)
         incoming.removeExtra(BrowserViewModel.EXTRA_SCRIPT_ID)
         incoming.removeExtra(BrowserViewModel.EXTRA_SCRIPT_NOTICE)
-        browserViewModel.onUserScriptNotificationClick(tabId, scriptId, noticeId)
+        incoming.removeExtra(BrowserViewModel.EXTRA_SCRIPT_NOTICE_URL)
+        browserViewModel.onUserScriptNotificationClick(tabId, scriptId, noticeId, url)
     }
 
     /**

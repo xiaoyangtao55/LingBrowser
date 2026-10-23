@@ -424,6 +424,11 @@ internal fun scriptWrapper(
         append("(function(){try{")
         append("var u=location;")
         append("if(u.protocol!=='http:'&&u.protocol!=='https:')return;")
+        // 主页 / 阅读视图是用假 https 地址承载的内部页（见 [HomePage.BASE_URL] /
+        // [ReaderPage.BASE_URL]）。`@match *://*/*` 会把它们一并圈进去，但内部页
+        // 不是网页，不该跑用户脚本 —— 原生侧对 END 注入有同样的排除，这里补上
+        // document-start 这条没有二次校验的路径。
+        append("if(u.hostname==='home.ling.invalid'||u.hostname==='reader.ling.invalid')return;")
         append("var href=u.protocol+'//'+u.hostname.toLowerCase()+u.pathname+u.search;")
         append("var inc=")
         append(script.includes.joinToString("||") { "new RegExp(${jsString(it.source)}).test(href)" })
@@ -434,6 +439,12 @@ internal fun scriptWrapper(
             append(";if(exc)return;")
         }
         if (script.noFrames) append("if(window.top!==window.self)return;")
+        // 同一文档内只跑一次。document-start 注册可能没挂上（脚本是页面打开之后
+        // 才导入的，或注册被系统拒绝），原生侧会在 END 补一次探测式注入；
+        // 这个标记让"补注入"与"注册成功"竞争时也不会被执行两遍。
+        append("window.__lingGMInjected=window.__lingGMInjected||{};")
+        append("if(window.__lingGMInjected[").append(jsString(scriptId)).append("])return;")
+        append("window.__lingGMInjected[").append(jsString(scriptId)).append("]=1;")
         append("var V=").append(valuesJson.takeIf { it.isNotBlank() } ?: "{}").append(";")
         append("var RES=").append(resourcesJson.takeIf { it.isNotBlank() } ?: "{}").append(";")
         append(gmPrelude(script, scriptId))
@@ -491,7 +502,9 @@ private fun gmPrelude(script: UserScript, scriptId: String): String {
         append("var CB={};window.__lingGMCB=window.__lingGMCB||{};window.__lingGMCB[SID]=CB;")
         append("window.__lingGMDispatch=window.__lingGMDispatch||function(s,i,e,p){")
         append("var m=window.__lingGMCB&&window.__lingGMCB[s];")
-        append("if(m&&m[i]){try{m[i](e,p)}catch(x){}}}")
+        // 末尾的分号不能省：下一段是 `function GM_log(){…}`，同一行内没有分号时
+        // 解析器会把 function 当成表达式的延续，整段注入直接 SyntaxError。
+        append("if(m&&m[i]){try{m[i](e,p)}catch(x){}}};")
         append("function GM_log(){try{console.log.apply(console,['[翎]'].concat([].slice.call(arguments)))}catch(e){}}")
         append("function GM_addStyle(css){var s=document.createElement('style');s.textContent=css;")
         append("(document.head||document.documentElement).appendChild(s);return s}")
@@ -530,8 +543,13 @@ private fun gmPrelude(script: UserScript, scriptId: String): String {
         // 菜单与通知不按 grant 收敛：不少脚本不写 @grant 也在用，缺了会直接
         // ReferenceError；两者都只是转发一个消息，没有额外的系统能力。
         append("var MC={},MCn=0;")
-        append("function GM_registerMenuCommand(n,f){var id='m'+(++MCn);MC[id]=f;")
-        append("post({t:'menu',id:id,n:String(n)});return id}")
+        // 第三个参数是 Tampermonkey 的 options（`{ accessKey }`），老实现也有直接传
+        // 一个按键字符的写法；两种都认，取最后一个 '-' 之后的单个字符。
+        append("function GM_registerMenuCommand(n,f,o){var id='m'+(++MCn);MC[id]=f;var ak='';")
+        append("if(typeof o==='string'||typeof o==='number')ak=String(o);")
+        append("else if(o&&typeof o==='object'&&o.accessKey!=null)ak=String(o.accessKey);")
+        append("var m=/^([a-z0-9])$/i.exec(ak.replace(/^.*-/,''));")
+        append("post({t:'menu',id:id,n:String(n),ak:m?m[1].toUpperCase():''});return id}")
         append("function GM_unregisterMenuCommand(id){id=String(id);try{delete MC[id]}catch(e){}")
         append("post({t:'menuDel',id:id})}")
         append("window.__lingGMMenuMap=window.__lingGMMenuMap||{};window.__lingGMMenuMap[SID]=MC;")
@@ -540,38 +558,64 @@ private fun gmPrelude(script: UserScript, scriptId: String): String {
         append("if(f){try{f()}catch(e){try{console.error(e)}catch(_){}}}};")
         append("var NT={},NTn=0;")
         append("window.__lingGMNoticeMap=window.__lingGMNoticeMap||{};window.__lingGMNoticeMap[SID]=NT;")
-        append("window.__lingGMNotice=window.__lingGMNotice||function(s,id){")
-        append("var m=window.__lingGMNoticeMap&&window.__lingGMNoticeMap[s];var f=m&&m[id];")
-        append("if(f){try{f()}catch(e){}}};")
+        // ev 为 'done' 时调 ondone，其余按点击处理。老版只存裸函数，这里一并兼容。
+        append("window.__lingGMNotice=window.__lingGMNotice||function(s,id,ev){")
+        append("var m=window.__lingGMNoticeMap&&window.__lingGMNoticeMap[s];var e=m&&m[id];")
+        append("if(!e)return;")
+        append("var f=typeof e==='function'?e:(ev==='done'?e.done:e.click);")
+        append("if(typeof f==='function'){try{f({id:id,done:ev==='done'})}catch(x){}}};")
         append("function GM_notification(d,t,img,oc){")
-        append("if(typeof d==='string'){d={text:d,title:t,onclick:typeof img==='function'?img:oc}}")
+        append("if(typeof d==='string'){d={text:d,title:t,image:typeof img==='string'?img:undefined,")
+        append("onclick:typeof img==='function'?img:oc}}")
         append("d=d||{};var id='n'+(++NTn);")
-        append("if(typeof d.onclick==='function')NT[id]=d.onclick;")
-        append("post({t:'notice',id:id,title:String(d.title||''),text:String(d.text||d.body||''),u:String(d.url||'')});")
+        append("if(typeof d.onclick==='function'||typeof d.ondone==='function')")
+        append("NT[id]={click:d.onclick,done:d.ondone};")
+        append("post({t:'notice',id:id,title:String(d.title||''),text:String(d.text||d.body||''),")
+        append("u:String(d.url||''),img:String(d.image||''),to:Number(d.timeout)||0,silent:!!d.silent});")
         append("return id}")
         if (granted("GM_openInTab")) {
-            // 兼容三种调用：字符串、字符串 + 布尔（新标签是否后台）、对象。
-            append("function GM_openInTab(u,o){var d=typeof u==='string'?{url:u}:(u||{});")
-            append("if(typeof o==='boolean')o={active:!o};o=o||{};")
-            append("var act=d.active!==undefined?d.active:o.active;")
-            append("var inc=d.incognito!==undefined?d.incognito:o.incognito;")
+            // 三种调用都要认：
+            //   GM_openInTab(url)                       → 前台打开
+            //   GM_openInTab(url, true)                 → 后台打开（老写法）
+            //   GM_openInTab(url, {onload, insert, …})  → 选项在**第二个参数**上
+            // 选项在 `o` 里时不能只读 active/incognito：onload / onclose / insert
+            // 都只写在 `o` 上，漏掉会让回调永远不触发。
+            append("function GM_openInTab(u,o){var d=null;")
+            append("if(typeof u==='string'){")
+            append("if(typeof o==='boolean'){d={active:!o}}")
+            append("else if(o&&typeof o==='object'){d={};for(var k in o)d[k]=o[k]}")
+            append("else{d={}}")
+            append("d.url=u")
+            append("}else{d=(u||{});if(typeof o==='boolean')o={active:!o};o=o||{};")
+            append("if(d.active===undefined)d.active=o.active;")
+            append("if(d.incognito===undefined)d.incognito=o.incognito}")
+            append("var act=d.active;var inc=d.incognito;var ins=d.insert;")
             append("var i='o'+Date.now().toString(36)+Math.random().toString(36).slice(2);")
-            append("CB[i]=function(e,p){if(e==='load'&&typeof d.onload==='function'){try{d.onload(p)}catch(x){}}};\n")
-            append("post({t:'open',id:i,u:String(d.url||''),active:act!==false,inc:!!inc});")
+            append("CB[i]=function(e,p){")
+            append("if(e==='load'&&typeof d.onload==='function'){try{d.onload(p)}catch(x){}}")
+            append("else if(e==='close'&&typeof d.onclose==='function'){try{d.onclose(p)}catch(x){}}};")
+            append("post({t:'open',id:i,u:String(d.url||''),active:act!==false,inc:!!inc,")
+            append("ins:typeof ins==='number'?ins:(ins===true?1:0),oc:typeof d.onclose==='function'});")
             // handle.close()：原生只认自己发出去的 id，页面无法借它关别人的标签。
             append("return{close:function(){post({t:'tabClose',id:i})}}}")
         }
         if (granted("GM_setClipboard")) {
-            append("function GM_setClipboard(t){post({t:'clip',v:String(t)})}")
+            append("function GM_setClipboard(t,ty){")
+            append("post({t:'clip',v:String(t),ty:String(ty||'text')})}")
         }
         if (granted("GM_download")) {
-            // 下载直接复用原生下载队列；onload 在入队成功后触发。
+            // 下载复用原生下载队列；load / error / progress 由原生按任务状态回推。
             append("function GM_download(a,b){var d=typeof a==='string'?{url:a,name:b}:(a||{});")
             append("d=d||{};var i='d'+Date.now().toString(36)+Math.random().toString(36).slice(2);")
             append("CB[i]=function(e,p){")
             append("if(e==='load'){if(typeof d.onload==='function'){try{d.onload(p)}catch(x){}}}")
-            append("else if(e==='error'){if(typeof d.onerror==='function'){try{d.onerror(p)}catch(x){}}}};\n")
-            append("post({t:'dl',id:i,u:String(d.url||''),n:String(d.name||'')})}")
+            append("else if(e==='error'){if(typeof d.onerror==='function'){try{d.onerror(p)}catch(x){}}}")
+            append("else if(e==='progress'){if(typeof d.onprogress==='function'){try{d.onprogress(p)}catch(x){}}}};\n")
+            append("post({t:'dl',id:i,u:String(d.url||''),n:String(d.name||''),h:d.headers||{},")
+            // saveAs → 原生弹系统文件选择器；conflictAction 只透传，由原生按
+            // uniquify / overwrite 处理（prompt 在移动端退化成 uniquify）。
+            append("sa:!!d.saveAs,ca:String(d.conflictAction||'')});")
+            append("return{abort:function(){post({t:'dlAbort',id:i})}}}")
         }
         if (granted("GM_getResourceText") || granted("GM_getResourceURL")) {
             // 资源在导入时已经抓成 base64 并随注入带进来，这里纯前端解码即可。
@@ -584,20 +628,33 @@ private fun gmPrelude(script: UserScript, scriptId: String): String {
         }
         if (granted("GM_xmlhttpRequest")) {
             append("function GM_xmlhttpRequest(d){d=d||{};")
+            // Tampermonkey 的老写法用 binary:true 表示要 ArrayBuffer，等价于 responseType。
+            append("if(d.binary&&!d.responseType)d.responseType='arraybuffer';")
             append("var i='r'+Date.now().toString(36)+Math.random().toString(36).slice(2);")
             append("CB[i]=function(e,p){")
+            // context 决定回调里的 this，不少脚本靠它拿回自己的状态对象。
+            append("var c=d.context||d;")
+            append("function call(f){if(typeof f==='function'){try{f.call(c,p)}catch(x){}}}")
             append("if(e==='load'){if(d.responseType==='arraybuffer'||d.responseType==='blob'){")
             // 二进制响应体在原生侧转成 base64 过桥，这里解回 ArrayBuffer / Blob。
             append("try{var bb=atob(p.responseBase64||''),aa=new Uint8Array(bb.length);")
             append("for(var bi=0;bi<bb.length;bi++)aa[bi]=bb.charCodeAt(bi);")
-            append("p.response=d.responseType==='blob'?new Blob([aa]):aa.buffer}catch(x){p.response=null}}")
+            // Blob.type 取自响应头 Content-Type：脚本常用它判断"拿到的是不是图片"，
+            // 留空会让 `blob.type.startsWith('image/')` 这类判断全部落空。
+            append("var ct='';var mt=/content-type:\\s*([^\\r\\n;]+)/i.exec(String(p.responseHeaders||''));")
+            append("if(mt)ct=mt[1].trim();")
+            append("p.response=d.responseType==='blob'?new Blob([aa],{type:ct}):aa.buffer}catch(x){p.response=null}}")
             append("else if(d.responseType==='json'){try{p.response=JSON.parse(p.responseText)}catch(x){p.response=null}}")
-            append("if(d.onreadystatechange){try{d.onreadystatechange(p)}catch(x){}}if(d.onload){d.onload(p)}}")
-            append("else if(e==='error'){if(d.onreadystatechange){try{d.onreadystatechange(p)}catch(x){}}")
-            append("if(d.onerror){d.onerror(p)}}")
-            append("else if(e==='timeout'){if(d.ontimeout){d.ontimeout(p)}}")
-            append("else if(e==='abort'){if(d.onabort){d.onabort(p)}}")
-            append("else if(e==='progress'){if(d.onprogress){d.onprogress(p)}}};")
+            append("call(d.onreadystatechange);call(d.onload)}")
+            append("else if(e==='error'){call(d.onreadystatechange);call(d.onerror)}")
+            append("else if(e==='timeout'){call(d.ontimeout)}")
+            append("else if(e==='abort'){call(d.onabort)}")
+            append("else if(e==='progress'){call(d.onprogress)}")
+            // loadend 是"请求结束"的统一收尾点（成功/失败/超时/取消都算），progress 除外。
+            append("if(e!=='progress')call(d.onloadend)};")
+            // onloadstart 在这里同步触发，拿不到 CB 里的 `c`，要重算一次 context。
+            append("if(typeof d.onloadstart==='function'){try{d.onloadstart.call(d.context||d,")
+            append("{readyState:1,status:0,statusText:'',responseText:'',response:null})}catch(x){}}")
             append("post({t:'xhr',id:i,m:String(d.method||'GET').toUpperCase(),u:String(d.url||''),")
             append("h:d.headers||{},d:typeof d.data==='undefined'?null:d.data,to:d.timeout||0,rt:d.responseType||''});")
             append("return{abort:function(){post({t:'xa',id:i})}}}")
@@ -617,23 +674,26 @@ private fun gmPrelude(script: UserScript, scriptId: String): String {
                 append("GM.addValueChangeListener=function(k,f){return GM_addValueChangeListener(k,f)};")
                 append("GM.removeValueChangeListener=function(id){GM_removeValueChangeListener(id)};")
             }
-            append("GM.registerMenuCommand=function(n,f){return GM_registerMenuCommand(n,f)};")
+            append("GM.registerMenuCommand=function(n,f,o){return GM_registerMenuCommand(n,f,o)};")
             append("GM.unregisterMenuCommand=function(id){GM_unregisterMenuCommand(id)};")
-            append("GM.notification=function(d,t,img,oc){return GM_notification(d,t,img,oc)};")
+            append("GM.notification=function(d,t,img,oc){")
+            append("return Promise.resolve(GM_notification(d,t,img,oc))};")
             if (granted("GM_openInTab")) {
                 append("GM.openInTab=function(u,o){return GM_openInTab(u,o)};")
             }
             if (granted("GM_setClipboard")) {
-                append("GM.setClipboard=function(t){GM_setClipboard(t)};")
+                append("GM.setClipboard=function(t,ty){GM_setClipboard(t,ty)};")
             }
             if (granted("GM_download")) {
                 // Promise 版把回调错误转成 reject；用户自己的 onload/onerror 仍会先执行。
-                append("GM.download=function(a,b){return new Promise(function(res,rej){")
+                // 返回的 Promise 额外带 abort，与 Tampermonkey 的句柄一致。
+                append("GM.download=function(a,b){var h=null;var p=new Promise(function(res,rej){")
                 append("var d=typeof a==='string'?{url:a,name:b}:(a||{});")
                 append("var sl=d.onload,el=d.onerror;")
                 append("d.onload=function(p){if(sl){try{sl(p)}catch(x){}}res(p)};")
                 append("d.onerror=function(p){if(el){try{el(p)}catch(x){}}rej(p)};")
-                append("GM_download(d)})};")
+                append("h=GM_download(d)});")
+                append("p.abort=function(){if(h)h.abort()};return p};")
             }
             if (granted("GM_getResourceText") || granted("GM_getResourceURL")) {
                 append("GM.getResourceText=function(n){return Promise.resolve(GM_getResourceText(n))};")
@@ -642,8 +702,8 @@ private fun gmPrelude(script: UserScript, scriptId: String): String {
             if (granted("GM_xmlhttpRequest")) {
                 append("GM.xmlHttpRequest=function(d){return new Promise(function(res,rej){")
                 append("d=d||{};var sl=d.onload,el=d.onerror;")
-                append("d.onload=function(r){if(sl){try{sl(r)}catch(x){}}res(r)};")
-                append("d.onerror=function(r){if(el){try{el(r)}catch(x){}}rej(r)};")
+                append("d.onload=function(r){if(sl){try{sl.call(d.context||d,r)}catch(x){}}res(r)};")
+                append("d.onerror=function(r){if(el){try{el.call(d.context||d,r)}catch(x){}}rej(r)};")
                 append("GM_xmlhttpRequest(d)})};")
             }
         }

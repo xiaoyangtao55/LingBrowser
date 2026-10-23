@@ -67,6 +67,8 @@ data class UserScriptMenuCommand(
     val scriptId: String,
     val commandId: String,
     val label: String,
+    /** `options.accessKey`：单个按键字符（大写），空串表示没指定。 */
+    val accessKey: String = "",
 )
 
 /**
@@ -179,6 +181,14 @@ class WebTabManager(private val context: Context) {
 
     /** Safe Browsing 弹窗回调；参数为 null 表示关掉弹窗。 */
     var onSafeBrowsingPrompt: ((SafeBrowsingPrompt?) -> Unit)? = null
+
+    /**
+     * 标签关闭回调。
+     *
+     * 用户脚本的 `GM_openInTab(..., { onclose })` 需要知道「自己开的标签被关了」，
+     * 但那只簿记在 ViewModel 里，所以这里只发出通知，由上层决定回不给脚本。
+     */
+    var onTabClosed: ((tabId: String) -> Unit)? = null
 
     private class PendingSafeBrowsing(
         val prompt: SafeBrowsingPrompt,
@@ -589,26 +599,52 @@ class WebTabManager(private val context: Context) {
         for (entry in userScripts) {
             val actual = entry.script.runAt
             val due = actual == runAt ||
-                // document-start 不可用时降级：END 是能拿到的最早时机。
-                (actual == ScriptRunAt.START && !documentStartSupported && runAt == ScriptRunAt.END)
+                // document-start 的脚本在 END 再兜一次：注册是按 WebView 提前做的，
+                // 脚本在页面打开之后才导入、或注册被系统静默拒绝时，注册就不会生效，
+                // 而 END 之外的时机不会补跑，表现为"脚本凭空消失"。
+                // 是否真的需要补，由下面页面里的注入标记决定。
+                (actual == ScriptRunAt.START && runAt == ScriptRunAt.END)
             if (!due) continue
             if (!entry.script.matches(url)) continue
             if (!injected.add("${entry.id}|$runAt|$url")) continue
-            wv.evaluateJavascript(
-                scriptWrapper(entry.script, entry.id, entry.valuesJson, entry.requireCode, entry.resourcesJson),
-                null,
+            val code = scriptWrapper(
+                entry.script,
+                entry.id,
+                entry.valuesJson,
+                entry.requireCode,
+                entry.resourcesJson,
             )
+            // document-start 不可用时 START 直接降级到 END，无需探测；
+            // 可用时先问页面"这份脚本跑过了吗"，避免同一页重复执行。
+            if (actual == ScriptRunAt.START && documentStartSupported) {
+                val probe = "!!(window.__lingGMInjected&&window.__lingGMInjected[${jsString(entry.id)}])"
+                wv.evaluateJavascript(probe) { seen ->
+                    if (seen != "true") wv.evaluateJavascript(code, null)
+                }
+            } else {
+                wv.evaluateJavascript(code, null)
+            }
         }
     }
 
     // ---------------------------------------------------------------- 脚本菜单 / 跨页值同步
 
     /** 页面里 `GM_registerMenuCommand` 注册一条命令。 */
-    fun registerUserScriptMenu(tabId: String, scriptId: String, commandId: String, label: String) {
+    fun registerUserScriptMenu(
+        tabId: String,
+        scriptId: String,
+        commandId: String,
+        label: String,
+        accessKey: String = "",
+    ) {
         if (commandId.isEmpty()) return
         val clean = label.trim().ifEmpty { "未命名命令" }.take(MAX_MENU_LABEL)
+        // 只接受单个字母/数字：accessKey 在桌面端是菜单的键盘助记键，这里存下来
+        // 供「脚本菜单」面板展示并支持外接键盘直接触发。
+        val key = accessKey.trim().take(1).uppercase()
+            .takeIf { it.isNotEmpty() && it[0].isLetterOrDigit() } ?: ""
         scriptMenus.getOrPut(tabId) { LinkedHashMap() }[menuKey(scriptId, commandId)] =
-            UserScriptMenuCommand(tabId, scriptId, commandId, clean)
+            UserScriptMenuCommand(tabId, scriptId, commandId, clean, key)
         publishMenus()
     }
 
@@ -685,7 +721,21 @@ class WebTabManager(private val context: Context) {
     fun dispatchUserScriptNotificationClick(tabId: String, scriptId: String, notificationId: String) {
         val wv = webViews[tabId] ?: return
         wv.evaluateJavascript(
-            "window.__lingGMNotice&&window.__lingGMNotice(${jsString(scriptId)},${jsString(notificationId)})",
+            "window.__lingGMNotice&&window.__lingGMNotice(${jsString(scriptId)},${jsString(notificationId)},'click')",
+            null,
+        )
+    }
+
+    /**
+     * 通知被点击后回传 `ondone`。
+     *
+     * Tampermonkey 里 `ondone` 在通知关闭时触发；Android 无法可靠监听"划掉通知"，
+     * 因此在点击（必然伴随通知收起）时补一次 `done=true` —— 覆盖绝大多数用法。
+     */
+    fun dispatchUserScriptNotificationDone(tabId: String, scriptId: String, notificationId: String) {
+        val wv = webViews[tabId] ?: return
+        wv.evaluateJavascript(
+            "window.__lingGMNotice&&window.__lingGMNotice(${jsString(scriptId)},${jsString(notificationId)},'done')",
             null,
         )
     }
@@ -754,12 +804,27 @@ class WebTabManager(private val context: Context) {
         url: String? = null,
         incognito: Boolean = settings.incognito,
         select: Boolean = true,
+        /**
+         * 插入位置（0 = 最前，null = 末尾）。
+         *
+         * `GM_openInTab` 的 `insert` 选项要能插到当前标签之后，而默认追加到末尾
+         * 会让"从这一页开出去"的子标签跑到最边上。
+         */
+        position: Int? = null,
     ): TabState {
         // 安装链接不能作为标签内容：新标签落在主页，随后弹安装确认。
         val scriptUrl = url?.takeIf { isUserScriptUrl(it) }
         val target = if (scriptUrl != null) settings.homepage else url ?: settings.homepage
         val tab = TabState(url = target, isIncognito = incognito)
-        _tabs.update { it + tab }
+        _tabs.update { list ->
+            if (position == null) {
+                list + tab
+            } else {
+                list.toMutableList().apply {
+                    add(position.coerceIn(0, size), tab)
+                }
+            }
+        }
         // select=false 用于 GM_openInTab 的后台打开：建标签、开始加载，但不切过去。
         if (select) switchTo(tab.id)
         loadUrl(tab.id, target)
@@ -813,6 +878,8 @@ class WebTabManager(private val context: Context) {
     /** 关闭标签页；关掉最后一个时自动新建一个空白页。 */
     fun closeTab(id: String) {
         val closing = _tabs.value.firstOrNull { it.id == id }
+        // 先通知上层：脚本的 onclose 回调必须在标签簿记被清掉前找到来源信息。
+        if (closing != null) onTabClosed?.invoke(id)
         val remaining = _tabs.value.filterNot { it.id == id }
         webViews.remove(id)?.let { wv ->
             (wv.parent as? FrameLayout)?.removeView(wv)
