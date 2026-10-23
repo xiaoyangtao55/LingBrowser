@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.8.0](https://github.com/xiaoyangtao55/LingBrowser/compare/v1.7.0...v1.8.0) (2026-10-23)
+
+
+### Features
+
+* 安装用户脚本前展示 [@match](https://github.com/match) 生效范围 ([ce18f43](https://github.com/xiaoyangtao55/LingBrowser/commit/ce18f439be89b94845bedf18e877bf5abec0655d))
+* 支持 [@require](https://github.com/require) 与客户端证书，证书错误改为统一弹窗 ([97e980f](https://github.com/xiaoyangtao55/LingBrowser/commit/97e980f52f96b188d1cce2bc9ee37147450c9dad))
+* 补齐 GM API 的参数深度并修复注入垫片 ([10ad52d](https://github.com/xiaoyangtao55/LingBrowser/commit/10ad52d28babce78b031614f060fa67a1c3c4cf6))
+* 补齐 GM 存储、资源与 XHR 能力 ([5682fec](https://github.com/xiaoyangtao55/LingBrowser/commit/5682fec91256af1126e5790850ef5f719658a40d))
+* 补齐 GM_info 元数据、window.close 与 GM_getTab 家族 ([709e92d](https://github.com/xiaoyangtao55/LingBrowser/commit/709e92d6015fdea1419927b670cf4b4e8c9041a5))
+* 补齐 GM.* 命名空间、脚本开标签/下载与安全浏览提示 ([83191f7](https://github.com/xiaoyangtao55/LingBrowser/commit/83191f7d561194e6790aef5b57655e6cf1a7e082))
+* 补齐用户脚本菜单、值同步、[@connect](https://github.com/connect) 与通知 ([56f0692](https://github.com/xiaoyangtao55/LingBrowser/commit/56f0692364304ded10946a5a62bbdd2260d7d6c6))
+
+
+### Bug Fixes
+
+* target="_blank" 链接改为页面内拦截并继承无痕状态 ([89415f2](https://github.com/xiaoyangtao55/LingBrowser/commit/89415f29e517bd168c818e04f3f2e570259162ca))
+
 ## [1.7.0](https://github.com/xiaoyangtao55/LingBrowser/compare/v1.6.0...v1.7.0) (2026-10-22)
 
 
