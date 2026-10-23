@@ -3,6 +3,7 @@ package com.ling.browser.web
 import android.annotation.SuppressLint
 import android.content.Context
 import android.os.Build
+import android.os.SystemClock
 import android.util.AttributeSet
 import android.view.GestureDetector
 import android.view.HapticFeedbackConstants
@@ -55,6 +56,20 @@ class LingWebView @JvmOverloads constructor(
     /** 本次手势是否已弹出过长按菜单（用于吞掉随后的 ACTION_UP）。 */
     private var longPressHandled = false
 
+    /**
+     * 最近一次手指按下屏幕的时间（`SystemClock.uptimeMillis()`）。
+     *
+     * 存在的原因：`WebChromeClient.onCreateWindow` 的 `isUserGesture` 在部分
+     * WebView 版本上对 `<a target="_blank">` 的点击会报 `false`，只按它判断
+     * 会把用户的正常点击全部当作"广告弹窗"丢掉（表现为点了没反应）。
+     * 这里留一个"刚刚确实有人点了屏幕"的凭证，让宿主能区分点击与纯脚本开窗。
+     */
+    private var lastTouchAt = 0L
+
+    /** [withinMs] 毫秒内是否发生过触摸（含滑动），用于判定窗口打开是否由点击触发。 */
+    fun hasFreshUserInteraction(withinMs: Long = USER_GESTURE_WINDOW_MS): Boolean =
+        lastTouchAt > 0 && SystemClock.uptimeMillis() - lastTouchAt <= withinMs
+
     private val longPressDetector = GestureDetector(
         context,
         object : GestureDetector.SimpleOnGestureListener() {
@@ -101,6 +116,9 @@ class LingWebView @JvmOverloads constructor(
             event.actionMasked == MotionEvent.ACTION_CANCEL
         ) {
             longPressHandled = false
+        }
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+            lastTouchAt = SystemClock.uptimeMillis()
         }
         return super.onTouchEvent(event)
     }
@@ -258,6 +276,15 @@ class LingWebView @JvmOverloads constructor(
     }
 
     companion object {
+        /**
+         * "最近有点击"的判定窗口。
+         *
+         * 页面把窗口打开推迟到 `setTimeout` 里是常见写法（点击后 0~500ms），
+         * 给到 1.5s 足够覆盖，又不至于让页面闲置一段时间后的自动弹窗
+         * 被误判成用户点击。
+         */
+        private const val USER_GESTURE_WINDOW_MS = 1_500L
+
         /** 兜底夜间模式样式：整体反色再反色图片，避免图片被反色成负片。 */
         private val DARK_CSS_JS = """
             (function() {

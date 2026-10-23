@@ -16,9 +16,12 @@ import android.webkit.SafeBrowsingResponse
 import android.webkit.SslErrorHandler
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
 import android.webkit.WebStorage
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.os.Handler
+import android.os.Looper
 import android.os.Message
 import android.view.View
 import android.widget.FrameLayout
@@ -124,6 +127,9 @@ class WebTabManager(private val context: Context) {
 
     /** tabId -> WebView。仅在内存中存活，不参与状态序列化。 */
     private val webViews = LinkedHashMap<String, LingWebView>()
+
+    /** 主线程消息队列：用于把"销毁临时 WebView"这类动作推迟到回调之外。 */
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     /** 标签页切换时用于承载 WebView 的宿主容器。 */
     private var host: FrameLayout? = null
@@ -560,10 +566,24 @@ class WebTabManager(private val context: Context) {
      */
     private fun registerDocumentStart(tabId: String, wv: LingWebView) {
         scriptHandlers.remove(tabId)?.forEach { handler -> runCatching { handler.remove() } }
-        if (!documentStartSupported || userScripts.isEmpty()) return
-        if (_tabs.value.firstOrNull { it.id == tabId }?.isIncognito == true) return
+        if (!documentStartSupported) return
 
         val handlers = mutableListOf<ScriptHandler>()
+        // 浏览器级"新标签"桥：与用户脚本无关，每个 WebView 都要挂。
+        runCatching {
+            handlers += WebViewCompat.addDocumentStartJavaScript(
+                wv,
+                TAB_LINK_JS,
+                setOf("*"),
+            )
+        }
+        if (userScripts.isEmpty() ||
+            _tabs.value.firstOrNull { it.id == tabId }?.isIncognito == true
+        ) {
+            if (handlers.isNotEmpty()) scriptHandlers[tabId] = handlers
+            return
+        }
+
         for (entry in userScripts) {
             if (entry.script.runAt != ScriptRunAt.START) continue
             val origins = entry.script.allowedOrigins
@@ -1966,6 +1986,25 @@ class WebTabManager(private val context: Context) {
                 }
             }
 
+            // 浏览器级"新标签"桥：页面里 `target="_blank"` 的点击经它上报。
+            //
+            // 为什么不靠 WebChromeClient.onCreateWindow：那条路要求宿主提供
+            // 一个临时 WebView 接住弹窗，而实测在部分机型/WebView 版本上，
+            // 即使把临时 WebView 挂进窗口也不会启动导航，回调永远不来，
+            // 用户看到的就是"点了没反应"。改在页面里拦截点击更可靠。
+            // 无痕标签也要挂：这是纯导航能力，不产生任何持久化数据。
+            runCatching {
+                if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
+                    WebViewCompat.addWebMessageListener(
+                        wv,
+                        TAB_BRIDGE_NAME,
+                        setOf("*"),
+                    ) { _, message, _, _, _ ->
+                        this@WebTabManager.onTabLinkClick(id, message.data.orEmpty())
+                    }
+                }
+            }
+
             // 这个 WebView 是新建的（或刚从 LRU 里被回收后重建），
             // document-start 的注册随之丢失，必须重新挂上。
             registerDocumentStart(id, wv)
@@ -2055,12 +2094,18 @@ class WebTabManager(private val context: Context) {
                     return true
                 }
 
-                // window.open() → 新标签。
+                // `window.open()` → 新标签。
+                //
+                // `<a target="_blank">` 的点击不走这里，而是在页面里由
+                // [TAB_LINK_JS] 拦截后交给宿主 —— 这条回调依赖宿主提供一个
+                // 临时 WebView 接住弹窗，实测部分机型/WebView 版本上即使挂进
+                // 窗口也不会启动导航，回调永远不来。window.open 没有 DOM 事件
+                // 可拦，只能继续走这条路。
                 //
                 // 不在这里 newTab：onCreateWindow 的契约是"返回一个 WebView 让
                 // 父 WebView 把子页面加载进去"。我们给一个临时 WebView 接住，
-                // 等它的 onPageStarted 拿到目标 URL 后再 newTab，然后销毁临时
-                // WebView —— 这样 window.open 的目标地址（含 JS 跳转后的最终 URL）
+                // 等它拿到目标 URL 后再 newTab，然后销毁临时 WebView ——
+                // 这样 window.open 的目标地址（含 JS 跳转后的最终 URL）
                 // 才能被正确捕获。
                 override fun onCreateWindow(
                     view: WebView?, isDialog: Boolean, isUserGesture: Boolean,
@@ -2071,21 +2116,105 @@ class WebTabManager(private val context: Context) {
                     // 页面的 javaScriptCanOpenWindowsAutomatically 是开着的，
                     // 放行就等于让广告脚本在后台无限开标签（打开一个页面弹出
                     // 七八个新标签）。主流浏览器同样只放行点击触发的弹窗。
-                    if (!isUserGesture) return false
-                    val transport = resultMsg?.obj as? WebView.WebViewTransport ?: return false
+                    //
+                    // 但 `isUserGesture` 不能单独作为依据：部分 WebView 版本上
+                    // `<a target="_blank">` 的真实点击也会报 false，只信它就会
+                    // 把用户点击当广告丢掉（点了没反应）。因此补一条"刚有点击"
+                    // 的佐证 —— 手指 1.5s 内按过屏幕就放行。
+                    val source = view as? LingWebView
+                    if (!isUserGesture && source?.hasFreshUserInteraction() != true) {
+                        return false
+                    }
+                    val transport = resultMsg?.obj as? WebView.WebViewTransport
+                    if (transport == null) {
+                        return false
+                    }
                     val tempWebView = LingWebView(context)
+                    // 复制来源标签的配置：临时 WebView 只用来抓地址，但页面若靠
+                    // JS 重定向，关掉 JS 就会抓到中间地址而不是最终地址。
+                    tempWebView.applySettings(
+                        this@WebTabManager.settings,
+                        incognito,
+                        false,
+                    )
+                    // 必须真的挂到窗口上：完全游离的 WebView 在部分机型上不会
+                    // 启动加载流程，导航回调永远不来 —— 表现就是用户点了
+                    // `target="_blank"` 之后毫无反应。
+                    //
+                    // 尺寸压到 1×1 且**保持 VISIBLE**：`INVISIBLE` 的 WebView
+                    // 可能因为拿不到合成器而不派发加载（实测 1×1 可见时才会
+                    // 真正进入导航流程）。1 像素的遮挡可以忽略。
+                    val container = host
+                    if (container != null) {
+                        container.addView(
+                            tempWebView,
+                            FrameLayout.LayoutParams(1, 1),
+                        )
+                    }
                     var opened = false
+                    fun discard() {
+                        container?.removeView(tempWebView)
+                        // 不能在自己的导航/定时回调里同步 destroy：Chromium 那边
+                        // 可能还在用这个 WebView，同步销毁有崩溃风险，推到下一轮
+                        // 消息再销毁。
+                        mainHandler.post { tempWebView.destroy() }
+                    }
+                    /** 拿到目标地址后统一走这里：开标签并回收临时 WebView。 */
+                    fun openOnce(url: String?) {
+                        if (opened) return
+                        // about:blank 是 window.open() 的占位文档，真正的
+                        // 地址要等脚本写入 location；直接放行会开出一个空标签。
+                        if (url == null || url == "about:blank") return
+                        opened = true
+                        // 新标签继承来源标签的无痕状态：无痕里点开的链接
+                        // 不能把内容落到常规标签上。
+                        this@WebTabManager.newTab(url, incognito)
+                        discard()
+                    }
                     tempWebView.webViewClient = object : WebViewClient() {
+                        // 先于网络请求触发，是拿到目标地址最快、最可靠的一处。
+                        // `onPageStarted` 要等导航真正启动，某些机型上弹窗文档
+                        // 一直停在 about:blank，就永远等不到。
+                        override fun shouldOverrideUrlLoading(
+                            view: WebView?, request: WebResourceRequest?,
+                        ): Boolean {
+                            val target = request?.url?.toString()
+                            // about:blank 要放过去：那是 window.open() 的占位文档，
+                            // 拦掉等于让弹窗脚本再也写不进 location。
+                            // 无论走哪条回调，都不改变页面原有的加载结果 ——
+                            // 这里只是"旁听"，真正的新标签已经由 openOnce 建好。
+                            if (target == null || target == "about:blank") return false
+                            openOnce(target)
+                            return false
+                        }
+
+                        // minSdk 23 仍需旧版重载
+                        @Deprecated("minSdk 23 仍需要旧版重载，见上")
+                        @Suppress("OVERRIDE_DEPRECATION", "DEPRECATION")
+                        override fun shouldOverrideUrlLoading(
+                            view: WebView?, url: String?,
+                        ): Boolean {
+                            if (url == null || url == "about:blank") return false
+                            openOnce(url)
+                            return false
+                        }
+
                         override fun onPageStarted(
                             view: WebView?, url: String?, favicon: Bitmap?,
                         ) {
-                            if (opened) return
-                            opened = true
-                            url?.let { this@WebTabManager.newTab(it, incognito) }
-                            view?.post { view.destroy() }
+                            openOnce(url)
                         }
                     }
                     transport.webView = tempWebView
+                    // 兜底回收：页面调用 window.open 后可能只写 about:blank 而不
+                    // 导航（弹窗被自己的逻辑放弃），此时拿不到目标地址；不回收
+                    // 就会一直挂着一个 WebView。
+                    tempWebView.postDelayed({
+                        if (!opened) {
+                            opened = true
+                            discard()
+                        }
+                    }, WINDOW_OPEN_TIMEOUT_MS)
                     return true
                 }
 
@@ -2483,12 +2612,59 @@ class WebTabManager(private val context: Context) {
         publishConsoleErrors()
     }
 
+    /**
+     * 处理页面上报的 `target="_blank"` 点击。
+     *
+     * 桥对象在主世界，页面自己也能直接调 `window.LingTab.postMessage`，
+     * 所以不能只信这条消息：必须搭配"刚刚确实有真实触摸"这一宿主侧事实，
+     * 否则任何页面都能无限制地开标签（广告最爱的行为）。
+     */
+    private fun onTabLinkClick(tabId: String, raw: String) {
+        val wv = webViews[tabId] ?: return
+        if (!wv.hasFreshUserInteraction()) return
+        if (!raw.startsWith("http://") && !raw.startsWith("https://")) return
+        val incognito = _tabs.value.firstOrNull { it.id == tabId }?.isIncognito ?: false
+        newTab(raw, incognito)
+    }
+
     companion object {
         /** 同时存活的 WebView 实例上限。Via 这类轻量浏览器也维持类似的少量实例。 */
         private const val MAX_WEBVIEWS = 6
 
         /** 注入到页面的 GM 桥对象名（`window.LingGM`），与 [scriptWrapper] 里的垫片对应。 */
         private const val USER_SCRIPT_BRIDGE = "LingGM"
+
+        /** 浏览器级"新标签"桥在页面里的对象名（`window.LingTab`）。 */
+        private const val TAB_BRIDGE_NAME = "LingTab"
+
+        /**
+         * 页面里拦截 `target="_blank"` 点击的脚本。
+         *
+         * 只拦**可信点击**（`isTrusted`，合成事件不算）与 http(s) 链接，
+         * 并且四个修饰键都没按 —— 与桌面浏览器"普通左键打开新标签"一致。
+         * 桥不存在时直接放行，让页面保持原生的（无反应）行为，不至于
+         * 因为宿主缺能力而把链接彻底拦死。
+         */
+        private val TAB_LINK_JS = """
+            (function () {
+              if (window.__lingTabLink) return;
+              window.__lingTabLink = 1;
+              document.addEventListener('click', function (e) {
+                if (!e.isTrusted || e.button !== 0 || e.defaultPrevented) return;
+                if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+                var node = e.target;
+                var a = node && node.closest ? node.closest('a[target]') : null;
+                if (!a) return;
+                if ((a.target || '').toLowerCase() !== '_blank') return;
+                var href = a.href || '';
+                if (!/^https?:/i.test(href)) return;
+                var bridge = window.LingTab;
+                if (!bridge) return;
+                e.preventDefault();
+                try { bridge.postMessage(href); } catch (err) {}
+              }, true);
+            })();
+        """.trimIndent()
 
         /**
          * 证书错误排队上限。
@@ -2512,6 +2688,14 @@ class WebTabManager(private val context: Context) {
 
         /** 单条控制台错误的展示长度，避免长堆栈把面板撑爆。 */
         private const val MAX_CONSOLE_MESSAGE = 500
+
+        /**
+         * 临时 WebView 的存活上限。
+         *
+         * 页面 `window.open()` 后可能只写 `about:blank` 而不导航（弹窗被自己的
+         * 逻辑放弃），此时拿不到目标地址；不回收就会一直挂着一个 WebView。
+         */
+        private const val WINDOW_OPEN_TIMEOUT_MS = 5_000L
     }
 }
 
