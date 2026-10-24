@@ -91,6 +91,17 @@ class LingSettingsTest {
     }
 
     @Test
+    fun `自定义 UA 优先于电脑模式`() {
+        val custom = "Mozilla/5.0 (X11; Linux x86_64) LingCustom/1.0"
+        // 填写后固定使用，电脑模式开关不再改变 UA
+        assertEquals(custom, LingSettings(desktopMode = false, customUserAgent = custom).userAgent)
+        assertEquals(custom, LingSettings(desktopMode = true, customUserAgent = custom).userAgent)
+        // 空白视为未填写，仍跟随电脑模式
+        assertEquals(UA_MOBILE, LingSettings(customUserAgent = "   ").userAgent)
+        assertEquals(UA_DESKTOP, LingSettings(desktopMode = true, customUserAgent = " ").userAgent)
+    }
+
+    @Test
     fun `四个搜索引擎都有完整配置`() {
         assertEquals(4, SearchEngine.entries.size)
         SearchEngine.entries.forEach { e ->

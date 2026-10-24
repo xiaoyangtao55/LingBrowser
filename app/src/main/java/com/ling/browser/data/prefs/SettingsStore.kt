@@ -65,6 +65,15 @@ enum class SearchEngine(val label: String, val queryUrl: String, val homepage: S
 }
 
 /**
+ * 用户自定义的搜索引擎。
+ *
+ * [queryUrl] 是带 `%s` 占位符的搜索地址模板，例如
+ * `https://example.com/search?q=%s`。合法性由调用方（ViewModel）校验，
+ * 存储层只负责落库与读回。
+ */
+data class CustomSearchEngine(val name: String, val queryUrl: String)
+
+/**
  * 下载器类型。
  *
  *  - [BUILT_IN] 内建下载器：自己掌握下载过程，支持实时进度、暂停/恢复、断点续传；
@@ -88,8 +97,10 @@ enum class DownloaderType(val label: String) {
  *                        其它应用也能看到，需要存储权限（Android 9 及以下运行时申请，
  *                        Android 10+ 走 MediaStore，无需权限）。
  *
- * 默认 [APP_PRIVATE]：零权限、零打扰，符合「翎」轻量取向。
- * 需要把文件分享给其它 App 的用户可以切到公共目录。
+ * 默认 [PUBLIC_DOWNLOADS]：下载的东西本来就该在公共下载目录里，
+ * 其它应用（文件管理器、微信、相册）都能直接拿到，符合用户对
+ * 「下载完成」的预期。Android 10+ 走 MediaStore 无需权限；
+ * 只在 Android 9 及以下需要运行时存储权限，由下载入口负责申请。
  */
 enum class DownloadLocation(val label: String) {
     APP_PRIVATE("应用私有目录"),
@@ -136,6 +147,15 @@ data class LingSettings(
      * 无强制登录、无广告跳转中间页，且 https 首页体积小、首屏快。
      */
     val searchEngine: SearchEngine = SearchEngine.BING,
+    /** 用户添加的自定义搜索引擎（按添加顺序展示）。 */
+    val customSearchEngines: List<CustomSearchEngine> = emptyList(),
+    /**
+     * 当前选中的自定义搜索引擎名称。
+     *
+     * 空串表示使用内置 [searchEngine]；名称指向的引擎被删除后，
+     * [activeCustomEngine] 求值为 null，行为自动回落到内置引擎。
+     */
+    val selectedCustomEngine: String = "",
     val customHomepage: String = "",
     /**
      * 内置主页的背景模式。
@@ -156,6 +176,14 @@ data class LingSettings(
     val homeBackgroundImageUri: String = "",
     val nightMode: NightMode = NightMode.FOLLOW_SYSTEM,
     val desktopMode: Boolean = false,
+    /**
+     * 自定义 User-Agent。
+     *
+     * 空串表示跟随 [desktopMode] 自动切换（手机 UA / 桌面 UA）；
+     * 非空时**始终**使用这里的值，电脑模式开关不再改变 UA ——
+     * 用户显式填了一个 UA，就该以它为准。
+     */
+    val customUserAgent: String = "",
     val dynamicColor: Boolean = true,
     val incognito: Boolean = false,
     /**
@@ -245,8 +273,8 @@ data class LingSettings(
     val readerFontSize: ReaderFontSize = ReaderFontSize.MEDIUM,
     /** 下载器类型，默认内建下载器。 */
     val downloaderType: DownloaderType = DownloaderType.BUILT_IN,
-    /** 下载保存位置，默认应用私有目录（无需存储权限）。 */
-    val downloadLocation: DownloadLocation = DownloadLocation.APP_PRIVATE,
+    /** 下载保存位置，默认公共下载目录（其它应用可见）。 */
+    val downloadLocation: DownloadLocation = DownloadLocation.PUBLIC_DOWNLOADS,
     /** 下载的网络限制，默认不限（不改变旧行为）。 */
     val downloadNetwork: DownloadNetwork = DownloadNetwork.ALL,
 ) {
@@ -259,9 +287,34 @@ data class LingSettings(
     val homepage: String
         get() = customHomepage.ifBlank { HomePage.URL }
 
+    /** 当前生效的自定义搜索引擎；未选中或已被删除时为 null。 */
+    val activeCustomEngine: CustomSearchEngine?
+        get() = customSearchEngines.firstOrNull { it.name == selectedCustomEngine }
+
+    /** 界面上展示的引擎名称（自定义优先）。 */
+    val searchEngineLabel: String
+        get() = activeCustomEngine?.name ?: searchEngine.label
+
+    /** 搜索地址模板（含 `%s` 占位符），自定义优先。 */
+    val searchQueryUrl: String
+        get() = activeCustomEngine?.queryUrl ?: searchEngine.queryUrl
+
+    /** 搜索框留空时的落点：自定义引擎取站点根，内置引擎用其首页。 */
+    val searchHomepage: String
+        get() = activeCustomEngine?.let { homepageOf(it.queryUrl) }?.takeIf { it.isNotBlank() }
+            ?: searchEngine.homepage
+
     val userAgent: String
-        get() = if (desktopMode) UA_DESKTOP else UA_MOBILE
+        get() = customUserAgent.ifBlank { if (desktopMode) UA_DESKTOP else UA_MOBILE }
 }
+
+/** 从搜索地址模板中取 `scheme://host`，作为站点入口；解析失败返回空串。 */
+private fun homepageOf(queryUrl: String): String = runCatching {
+    val uri = java.net.URI(queryUrl)
+    val scheme = uri.scheme ?: return@runCatching ""
+    val authority = uri.rawAuthority ?: return@runCatching ""
+    "$scheme://$authority"
+}.getOrDefault("")
 
 /**
  * 基于 DataStore 的设置存储。所有偏好以 Flow 暴露，UI 层 collect 即自动刷新。
@@ -270,11 +323,14 @@ class SettingsStore(private val context: Context) {
 
     private object Keys {
         val SEARCH_ENGINE = stringPreferencesKey("search_engine")
+        val CUSTOM_SEARCH_ENGINES = stringPreferencesKey("custom_search_engines")
+        val SELECTED_CUSTOM_ENGINE = stringPreferencesKey("selected_custom_engine")
         val CUSTOM_HOMEPAGE = stringPreferencesKey("custom_homepage")
         val HOME_BACKGROUND = stringPreferencesKey("home_background")
         val HOME_BACKGROUND_URI = stringPreferencesKey("home_background_uri")
         val NIGHT_MODE = stringPreferencesKey("night_mode")
         val DESKTOP_MODE = booleanPreferencesKey("desktop_mode")
+        val CUSTOM_USER_AGENT = stringPreferencesKey("custom_user_agent")
         val DYNAMIC_COLOR = booleanPreferencesKey("dynamic_color")
         val FORCE_DARK = booleanPreferencesKey("force_dark_web")
         val BLOCK_IMAGES = booleanPreferencesKey("block_images")
@@ -296,6 +352,8 @@ class SettingsStore(private val context: Context) {
             searchEngine = p[Keys.SEARCH_ENGINE]
                 ?.let { runCatching { SearchEngine.valueOf(it) }.getOrNull() }
                 ?: SearchEngine.BING,
+            customSearchEngines = parseCustomEngines(p[Keys.CUSTOM_SEARCH_ENGINES]),
+            selectedCustomEngine = p[Keys.SELECTED_CUSTOM_ENGINE] ?: "",
             customHomepage = p[Keys.CUSTOM_HOMEPAGE] ?: "",
             // fromKey 内部兜底：未知 key 退回 SOLID，不会因脏数据闪退。
             homeBackground = HomeBackground.fromKey(p[Keys.HOME_BACKGROUND]),
@@ -304,6 +362,7 @@ class SettingsStore(private val context: Context) {
                 ?.let { runCatching { NightMode.valueOf(it) }.getOrNull() }
                 ?: NightMode.FOLLOW_SYSTEM,
             desktopMode = p[Keys.DESKTOP_MODE] ?: false,
+            customUserAgent = (p[Keys.CUSTOM_USER_AGENT] ?: "").trim(),
             dynamicColor = p[Keys.DYNAMIC_COLOR] ?: true,
             forceDarkWebPages = p[Keys.FORCE_DARK] ?: true,
             blockImages = p[Keys.BLOCK_IMAGES] ?: false,
@@ -324,15 +383,42 @@ class SettingsStore(private val context: Context) {
                 ?: DownloaderType.BUILT_IN,
             downloadLocation = p[Keys.DOWNLOAD_LOCATION]
                 ?.let { runCatching { DownloadLocation.valueOf(it) }.getOrNull() }
-                ?: DownloadLocation.APP_PRIVATE,
+                ?: DownloadLocation.PUBLIC_DOWNLOADS,
             downloadNetwork = p[Keys.DOWNLOAD_NETWORK]
                 ?.let { runCatching { DownloadNetwork.valueOf(it) }.getOrNull() }
                 ?: DownloadNetwork.ALL,
         )
     }
 
-    suspend fun setSearchEngine(engine: SearchEngine) =
-        context.dataStore.edit { it[Keys.SEARCH_ENGINE] = engine.name }
+    suspend fun setSearchEngine(engine: SearchEngine) = context.dataStore.edit {
+        it[Keys.SEARCH_ENGINE] = engine.name
+        // 选内置引擎即取消自定义选中，两者只能有一个生效。
+        it.remove(Keys.SELECTED_CUSTOM_ENGINE)
+    }
+
+    /** 选中一个自定义搜索引擎（名称由调用方保证存在）。 */
+    suspend fun selectCustomSearchEngine(name: String) =
+        context.dataStore.edit { it[Keys.SELECTED_CUSTOM_ENGINE] = name }
+
+    /**
+     * 新增自定义搜索引擎，并立即选中它。
+     *
+     * 同名条目会被替换而不是产生两条 —— 重名会让「当前选中」无法唯一确定。
+     */
+    suspend fun addCustomSearchEngine(name: String, queryUrl: String) =
+        context.dataStore.edit { p ->
+            val list = parseCustomEngines(p[Keys.CUSTOM_SEARCH_ENGINES])
+                .filterNot { it.name == name } + CustomSearchEngine(name, queryUrl)
+            p[Keys.CUSTOM_SEARCH_ENGINES] = encodeCustomEngines(list)
+            p[Keys.SELECTED_CUSTOM_ENGINE] = name
+        }
+
+    /** 删除自定义搜索引擎；若它正在生效，回落到内置引擎。 */
+    suspend fun removeCustomSearchEngine(name: String) = context.dataStore.edit { p ->
+        val list = parseCustomEngines(p[Keys.CUSTOM_SEARCH_ENGINES]).filterNot { it.name == name }
+        p[Keys.CUSTOM_SEARCH_ENGINES] = encodeCustomEngines(list)
+        if (p[Keys.SELECTED_CUSTOM_ENGINE] == name) p.remove(Keys.SELECTED_CUSTOM_ENGINE)
+    }
 
     suspend fun setCustomHomepage(url: String) =
         context.dataStore.edit { it[Keys.CUSTOM_HOMEPAGE] = url.trim() }
@@ -355,6 +441,10 @@ class SettingsStore(private val context: Context) {
 
     suspend fun setDesktopMode(enabled: Boolean) =
         context.dataStore.edit { it[Keys.DESKTOP_MODE] = enabled }
+
+    /** 保存自定义 UA；空串表示恢复"跟随电脑模式"。校验在 ViewModel 层做。 */
+    suspend fun setCustomUserAgent(userAgent: String) =
+        context.dataStore.edit { it[Keys.CUSTOM_USER_AGENT] = userAgent.trim() }
 
     suspend fun setDynamicColor(enabled: Boolean) =
         context.dataStore.edit { it[Keys.DYNAMIC_COLOR] = enabled }
@@ -423,3 +513,37 @@ class SettingsStore(private val context: Context) {
     suspend fun setTabCount(count: Int) =
         context.dataStore.edit { it[Keys.TAB_COUNT] = count }
 }
+
+/**
+ * 自定义搜索引擎的落盘格式。
+ *
+ * 存成 JSON 数组而不是 `name|url` 拼接：名称和地址都来自用户输入，
+ * 拼接格式一旦遇到分隔符就得转义，JSON 天然没有这个问题。
+ * 读取时任何一条坏数据都只丢它自己，不会让整份列表消失。
+ */
+private fun parseCustomEngines(raw: String?): List<CustomSearchEngine> {
+    if (raw.isNullOrBlank()) return emptyList()
+    return runCatching {
+        val array = org.json.JSONArray(raw)
+        buildList {
+            for (i in 0 until array.length()) {
+                val obj = array.optJSONObject(i) ?: continue
+                val name = obj.optString("name").trim()
+                val url = obj.optString("url").trim()
+                if (name.isNotEmpty() && url.isNotEmpty()) add(CustomSearchEngine(name, url))
+            }
+        }
+    }.getOrDefault(emptyList())
+}
+
+private fun encodeCustomEngines(list: List<CustomSearchEngine>): String =
+    org.json.JSONArray().apply {
+        list.forEach { engine ->
+            put(
+                org.json.JSONObject().apply {
+                    put("name", engine.name)
+                    put("url", engine.queryUrl)
+                },
+            )
+        }
+    }.toString()

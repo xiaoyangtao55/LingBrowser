@@ -48,9 +48,18 @@ object UrlUtils {
      * @param input 用户输入
      * @param engine 未命中 URL 时使用的搜索引擎
      */
-    fun toUrl(input: String, engine: SearchEngine): String {
+    fun toUrl(input: String, engine: SearchEngine): String =
+        toUrl(input, engine.queryUrl, engine.homepage)
+
+    /**
+     * 同上，但直接接收**地址模板**而非枚举 —— 自定义搜索引擎只有模板。
+     *
+     * @param queryUrl 含 `%s` 占位符的搜索地址
+     * @param homepage 输入为空时的落点
+     */
+    fun toUrl(input: String, queryUrl: String, homepage: String): String {
         val s = input.trim()
-        if (s.isEmpty()) return engine.homepage
+        if (s.isEmpty()) return homepage
 
         return when {
             // 顺序很重要：本地路径必须先于裸域名判断，
@@ -62,13 +71,16 @@ object UrlUtils {
             IPV4_REGEX.matches(s) -> "http://$s"
             BARE_DOMAIN_REGEX.matches(s) -> "https://$s"
             IDN_REGEX.matches(s) -> "https://$s"
-            else -> searchUrl(s, engine)
+            else -> searchUrl(s, queryUrl)
         }
     }
 
     /** 构造搜索 URL。 */
-    fun searchUrl(query: String, engine: SearchEngine): String =
-        engine.queryUrl.format(URLEncoder.encode(query, "UTF-8"))
+    fun searchUrl(query: String, engine: SearchEngine): String = searchUrl(query, engine.queryUrl)
+
+    /** 用地址模板构造搜索 URL。 */
+    fun searchUrl(query: String, queryUrl: String): String =
+        queryUrl.format(URLEncoder.encode(query, "UTF-8"))
 
     /**
      * 地址栏展示用的「精简」形式：去掉 scheme 与结尾斜杠，让地址栏更清爽。

@@ -35,12 +35,14 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -131,7 +133,7 @@ import kotlinx.coroutines.withContext
  *  - 内置主页由 WebView 直接渲染（见 [com.ling.browser.web.HomePage]），不再是覆盖层，
  *    因此主页也能正常参与前进/后退历史。
  */
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 fun BrowserScreen(
@@ -647,20 +649,24 @@ fun BrowserScreen(
         }
     }
 
+    // 输入法是否可见。键盘弹出时底部工具栏会收起：
+    // 它的位置本来就在窗口最下沿、会被键盘完全盖住，留着只会白占一块高度；
+    // 收起后网页视口正好落到键盘上沿（见下面 Column 的 imePadding）。
+    val imeVisible = WindowInsets.isImeVisible
+
     // 底部手势条的内边距不在这里留，交给 BottomToolbar 自己吃：
     // 工具栏底色要铺到屏幕最下沿（见其文件头说明）。
+    //
+    // imePadding 必须加在**整列**上，不能只加在网页内容区：
+    // 后者会按"I 高度的键盘"从内容区底部扣除，而内容区本身又不延伸到窗口
+    // 最下沿（下面还有工具栏），结果键盘上方凭空多出「工具栏高度」的一块空白。
     Column(
-        modifier = modifier.fillMaxSize(),
+        modifier = modifier
+            .fillMaxSize()
+            .imePadding(),
     ) {
-        // ---- 顶部提示条 ----
-        AnimatedVisibility(visible = activeTab?.isIncognito == true) {
-            IncognitoBanner(modifier = Modifier.statusBarsPadding())
-        }
-        AnimatedVisibility(visible = settings.desktopMode && activeTab?.isIncognito != true) {
-            DesktopModeBanner(modifier = Modifier.statusBarsPadding())
-        }
-
         // ---- 地址栏 ----
+        // 状态栏内边距由地址栏自己吃：提示条现在在它下方，不能替它顶到状态栏。
         AddressBar(
             text = addressText,
             isEditing = addressEditing,
@@ -683,26 +689,25 @@ fun BrowserScreen(
             },
             modifier = Modifier
                 .fillMaxWidth()
-                .then(
-                    if (activeTab?.isIncognito != true && !settings.desktopMode) {
-                        Modifier.statusBarsPadding()
-                    } else {
-                        Modifier
-                    }
-                )
+                .statusBarsPadding()
                 .padding(horizontal = 12.dp, vertical = 8.dp),
         )
 
+        // ---- 地址栏下方的模式提示条 ----
+        // 放在地址栏之下而不是之上：提示属于「当前页面处于什么模式」的说明，
+        // 不该挤占地址栏上方的视觉起点；放在下方也更贴近页面内容。
+        AnimatedVisibility(visible = activeTab?.isIncognito == true) {
+            IncognitoBanner()
+        }
+        AnimatedVisibility(visible = settings.desktopMode && activeTab?.isIncognito != true) {
+            DesktopModeBanner()
+        }
+
         // ---- 网页内容区 ----
-        // imePadding：键盘弹出时把内容区从底部压矮，WebView 视口随之变短，
-        // 主页 HTML 的 flex 垂直居中就会把时钟与搜索框一起**上移** ——
-        // 这正是"搜索框跟随输入法上下移动"。没有它时（windowSoftInputMode
-        // 已是 adjustResize，但 edge-to-edge 下窗口本身不缩放），搜索框会
-        // 被键盘整块盖住。
+        // 键盘避让由外层 Column 的 imePadding 统一处理：这里再加一次会
+        // 与工具栏占位叠加，表现为键盘上方多出一块空白（见上面的说明）。
         Box(
-            modifier = Modifier
-                .weight(1f)
-                .imePadding(),
+            modifier = Modifier.weight(1f),
         ) {
             // 原生背景层：画在 WebView **之下**，主页的背景颜色全由它给
             // —— 纯色档画主题背景色，自定义图片档在它之上叠照片与顶部遮罩。
@@ -770,17 +775,21 @@ fun BrowserScreen(
 
         // ---- 底部工具栏 ----
         // 「更多」与「标签页」只把点击转出去，具体面板由下面的 ModalBottomSheet 承载。
-        BottomToolbar(
-            canGoBack = activeTab?.canGoBack == true,
-            canGoForward = activeTab?.canGoForward == true,
-            tabCount = tabs.size,
-            isIncognito = activeTab?.isIncognito == true,
-            onBack = { viewModel.goBack() },
-            onForward = { viewModel.goForward() },
-            onHome = { viewModel.goHome() },
-            onTabs = { showTabsSheet = true },
-            onMore = { showMoreSheet = true },
-        )
+        // 键盘弹出时收起：键盘已经盖住这个位置，继续占高只会把网页视口顶上去；
+        // 收起后网页一直延伸到键盘上沿，没有任何空白条。
+        AnimatedVisibility(visible = !imeVisible) {
+            BottomToolbar(
+                canGoBack = activeTab?.canGoBack == true,
+                canGoForward = activeTab?.canGoForward == true,
+                tabCount = tabs.size,
+                isIncognito = activeTab?.isIncognito == true,
+                onBack = { viewModel.goBack() },
+                onForward = { viewModel.goForward() },
+                onHome = { viewModel.goHome() },
+                onTabs = { showTabsSheet = true },
+                onMore = { showMoreSheet = true },
+            )
+        }
     }
 
     // ---- 网页全屏覆盖层 ----

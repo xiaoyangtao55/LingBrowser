@@ -1899,16 +1899,34 @@ class WebTabManager(private val context: Context) {
         syncNavState(id)
     }
 
-    /** 清空所有浏览数据（设置页的「清除数据」）。 */
-    fun clearBrowsingData() {
-        webViews.values.forEach {
-            it.clearCache(true)
-            it.clearHistory()
-            it.clearFormData()
-        }
+    /**
+     * 清空 Cookie 与站点数据（localStorage、IndexedDB 等）。
+     *
+     * 与 [clearCacheData] 分开：用户可能只想退出登录态，不想把缓存也清掉
+     * （缓存清掉后下次打开同一页面要重新下载全部资源）。
+     */
+    fun clearCookiesAndSiteData() {
         CookieManager.getInstance().removeAllCookies(null)
         CookieManager.getInstance().flush()
         WebStorage.getInstance().deleteAllData()
+    }
+
+    /** 清空所有标签页的网页缓存（含磁盘缓存）。 */
+    fun clearCacheData() {
+        webViews.values.forEach { it.clearCache(true) }
+    }
+
+    /**
+     * 清空 WebView 自己的前进/后退历史与表单记忆。
+     *
+     * 这是「历史记录」的一部分：库里的访问记录清了，页面里还能按返回键
+     * 走回上一页就说不通。
+     */
+    fun clearWebViewNavigationHistory() {
+        webViews.values.forEach {
+            it.clearHistory()
+            it.clearFormData()
+        }
     }
 
     // ---------------------------------------------------------------- 内部

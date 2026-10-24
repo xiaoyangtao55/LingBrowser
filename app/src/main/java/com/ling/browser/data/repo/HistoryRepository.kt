@@ -74,6 +74,36 @@ class HistoryRepository(private val db: LingDatabase) {
         refresh()
     }
 
+    /**
+     * 批量写入导入的记录，返回真正新增的条数。
+     *
+     * 用 `CONFLICT_IGNORE` 而不是先查后插：库里 `url` 上有唯一索引，
+     * 由它来裁决重复既省一次查询，也避免"查的时候没有、插的时候已经存在"的竞态。
+     * 走事务是因为导入可能有上千条，逐条 autocommit 会慢得肉眼可见。
+     */
+    suspend fun importAll(entries: List<HistoryEntry>): Int = withContext(Dispatchers.IO) {
+        if (entries.isEmpty()) return@withContext 0
+        val db = db.writableDatabase
+        var added = 0
+        db.beginTransaction()
+        try {
+            for (entry in entries) {
+                val row = db.insertWithOnConflict(
+                    "history",
+                    null,
+                    historyValues(entry.title, entry.url, entry.visitedAt, entry.visitCount),
+                    android.database.sqlite.SQLiteDatabase.CONFLICT_IGNORE,
+                )
+                if (row != -1L) added++
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        refresh()
+        added
+    }
+
     suspend fun delete(id: Long) = withContext(Dispatchers.IO) {
         db.writableDatabase.delete("history", "id = ?", arrayOf(id.toString()))
         refresh()

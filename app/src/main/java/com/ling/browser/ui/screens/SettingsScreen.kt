@@ -19,6 +19,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CenterAlignedTopAppBar
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -88,9 +89,9 @@ fun SettingsScreen(
                     icon = LingIcons.Search,
                     title = SettingsGroup.SEARCH_HOME.title,
                     subtitle = if (settings.customHomepage.isBlank()) {
-                        "${settings.searchEngine.label} · 内置主页"
+                        "${settings.searchEngineLabel} · 内置主页"
                     } else {
-                        "${settings.searchEngine.label} · ${settings.customHomepage}"
+                        "${settings.searchEngineLabel} · ${settings.customHomepage}"
                     },
                     onClick = { onOpenGroup(SettingsGroup.SEARCH_HOME) },
                 )
@@ -125,7 +126,7 @@ fun SettingsScreen(
                 GroupEntryRow(
                     icon = LingIcons.PrivacyTip,
                     title = SettingsGroup.PRIVACY.title,
-                    subtitle = "清除缓存、Cookie 与历史记录",
+                    subtitle = "选择性清除历史、Cookie、缓存与会话",
                     onClick = { onOpenGroup(SettingsGroup.PRIVACY) },
                 )
             }
@@ -133,7 +134,7 @@ fun SettingsScreen(
                 GroupEntryRow(
                     icon = LingIcons.Bookmark,
                     title = SettingsGroup.BACKUP.title,
-                    subtitle = "导出书签备份，或从其它浏览器导入",
+                    subtitle = "导出书签与历史记录，或从其它浏览器导入",
                     onClick = { onOpenGroup(SettingsGroup.BACKUP) },
                 )
             }
@@ -156,6 +157,10 @@ fun SettingsScreen(
 fun SearchHomeSettingsScreen(
     settings: LingSettings,
     onSearchEngine: (SearchEngine) -> Unit,
+    onSelectCustomEngine: (String) -> Unit,
+    /** 返回 null 表示添加成功，否则是给用户看的原因。 */
+    onAddSearchEngine: (name: String, queryUrl: String) -> String?,
+    onRemoveSearchEngine: (String) -> Unit,
     onHomepage: (String) -> Unit,
     onHomeBackground: (HomeBackground) -> Unit,
     onHomeBackgroundImage: (String) -> Unit,
@@ -163,6 +168,7 @@ fun SearchHomeSettingsScreen(
     modifier: Modifier = Modifier,
 ) {
     var showEngineDialog by remember { mutableStateOf(false) }
+    var showAddEngineDialog by remember { mutableStateOf(false) }
     var showHomepageDialog by remember { mutableStateOf(false) }
     var showHomeBackgroundDialog by remember { mutableStateOf(false) }
 
@@ -197,7 +203,7 @@ fun SearchHomeSettingsScreen(
                 SettingRow(
                     icon = LingIcons.Search,
                     title = "搜索引擎",
-                    subtitle = settings.searchEngine.label,
+                    subtitle = settings.searchEngineLabel,
                     onClick = { showEngineDialog = true },
                 )
             }
@@ -237,31 +243,132 @@ fun SearchHomeSettingsScreen(
             text = {
                 Column {
                     SearchEngine.entries.forEach { engine ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    onSearchEngine(engine)
-                                    showEngineDialog = false
-                                }
-                                .padding(vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            RadioButton(
-                                selected = settings.searchEngine == engine,
+                        EngineOptionRow(
+                            label = engine.label,
+                            // 有自定义引擎被选中时，内置项都不算选中
+                            selected = settings.selectedCustomEngine.isBlank() &&
+                                settings.searchEngine == engine,
+                            onClick = {
+                                onSearchEngine(engine)
+                                showEngineDialog = false
+                            },
+                        )
+                    }
+
+                    if (settings.customSearchEngines.isNotEmpty()) {
+                        HorizontalDivider(Modifier.padding(vertical = 6.dp))
+                        Text(
+                            text = "自定义",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        settings.customSearchEngines.forEach { engine ->
+                            EngineOptionRow(
+                                label = engine.name,
+                                selected = settings.activeCustomEngine == engine,
                                 onClick = {
-                                    onSearchEngine(engine)
+                                    onSelectCustomEngine(engine.name)
                                     showEngineDialog = false
                                 },
+                                onRemove = { onRemoveSearchEngine(engine.name) },
                             )
-                            Spacer(Modifier.width(8.dp))
-                            Text(engine.label, style = MaterialTheme.typography.bodyLarge)
                         }
+                    }
+
+                    HorizontalDivider(Modifier.padding(vertical = 6.dp))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                showEngineDialog = false
+                                showAddEngineDialog = true
+                            }
+                            .padding(vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            imageVector = LingIcons.Add,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = "添加自定义搜索引擎",
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
                     }
                 }
             },
             confirmButton = {
                 TextButton(onClick = { showEngineDialog = false }) { Text("完成") }
+            },
+        )
+    }
+
+    // ---- 添加自定义搜索引擎 ----
+    if (showAddEngineDialog) {
+        var engineName by remember { mutableStateOf("") }
+        var engineUrl by remember { mutableStateOf("") }
+        var engineError by remember { mutableStateOf<String?>(null) }
+        AlertDialog(
+            onDismissRequest = { showAddEngineDialog = false },
+            title = { Text("自定义搜索引擎") },
+            text = {
+                Column {
+                    OutlinedTextField(
+                        value = engineName,
+                        onValueChange = {
+                            engineName = it
+                            engineError = null
+                        },
+                        singleLine = true,
+                        label = { Text("名称") },
+                        placeholder = { Text("例如：站内搜索") },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = engineUrl,
+                        onValueChange = {
+                            engineUrl = it
+                            engineError = null
+                        },
+                        singleLine = true,
+                        label = { Text("搜索地址") },
+                        placeholder = { Text("https://example.com/search?q=%s") },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        // 占位符规则必须写清楚，否则用户会填一个不带 %s 的普通网址
+                        text = "用 %s 代表搜索词。例如百度是 " +
+                            "https://www.baidu.com/s?wd=%s",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    engineError?.let { message ->
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            text = message,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val error = onAddSearchEngine(engineName, engineUrl)
+                    if (error == null) {
+                        showAddEngineDialog = false
+                    } else {
+                        engineError = error
+                    }
+                }) { Text("保存") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAddEngineDialog = false }) { Text("取消") }
             },
         )
     }
@@ -378,6 +485,44 @@ fun SearchHomeSettingsScreen(
                 TextButton(onClick = { showHomeBackgroundDialog = false }) { Text("完成") }
             },
         )
+    }
+}
+
+/**
+ * 搜索引擎弹窗里的一行。
+ *
+ * 自定义引擎多给一个删除按钮：条目是用户自己加的，删不掉会越攒越多。
+ */
+@Composable
+private fun EngineOptionRow(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    onRemove: (() -> Unit)? = null,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        RadioButton(selected = selected, onClick = onClick)
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodyLarge,
+            modifier = Modifier.weight(1f),
+        )
+        if (onRemove != null) {
+            IconButton(onClick = onRemove) {
+                Icon(
+                    imageVector = LingIcons.Close,
+                    contentDescription = "删除 $label",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
     }
 }
 
@@ -546,9 +691,13 @@ fun BrowsingSettingsScreen(
     userScriptCount: Int,
     onOpenUserScripts: () -> Unit,
     onOpenLinksExternal: (Boolean) -> Unit,
+    /** 保存自定义 UA；返回 null 表示成功，否则为错误原因。 */
+    onCustomUserAgent: (String) -> String?,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    var showUserAgentDialog by remember { mutableStateOf(false) }
+
     SettingsPageScaffold(
         title = SettingsGroup.BROWSING.title,
         onBack = onBack,
@@ -567,9 +716,23 @@ fun BrowsingSettingsScreen(
                 SwitchRow(
                     icon = LingIcons.Javascript,
                     title = "启用 JavaScript",
-                    subtitle = "关闭可提升速度并减少干扰",
+                    subtitle = "绝大多数网站依赖 JavaScript，关闭后可能无法正常显示或交互",
                     checked = settings.javaScriptEnabled,
                     onCheckedChange = onJavaScript,
+                )
+            }
+            item {
+                SettingRow(
+                    icon = LingIcons.DesktopWindows,
+                    title = "自定义 User-Agent",
+                    subtitle = when {
+                        settings.customUserAgent.isBlank() ->
+                            "跟随电脑模式自动切换（手机 / 桌面 UA），点按可固定一个 UA"
+                        settings.customUserAgent.length > 60 ->
+                            "已自定义（${settings.customUserAgent.length} 个字符），点按修改"
+                        else -> "已自定义：${settings.customUserAgent}"
+                    },
+                    onClick = { showUserAgentDialog = true },
                 )
             }
             item {
@@ -655,6 +818,61 @@ fun BrowsingSettingsScreen(
             }
         },
     )
+
+    // ---- 自定义 User-Agent ----
+    if (showUserAgentDialog) {
+        var draft by remember { mutableStateOf(settings.customUserAgent) }
+        var uaError by remember { mutableStateOf<String?>(null) }
+        AlertDialog(
+            onDismissRequest = { showUserAgentDialog = false },
+            title = { Text("自定义 User-Agent") },
+            text = {
+                Column {
+                    OutlinedTextField(
+                        value = draft,
+                        onValueChange = {
+                            draft = it
+                            uaError = null
+                        },
+                        // 单行：UA 不允许换行，也避免多行输入看起来像"可以随便换行"
+                        singleLine = true,
+                        label = { Text("User-Agent") },
+                        placeholder = { Text("Mozilla/5.0 (...)") },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = "留空保存即恢复默认：跟随电脑模式自动切换手机 / 桌面 UA。" +
+                            "填写后固定使用该值，电脑模式开关不再改变 UA。" +
+                            "修改后需刷新页面才会生效。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    uaError?.let { message ->
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            text = message,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val error = onCustomUserAgent(draft)
+                    if (error == null) {
+                        showUserAgentDialog = false
+                    } else {
+                        uaError = error
+                    }
+                }) { Text("保存") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showUserAgentDialog = false }) { Text("取消") }
+            },
+        )
+    }
 }
 
 /**
@@ -857,14 +1075,17 @@ fun DownloadSettingsScreen(
 
 /**
  * 「隐私」子页。
+ *
+ * 清除浏览数据支持**逐项选择**：只想清 Cookie 换个登录态的用户，不该被迫
+ * 连历史记录一起丢掉。默认全选，保持「点两下就清干净」的顺手程度。
  */
 @Composable
 fun PrivacySettingsScreen(
-    onClearData: () -> Unit,
+    onClearData: (history: Boolean, cookies: Boolean, cache: Boolean, session: Boolean) -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    var confirmClear by remember { mutableStateOf(false) }
+    var showClearDialog by remember { mutableStateOf(false) }
 
     SettingsPageScaffold(
         title = SettingsGroup.PRIVACY.title,
@@ -875,29 +1096,100 @@ fun PrivacySettingsScreen(
                 SettingRow(
                     icon = LingIcons.DeleteSweep,
                     title = "清除浏览数据",
-                    subtitle = "缓存、Cookie 与历史记录",
-                    onClick = { confirmClear = true },
+                    subtitle = "可选择清除历史记录、Cookie、缓存或标签页会话",
+                    onClick = { showClearDialog = true },
                 )
             }
         },
     )
 
-    // ---- 清除数据确认 ----
-    if (confirmClear) {
+    if (showClearDialog) {
+        // 弹窗每次打开都回到「全部勾选」，不保留上次的勾选状态 —— 免得
+        // 用户以为清得很干净，实际上次取消过某项。
+        var clearHistory by remember { mutableStateOf(true) }
+        var clearCookies by remember { mutableStateOf(true) }
+        var clearCache by remember { mutableStateOf(true) }
+        var clearSession by remember { mutableStateOf(true) }
+        val anySelected = clearHistory || clearCookies || clearCache || clearSession
+
         AlertDialog(
-            onDismissRequest = { confirmClear = false },
-            title = { Text("清除浏览数据？") },
-            text = { Text("将清除缓存、Cookie 与全部历史记录，且不可撤销。") },
+            onDismissRequest = { showClearDialog = false },
+            title = { Text("清除浏览数据") },
+            text = {
+                Column {
+                    Text(
+                        text = "勾选要清除的内容，清除后不可恢复。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    ClearOptionRow(
+                        title = "历史记录",
+                        subtitle = "访问记录与网页前进/后退历史",
+                        checked = clearHistory,
+                        onCheckedChange = { clearHistory = it },
+                    )
+                    ClearOptionRow(
+                        title = "Cookie 与站点数据",
+                        subtitle = "含各站点的登录态、localStorage",
+                        checked = clearCookies,
+                        onCheckedChange = { clearCookies = it },
+                    )
+                    ClearOptionRow(
+                        title = "缓存",
+                        subtitle = "已下载的网页资源，清除后首次打开会略慢",
+                        checked = clearCache,
+                        onCheckedChange = { clearCache = it },
+                    )
+                    ClearOptionRow(
+                        title = "标签页会话",
+                        subtitle = "下次启动不再恢复当前标签页",
+                        checked = clearSession,
+                        onCheckedChange = { clearSession = it },
+                    )
+                }
+            },
             confirmButton = {
-                TextButton(onClick = {
-                    confirmClear = false
-                    onClearData()
-                }) { Text("清除") }
+                TextButton(
+                    enabled = anySelected,
+                    onClick = {
+                        showClearDialog = false
+                        onClearData(clearHistory, clearCookies, clearCache, clearSession)
+                    },
+                ) { Text("清除") }
             },
             dismissButton = {
-                TextButton(onClick = { confirmClear = false }) { Text("取消") }
+                TextButton(onClick = { showClearDialog = false }) { Text("取消") }
             },
         )
+    }
+}
+
+/** 清除数据弹窗里的一行勾选项。 */
+@Composable
+private fun ClearOptionRow(
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onCheckedChange(!checked) }
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Checkbox(checked = checked, onCheckedChange = onCheckedChange)
+        Spacer(Modifier.width(4.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge)
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }
 
@@ -914,7 +1206,9 @@ fun PrivacySettingsScreen(
 @Composable
 fun BackupSettingsScreen(
     onExport: (Uri) -> Unit,
+    onExportHistory: (Uri) -> Unit,
     onImport: (Uri) -> Unit,
+    onImportHistory: (Uri) -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -933,6 +1227,20 @@ fun BackupSettingsScreen(
         if (uri != null) onImport(uri)
     }
 
+    // 导出历史：同样走 SAF，用户选位置、文件默认叫 history.html。
+    val exportHistoryLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("text/html"),
+    ) { uri ->
+        if (uri != null) onExportHistory(uri)
+    }
+
+    // 导入历史：读取本应用导出的同一个 HTML 表格式。
+    val importHistoryLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri != null) onImportHistory(uri)
+    }
+
     SettingsPageScaffold(
         title = SettingsGroup.BACKUP.title,
         onBack = onBack,
@@ -944,6 +1252,14 @@ fun BackupSettingsScreen(
                     title = "导出书签",
                     subtitle = "全部书签保存为一个 HTML 文件，可在电脑或其它浏览器打开",
                     onClick = { exportLauncher.launch("bookmarks.html") },
+                )
+            }
+            item {
+                SettingRow(
+                    icon = LingIcons.History,
+                    title = "导出历史记录",
+                    subtitle = "全部访问记录保存为 HTML 文件，可在任何浏览器中查看",
+                    onClick = { exportHistoryLauncher.launch("history.html") },
                 )
             }
             item {
@@ -967,8 +1283,26 @@ fun BackupSettingsScreen(
                 )
             }
             item {
+                SettingRow(
+                    icon = LingIcons.History,
+                    title = "导入历史记录",
+                    // 说清只认自己的格式，避免用户拿普通网页/其它浏览器的 HTML 来试
+                    subtitle = "读取本应用导出的历史 HTML，重复的网址会自动跳过",
+                    onClick = {
+                        importHistoryLauncher.launch(
+                            arrayOf(
+                                "text/html",
+                                "application/xhtml+xml",
+                                "text/plain",
+                                "*/*",
+                            ),
+                        )
+                    },
+                )
+            }
+            item {
                 Text(
-                    // 把两个关键承诺写清楚：导入是合并、UI 不会丢书签；
+                    // 把两个关键承诺写清楚：导入是合并、UI 不会丢数据；
                     // 图标不在格式里，导入后会由书签页自动重建。
                     text = "导入采用合并方式：只新增、不删除，库里已有的网址会跳过。" +
                         "网站图标不在备份文件里，导入后打开书签页会自动补齐。",

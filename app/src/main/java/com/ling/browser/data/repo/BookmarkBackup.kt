@@ -150,7 +150,7 @@ fun parseNetscapeHtml(html: String): List<ImportedBookmark> {
  * 混进书签列表等于在本地埋一个钓鱼/XSS 入口（点一下就跑起来）。
  * 其余协议（含 `mailto:` 之类）放行 —— 不能因为少见就悄悄丢掉用户的收藏。
  */
-private fun isImportableUrl(url: String): Boolean {
+internal fun isImportableUrl(url: String): Boolean {
     if (url.isEmpty()) return false
     val lower = url.lowercase()
     return !(lower.startsWith("javascript:") ||
@@ -205,7 +205,7 @@ private val ATTR = Regex(
     RegexOption.IGNORE_CASE,
 )
 
-private fun attrOf(attrs: String, name: String): String? =
+internal fun attrOf(attrs: String, name: String): String? =
     ATTR.findAll(attrs)
         .firstOrNull { it.groupValues[1].equals(name, ignoreCase = true) }
         ?.let { m ->
@@ -236,7 +236,7 @@ private fun escapeHtml(raw: String): String {
  * 数字实体（`&#39;` / `&#x27;`）也要认：别的浏览器导出的撇号就是这种写法，
  * 只认 5 个具名实体会让标题里冒出一串 `&#39;`。
  */
-private fun decodeHtml(raw: String): String {
+internal fun decodeHtml(raw: String): String {
     if ('&' !in raw) return raw
     return ENTITY.replace(raw) { m ->
         when (val entity = m.groupValues[1]) {

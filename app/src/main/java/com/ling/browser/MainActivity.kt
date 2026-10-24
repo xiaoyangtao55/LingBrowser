@@ -746,6 +746,9 @@ private fun LingApp(viewModel: BrowserViewModel) {
                 Route.SettingsSearchHome -> SearchHomeSettingsScreen(
                     settings = settings,
                     onSearchEngine = viewModel::setSearchEngine,
+                    onSelectCustomEngine = viewModel::selectCustomSearchEngine,
+                    onAddSearchEngine = viewModel::addSearchEngine,
+                    onRemoveSearchEngine = viewModel::removeSearchEngine,
                     onHomepage = viewModel::setCustomHomepage,
                     onHomeBackground = viewModel::setHomeBackground,
                     onHomeBackgroundImage = viewModel::setHomeBackgroundImageUri,
@@ -779,6 +782,7 @@ private fun LingApp(viewModel: BrowserViewModel) {
                         userScriptCount = scripts.size,
                         onOpenUserScripts = { push(Route.UserScripts) },
                         onOpenLinksExternal = viewModel::setOpenLinksInExternalApp,
+                        onCustomUserAgent = viewModel::setCustomUserAgent,
                         onBack = pop,
                     )
                 }
@@ -792,13 +796,15 @@ private fun LingApp(viewModel: BrowserViewModel) {
                 )
 
                 Route.SettingsPrivacy -> PrivacySettingsScreen(
-                    onClearData = viewModel::clearAllData,
+                    onClearData = viewModel::clearBrowsingData,
                     onBack = pop,
                 )
 
                 Route.SettingsBackup -> BackupSettingsScreen(
                     onExport = viewModel::exportBookmarks,
+                    onExportHistory = viewModel::exportHistory,
                     onImport = viewModel::importBookmarks,
+                    onImportHistory = viewModel::importHistory,
                     onBack = pop,
                 )
 

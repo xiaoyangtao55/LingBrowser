@@ -31,8 +31,11 @@ import com.ling.browser.data.repo.ScriptPreview
 import com.ling.browser.data.repo.UserScriptEntry
 import com.ling.browser.data.repo.ValueWrite
 import com.ling.browser.data.repo.deriveFolders
+import com.ling.browser.data.repo.parseHistoryHtml
 import com.ling.browser.data.repo.parseNetscapeHtml
+import com.ling.browser.data.repo.planHistoryImport
 import com.ling.browser.data.repo.planImport
+import com.ling.browser.data.repo.toHistoryHtml
 import com.ling.browser.data.repo.toNetscapeHtml
 import com.ling.browser.data.prefs.DownloadLocation
 import com.ling.browser.data.prefs.DownloadNetwork
@@ -280,7 +283,7 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
         // 主页搜索框提交：判定"网址还是搜索词"用地址栏同一套逻辑（UrlUtils），
         // 在当前标签打开 —— 网页那边只负责把输入交回来，不做任何判定。
         tabManager.onSearchRequested = { query ->
-            navigate(UrlUtils.toUrl(query, settings.value.searchEngine))
+            navigate(searchTarget(query))
         }
         // 长按链接/图片：只把命中结果交给 UI，菜单项由界面按目标类型拼
         tabManager.onLongPress = { target ->
@@ -409,7 +412,7 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
     fun submitAddress(input: String = _addressText.value) {
         val query = input.trim()
         if (query.isEmpty()) return
-        val url = UrlUtils.toUrl(query, settings.value.searchEngine)
+        val url = searchTarget(query)
         navigate(url)
         // 固定住地址栏文本，别让失焦回调读到尚未更新的 tab.url
         _addressText.value = url
@@ -480,7 +483,7 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
      * 不该先留一个空标签再新开一个；否则新开一个（与主流浏览器一致）。
      */
     fun openExternalUrl(raw: String) {
-        val url = UrlUtils.toUrl(raw, settings.value.searchEngine)
+        val url = searchTarget(raw)
         if (!UrlScheme.isNavigable(url)) {
             // 例如 content:// / intent:// —— 交给 WebView 只会白屏，明确说一声
             _message.value = "不支持打开这个链接"
@@ -512,7 +515,18 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
     fun openSharedText(text: String) {
         val query = text.trim()
         if (query.isEmpty()) return
-        openExternalUrl(UrlUtils.toUrl(query, settings.value.searchEngine))
+        openExternalUrl(searchTarget(query))
+    }
+
+    /**
+     * 按当前生效的搜索引擎解析输入。
+     *
+     * 取模板而不是枚举：自定义搜索引擎只有地址模板，走同一套逻辑才不会
+     * 出现「设置了自定义引擎，地址栏却还在用必应」的分叉。
+     */
+    private fun searchTarget(input: String): String {
+        val s = settings.value
+        return UrlUtils.toUrl(input, s.searchQueryUrl, s.searchHomepage)
     }
 
     // ------------------------------------------------------------ 标签页
@@ -719,18 +733,86 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val list = container.bookmarks.bookmarks.value
             val text = toNetscapeHtml(list)
-            val written = withContext(Dispatchers.IO) {
-                runCatching {
-                    getApplication<Application>().contentResolver
-                        .openOutputStream(target)?.use { output ->
-                            output.write(text.toByteArray(Charsets.UTF_8))
-                        } ?: error("无法写入所选位置")
-                }.isSuccess
-            }
+            val written = writeTextTo(target, text)
             _message.value = if (written) {
                 "已导出 ${list.size} 条书签"
             } else {
                 "导出失败，请换个位置重试"
+            }
+        }
+    }
+
+    /** 把文本写到 SAF 选定的目标；失败返回 false（原因统一提示，不区分细类）。 */
+    private suspend fun writeTextTo(target: Uri, text: String): Boolean =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                getApplication<Application>().contentResolver
+                    .openOutputStream(target)?.use { output ->
+                        output.write(text.toByteArray(Charsets.UTF_8))
+                    } ?: error("无法写入所选位置")
+            }.isSuccess
+        }
+
+    /**
+     * 把全部历史记录导出到用户选定的文件。
+     *
+     * 输出为带标题、网址与访问时间的 HTML 表：任何浏览器/文本编辑器都能打开，
+     * 不像自有格式那样「导出后只有本应用认」。
+     */
+    fun exportHistory(target: Uri) {
+        viewModelScope.launch {
+            val list = container.history.history.value
+            if (list.isEmpty()) {
+                _message.value = "暂无历史记录可导出"
+                return@launch
+            }
+            val text = toHistoryHtml(list)
+            val written = writeTextTo(target, text)
+            _message.value = if (written) {
+                "已导出 ${list.size} 条历史记录"
+            } else {
+                "导出失败，请换个位置重试"
+            }
+        }
+    }
+
+    /**
+     * 从用户选定的文件导入历史记录。
+     *
+     * 与书签导入同一套策略：**合并**而不是覆盖，库里已有同网址的条目跳过。
+     * 导出文件是本应用自己的 HTML 表格式；解析只认「三列 + 链接」的行，
+     * 误选普通网页不会把整页链接当成历史导进来（见 [parseHistoryHtml]）。
+     */
+    fun importHistory(source: Uri) {
+        viewModelScope.launch {
+            val text = withContext(Dispatchers.IO) { readTextCapped(source) }
+            if (text == null) {
+                _message.value = "读取失败：文件过大或无法读取"
+                return@launch
+            }
+            val parsed = parseHistoryHtml(text)
+            if (parsed.isEmpty()) {
+                _message.value = "这个文件里没有可导入的历史记录"
+                return@launch
+            }
+            val plan = planHistoryImport(
+                container.history.history.value.map { it.url }.toSet(),
+                parsed,
+            )
+            val added = container.history.importAll(
+                plan.toAdd.map {
+                    HistoryEntry(
+                        title = it.title,
+                        url = it.url,
+                        visitedAt = it.visitedAt,
+                        visitCount = it.visitCount,
+                    )
+                },
+            )
+            _message.value = when {
+                added == 0 -> "没有新增（${plan.skipped} 条已存在或重复）"
+                plan.skipped == 0 -> "已导入 $added 条历史记录"
+                else -> "已导入 $added 条，跳过 ${plan.skipped} 条重复"
             }
         }
     }
@@ -1145,20 +1227,73 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun clearAllData() {
-        tabManager.clearBrowsingData()
-        viewModelScope.launch {
-            container.history.clear()
-            _message.value = "已清除缓存与 Cookie"
+    /**
+     * 选择性清除浏览数据。
+     *
+     * 四项各自独立：用户可能只想清掉 Cookie 换个登录态，而不想丢掉历史；
+     * 之前的一键全清做不到这一点。逐项执行后如实回报清掉了哪些，
+     * 避免"点了清除但不确定清没清"。
+     */
+    fun clearBrowsingData(
+        history: Boolean,
+        cookies: Boolean,
+        cache: Boolean,
+        session: Boolean,
+    ) {
+        if (history) {
+            viewModelScope.launch { container.history.clear() }
+            tabManager.clearWebViewNavigationHistory()
         }
-        // 会话快照也要清：不清的话用户"清除数据"后重启，
-        // 上次的标签页会原样复活，看起来像清除没生效。
-        clearSession()
+        if (cookies) tabManager.clearCookiesAndSiteData()
+        if (cache) tabManager.clearCacheData()
+        if (session) clearSession()
+
+        val parts = buildList {
+            if (history) add("历史记录")
+            if (cookies) add("Cookie 与站点数据")
+            if (cache) add("缓存")
+            if (session) add("标签页会话")
+        }
+        _message.value = if (parts.isEmpty()) {
+            "请至少选择一项"
+        } else {
+            "已清除${parts.joinToString("、")}"
+        }
     }
 
     // ------------------------------------------------------------ 设置
 
     fun setSearchEngine(engine: SearchEngine) = io { container.settings.setSearchEngine(engine) }
+
+    /**
+     * 新增自定义搜索引擎。
+     *
+     * 校验放在这里而不是 UI：设置层的入口只有一个，规则集中在一处
+     * 才不会出现"某个入口能存进畸形模板、搜索时崩溃"。
+     *
+     * @return null 表示成功；否则是给用户看的原因。
+     */
+    fun addSearchEngine(name: String, queryUrl: String): String? {
+        val trimmedName = name.trim()
+        val trimmedUrl = queryUrl.trim()
+        if (trimmedName.isEmpty()) return "请输入搜索引擎名称"
+        if (!trimmedUrl.contains("%s")) return "搜索地址需包含 %s 占位符"
+        if (!trimmedUrl.startsWith("http://") && !trimmedUrl.startsWith("https://")) {
+            return "搜索地址需以 http:// 或 https:// 开头"
+        }
+        if (settings.value.customSearchEngines.any { it.name == trimmedName }) {
+            return "已存在同名搜索引擎"
+        }
+        io { container.settings.addCustomSearchEngine(trimmedName, trimmedUrl) }
+        return null
+    }
+
+    fun removeSearchEngine(name: String) =
+        io { container.settings.removeCustomSearchEngine(name) }
+
+    fun selectCustomSearchEngine(name: String) =
+        io { container.settings.selectCustomSearchEngine(name) }
+
     fun setCustomHomepage(url: String) = io { container.settings.setCustomHomepage(url) }
 
     /** 切换内置主页的背景模式（纯色 / 自定义图片）。 */
@@ -1169,6 +1304,21 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
         io { container.settings.setHomeBackgroundImageUri(uri) }
     fun setNightMode(mode: NightMode) = io { container.settings.setNightMode(mode) }
     fun setDesktopMode(on: Boolean) = io { container.settings.setDesktopMode(on) }
+
+    /**
+     * 保存自定义 User-Agent。返回 null 表示已保存，否则是错误原因（供 UI 就地提示）。
+     *
+     * 只接受可打印 ASCII：这个值会进入 WebView、下载与图标抓取等 HTTP 请求头，
+     * 换行/控制字符等于允许在本地注入额外请求头；中文/emoji 则会被部分实现
+     * 拒绝或写成乱码。空串是合法的，表示恢复"跟随电脑模式"。
+     */
+    fun setCustomUserAgent(raw: String): String? {
+        val ua = raw.trim()
+        if (ua.length > MAX_USER_AGENT_LENGTH) return "不能超过 $MAX_USER_AGENT_LENGTH 个字符"
+        if (ua.any { it.code !in 0x20..0x7E }) return "只能使用英文字母、数字和常见符号"
+        io { container.settings.setCustomUserAgent(ua) }
+        return null
+    }
     fun setForceDark(on: Boolean) = io { container.settings.setForceDarkWebPages(on) }
     fun setBlockImages(on: Boolean) = io { container.settings.setBlockImages(on) }
     fun setJavaScript(on: Boolean) = io { container.settings.setJavaScriptEnabled(on) }
@@ -2504,6 +2654,9 @@ data class PendingUserScript(
     val loading: Boolean = true,
     val preview: ScriptPreview? = null,
 )
+
+/** 自定义 UA 的长度上限：再长就不像 User-Agent，只会白占存储。 */
+private const val MAX_USER_AGENT_LENGTH = 512
 
 /** 大小探测超时。设短一些：探测只是锦上添花，不该让确认框卡着不显示。 */
 private const val PROBE_TIMEOUT_MS = 4000
