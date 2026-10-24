@@ -211,17 +211,17 @@ class DownloadService : Service() {
             val d = live.first()
             if (d.status == DownloadStatus.PAUSED) {
                 builder.addAction(
-                    android.R.drawable.ic_media_play, "继续",
+                    R.drawable.ic_play, "继续",
                     actionIntent(d.id, ACTION_RESUME, REQ_RESUME),
                 )
             } else {
                 builder.addAction(
-                    android.R.drawable.ic_media_pause, "暂停",
+                    R.drawable.ic_pause, "暂停",
                     actionIntent(d.id, ACTION_PAUSE, REQ_PAUSE),
                 )
             }
             builder.addAction(
-                android.R.drawable.ic_menu_close_clear_cancel, "取消",
+                R.drawable.ic_close, "取消",
                 actionIntent(d.id, ACTION_CANCEL, REQ_CANCEL),
             )
         }
