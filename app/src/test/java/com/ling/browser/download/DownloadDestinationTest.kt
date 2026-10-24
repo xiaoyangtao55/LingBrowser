@@ -2,6 +2,7 @@ package com.ling.browser.download
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -33,8 +34,28 @@ class DownloadDestinationTest {
     }
 
     @Test
-    fun `超长名字截断到上限`() {
+    fun `超长名字截断到上限且保留扩展名`() {
         val result = DownloadDestination.sanitizeFileName("a".repeat(500) + ".txt")
         assertEquals(120, result.length)
+        assertTrue(result.endsWith(".txt"))
+    }
+
+    @Test
+    fun `非法字符与控制字符被剔除`() {
+        assertEquals("abc.txt", DownloadDestination.sanitizeFileName("a:b*c?.txt"))
+        assertEquals("ab.txt", DownloadDestination.sanitizeFileName("a\u0000b.txt"))
+        assertEquals("a.txt", DownloadDestination.sanitizeFileName("a.txt\u007f"))
+    }
+
+    @Test
+    fun `结尾的空格与点被去掉`() {
+        assertEquals("name", DownloadDestination.sanitizeFileName("name. "))
+        assertEquals("name", DownloadDestination.sanitizeFileName("name..."))
+    }
+
+    @Test
+    fun `统一 NFC 避免看起来一样的重名`() {
+        // e + 组合重音符 与 预组合 é 必须收敛成同一个名字
+        assertEquals("caf\u00e9.txt", DownloadDestination.sanitizeFileName("cafe\u0301.txt"))
     }
 }

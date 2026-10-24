@@ -191,6 +191,14 @@ class DownloadEngine(
     private val taskOverwrite = mutableSetOf<Long>()
 
     /**
+     * 文件名只是按 URL/MIME 猜出来的任务。
+     *
+     * 这类任务允许在拿到 `Content-Disposition` 后改名；脚本 `n`、`saveAs` 等
+     * 明确指定的名字不在此列 —— 用户的选择优先于服务端。
+     */
+    private val taskImplicitNames = mutableSetOf<Long>()
+
+    /**
      * taskId -> 上一次进度采样的快照，用于估算速度。
      *
      * 只在 [writeBody] 写盘期间读写（同一协程），因此不需要 [stateMutex] 保护。
@@ -239,6 +247,8 @@ class DownloadEngine(
      *   `UNIQUE` 在入队时改名，`OVERWRITE` 在开写前删掉旧文件。
      * @param userAgent 本次下载使用的 UA；为空时退回引擎默认值。带上页面同款 UA
      *   能避免一部分站点把下载请求当成爬虫。
+     * @param explicitName 名字是否由用户/脚本明确指定。false 表示只是按 URL 猜的，
+     *   下载开始后允许用 `Content-Disposition` 给出的名字替换。
      */
     suspend fun enqueue(
         url: String,
@@ -249,13 +259,13 @@ class DownloadEngine(
         targetUri: String? = null,
         conflict: ConflictAction? = null,
         userAgent: String? = null,
+        explicitName: Boolean = true,
     ): Long? = withContext(Dispatchers.IO) {
             if (!url.startsWith("http://") && !url.startsWith("https://")) {
                 return@withContext null
             }
             val requested = fileName?.takeIf { it.isNotBlank() }
-                ?: url.substringAfterLast('/').substringBefore('?').takeIf { it.isNotBlank() }
-                ?: "download"
+                ?: DownloadFileName.resolve(url, mimeType, contentDisposition = null)
             // 选了 SAF 目标时文件名由用户决定，不再做唯一化。
             val name = if (targetUri == null && conflict == ConflictAction.UNIQUE) {
                 DownloadDestination.uniqueName(appContext, requested, location)
@@ -274,6 +284,8 @@ class DownloadEngine(
             if (headers.isNotEmpty()) taskHeaders[id] = headers
             userAgent?.takeIf { it.isNotBlank() }?.let { taskUserAgents[id] = it }
             if (targetUri != null) taskUris[id] = targetUri
+            // 名字只是按 URL 猜的：下载开始后若服务端给了 Content-Disposition，允许改名。
+            if (targetUri == null && !explicitName) taskImplicitNames.add(id)
             if (targetUri == null && conflict == ConflictAction.OVERWRITE) taskOverwrite.add(id)
             val entry = DownloadEntry(
                 id = id,
@@ -352,6 +364,7 @@ class DownloadEngine(
             taskOverwrite.remove(taskId)
             autoPaused.remove(taskId)
             networkOverrides.remove(taskId)
+            taskImplicitNames.remove(taskId)
             ChunkStore.delete(appContext, taskId)
         }
         publish()
@@ -374,6 +387,7 @@ class DownloadEngine(
             taskOverwrite.clear()
             autoPaused.clear()
             networkOverrides.clear()
+            taskImplicitNames.clear()
             ChunkStore.clearAll(appContext)
         }
         publish()
@@ -542,31 +556,128 @@ class DownloadEngine(
 
     private suspend fun executeDownload(taskId: Long, entry: DownloadEntry) {
         val safUri = taskUris[taskId]
-        val target = if (safUri != null) {
+        if (safUri != null) {
             // saveAs：写用户通过系统选择器指定的文档，不参与续传。
-            DownloadDestination.resolveUri(appContext, android.net.Uri.parse(safUri))
-        } else {
-            // overwrite：先把同名旧文件删掉，否则它的字节数会被当成续传起点。
-            if (taskOverwrite.remove(taskId)) {
-                DownloadDestination.deleteExisting(
-                    appContext, entry.fileName, entry.downloadLocation,
-                )
-            }
-            // 用下载条目里记录的位置解析目标。续传时把 entry.localPath 也传进去 ——
-            // 若上次落在 MediaStore（公共目录），它会复用同一个 URI，而不是仅凭
-            // 文件名重建（未完成的 MediaStore 条目对查询不可见，靠文件名找不到）。
-            DownloadDestination.resolve(
-                appContext, entry.fileName, entry.downloadLocation, entry.localPath,
-            ) ?: throw java.io.IOException("无法创建下载目标（请检查存储权限）")
+            val target = DownloadDestination.resolveUri(appContext, android.net.Uri.parse(safUri))
+            downloadTo(taskId, entry, target, probe = null, mayRename = false)
+            return
         }
-        downloadTo(taskId, entry, target)
+
+        // 名字是猜的、且还没有落点（新任务）：先 HEAD 一次，用最权威的
+        // Content-Disposition 定名。这次请求本来就为分块探测而发，不额外花钱。
+        val mayRename = taskImplicitNames.contains(taskId) && entry.localPath == null
+        val probe = if (mayRename) probeDownload(taskId, entry) else null
+        val remoteName = probe?.contentDisposition
+            ?.let { DownloadFileName.resolve(entry.url, entry.mimeType, it) }
+        val named = if (remoteName != null && remoteName != entry.fileName) {
+            renameEntry(taskId, entry, remoteName)
+        } else {
+            entry
+        }
+
+        // overwrite：先把同名旧文件删掉，否则它的字节数会被当成续传起点。
+        // 改名后要以**最终名字**为准，删错文件会让新下载追加到旧内容上。
+        if (taskOverwrite.remove(taskId)) {
+            DownloadDestination.deleteExisting(
+                appContext, named.fileName, named.downloadLocation,
+            )
+        }
+        // 用下载条目里记录的位置解析目标。续传时把 entry.localPath 也传进去 ——
+        // 若上次落在 MediaStore（公共目录），它会复用同一个 URI，而不是仅凭
+        // 文件名重建（未完成的 MediaStore 条目对查询不可见，靠文件名找不到）。
+        val target = DownloadDestination.resolve(
+            appContext, named.fileName, named.downloadLocation, named.localPath,
+        ) ?: throw java.io.IOException("无法创建下载目标（请检查存储权限）")
+        downloadTo(taskId, named, target, probe, mayRename)
     }
 
-    /** 把一次请求写进已解析好的目标；成功路径统一在这里收尾。 */
+    /** HEAD 探测的结果：文件大小、是否支持 Range、服务端给的文件名。 */
+    private data class ProbeResult(
+        val total: Long?,
+        val rangeSupported: Boolean,
+        val contentDisposition: String?,
+    )
+
+    /**
+     * 用一次 `HEAD + Range: bytes=0-0` 拿到分块决策与文件名所需的全部信息。
+     *
+     * 探测失败（405/403、超时、服务器乱来）一律返回 null：分块与改名都只是
+     * 优化手段，不能成为下载的前置条件。
+     */
+    private fun probeDownload(taskId: Long, entry: DownloadEntry): ProbeResult? = runCatching {
+        val request = buildRequest(taskId, entry, "bytes=0-0")
+            .newBuilder()
+            .head()
+            .build()
+        client.newCall(request).execute().use { response ->
+            if (response.code != 206 && !response.isSuccessful) return@runCatching null
+            // 206 本身就证明支持 Range；200 则要看 Accept-Ranges。
+            val rangeSupported = response.code == 206 ||
+                response.header("Accept-Ranges")?.contains("bytes", ignoreCase = true) == true
+            val total = when {
+                response.code == 206 -> parseContentRangeTotal(response.header("Content-Range"))
+                else -> response.body?.contentLength()?.takeIf { it > 0 }
+            }
+            ProbeResult(total, rangeSupported, response.header("Content-Disposition"))
+        }
+    }.getOrNull()
+
+    /**
+     * 只为读 `Content-Disposition` 的一次极轻量 GET。
+     *
+     * 用 `Range: bytes=0-0` 而不是普通 GET：万一站点虚假声明支持 Range，
+     * 也只会白送 1 个字节。响应体不读，直接关闭。
+     */
+    private fun fetchContentDisposition(taskId: Long, entry: DownloadEntry): String? =
+        runCatching {
+            client.newCall(buildRequest(taskId, entry, "bytes=0-0")).execute().use { response ->
+                if (response.code != 206 && !response.isSuccessful) return@runCatching null
+                response.header("Content-Disposition")
+            }
+        }.getOrNull()
+
+    /**
+     * 因为服务端给了 Content-Disposition 而改名。
+     *
+     * 只改内存/库里的名字，不碰文件 —— 此时目标还没解析、更没写入，所以安全。
+     * 同名文件仍要走 uniquify，避免把用户已有文件覆盖掉。
+     */
+    private suspend fun renameEntry(
+        taskId: Long,
+        entry: DownloadEntry,
+        newName: String,
+    ): DownloadEntry {
+        val finalName = if (taskOverwrite.contains(taskId)) {
+            newName
+        } else {
+            DownloadDestination.uniqueName(appContext, newName, entry.downloadLocation)
+        }
+        if (finalName == entry.fileName) return entry
+        stateMutex.withLock {
+            tasks.value[taskId]?.let { cur ->
+                val renamed = cur.copy(fileName = finalName)
+                tasks.update { it + (taskId to renamed) }
+                persist(renamed)
+            }
+        }
+        publish()
+        return entry.copy(fileName = finalName)
+    }
+
+    /**
+     * 把一次请求写进已解析好的目标；成功路径统一在这里收尾。
+     *
+     * @param probe    已经做过的 HEAD 探测；null 表示没探过（例如显式命名的任务），
+     *                 需要分块时会在本方法内补一次。
+     * @param mayRename 名字是按 URL 猜的，允许在 GET 响应头里再认一次
+     *                 Content-Disposition（有些站点只在 GET 上给这个头）。
+     */
     private suspend fun downloadTo(
         taskId: Long,
         entry: DownloadEntry,
         target: DownloadDestination.Target,
+        probe: ProbeResult?,
+        mayRename: Boolean,
     ) {
         // 1) 优先接续分块现场：上一轮可能是被暂停、或进程被杀打断的。
         //    分块写的文件中间有空洞，绝对不能用 length() 当进度（见 ChunkPlan）。
@@ -596,23 +707,48 @@ class DownloadEngine(
         // 2) 全新任务且目标能随机写：先探一下服务端是否支持 Range。
         //    支持就分块并发，能明显改善「单连接被限速」的大文件下载。
         if (existing == 0L && target.supportsRandomAccess) {
-            val total = probeRangeSupport(taskId, entry)
-            val plan = total?.let { ChunkPlan.of(it, target.displayPath()) }
+            val info = probe ?: probeDownload(taskId, entry)
+            val total = info?.takeIf { it.rangeSupported }?.total
+            var chunkTarget = target
+            // 分块路径不会走下面的单流 GET，所以这里单独补一次 GET 侧改名：
+            // HEAD 没给 Content-Disposition 时，用 1 字节的 Range 请求再问一次。
+            if (total != null && mayRename && info?.contentDisposition == null) {
+                val cd = fetchContentDisposition(taskId, entry)
+                if (cd != null) {
+                    val remoteName = DownloadFileName.resolve(entry.url, entry.mimeType, cd)
+                    if (remoteName != entry.fileName) {
+                        chunkTarget = refineTarget(taskId, entry, remoteName, chunkTarget)
+                            ?: chunkTarget
+                    }
+                }
+            }
+            val plan = total?.let { ChunkPlan.of(it, chunkTarget.displayPath()) }
             if (plan != null) {
-                return runChunked(taskId, entry, target, plan)
+                return runChunked(taskId, entry, chunkTarget, plan)
             }
         }
 
         // 3) 单流路径（原有逻辑）
         val request = buildRequest(taskId, entry, if (existing > 0) "bytes=$existing-" else null)
 
+        var active = target
         client.newCall(request).execute().use { response ->
+            // GET 侧兜底改名：HEAD 常常拿不到 Content-Disposition，而 GET 会带。
+            // 此时目标还没写入任何字节，删掉重建是安全的。
+            if (mayRename && existing == 0L) {
+                val cd = response.header("Content-Disposition")
+                val remoteName = DownloadFileName.resolve(entry.url, entry.mimeType, cd)
+                if (remoteName != entry.fileName) {
+                    active = refineTarget(taskId, entry, remoteName, active) ?: active
+                }
+            }
+            val current = tasks.value[taskId] ?: entry
             val contentLength = response.body?.contentLength() ?: -1L
             val plan = planResume(existing, response.code, contentLength)
 
             if (plan.alreadyComplete) {
                 // 服务器 416：本地字节已覆盖整个文件，直接判定完成。
-                markSuccess(taskId, target)
+                markSuccess(taskId, active)
                 return
             }
             if (!response.isSuccessful) {
@@ -624,11 +760,11 @@ class DownloadEngine(
             // 用 plan 的追加/起点/total，而不是裸现有字节数：plan 已经处理过
             // 「服务器不支持 Range 必须从头重写」这类分支。
             stateMutex.withLock {
-                val running = entry.copy(
+                val running = current.copy(
                     status = DownloadStatus.RUNNING,
                     totalBytes = plan.total,
                     downloadedBytes = plan.start,
-                    localPath = target.displayPath(),
+                    localPath = active.displayPath(),
                 )
                 tasks.update { it + (taskId to running) }
                 persist(running)
@@ -640,7 +776,7 @@ class DownloadEngine(
             writeBody(
                 taskId = taskId,
                 response = response,
-                target = target,
+                target = active,
                 append = plan.append,
                 total = plan.total,
                 start = plan.start,
@@ -648,7 +784,41 @@ class DownloadEngine(
         }
 
         // 写盘完成 → 成功
-        markSuccess(taskId, target)
+        markSuccess(taskId, active)
+    }
+
+    /**
+     * GET 响应头给出了更好的名字：把刚创建、还是空的旧目标删掉，按新名字重建。
+     *
+     * 只在「新任务 + 尚未写入任何字节」时调用；一旦开始写盘就不改名，否则会
+     * 把已经下好的数据丢掉。返回 null 表示放弃改名（例如旧目标已经有数据）。
+     */
+    private suspend fun refineTarget(
+        taskId: Long,
+        entry: DownloadEntry,
+        newName: String,
+        current: DownloadDestination.Target,
+    ): DownloadDestination.Target? {
+        if (current.length() > 0) return null
+        val finalName = if (taskOverwrite.contains(taskId)) {
+            newName
+        } else {
+            DownloadDestination.uniqueName(appContext, newName, entry.downloadLocation)
+        }
+        if (finalName == entry.fileName) return null
+        current.delete()
+        val fresh = DownloadDestination.resolve(
+            appContext, finalName, entry.downloadLocation, null,
+        ) ?: return null
+        stateMutex.withLock {
+            tasks.value[taskId]?.let { cur ->
+                val renamed = cur.copy(fileName = finalName, localPath = fresh.displayPath())
+                tasks.update { it + (taskId to renamed) }
+                persist(renamed)
+            }
+        }
+        publish()
+        return fresh
     }
 
     /**
@@ -677,31 +847,6 @@ class DownloadEngine(
         }.build()
 
     /**
-     * 探测服务端是否支持 Range，并顺带拿到文件总大小。
-     *
-     * 用 `HEAD` + `Range: bytes=0-0` 而不是先发一个真实 GET 再掐断：后者会让服务端
-     * 白送一段数据、也多占一条连接。探测失败（405/403、超时、服务器乱来）一律
-     * 返回 null，退回单流下载 —— 分块只是提速手段，不能成为下载的前置条件。
-     */
-    private fun probeRangeSupport(taskId: Long, entry: DownloadEntry): Long? = runCatching {
-        val request = buildRequest(taskId, entry, "bytes=0-0")
-            .newBuilder()
-            .head()
-            .build()
-        client.newCall(request).execute().use { response ->
-            // 206 本身就证明支持 Range；200 则要看 Accept-Ranges。
-            val total = when {
-                response.code == 206 -> parseContentRangeTotal(response.header("Content-Range"))
-                response.isSuccessful -> response.body?.contentLength() ?: -1L
-                else -> -1L
-            }
-            val rangeSupported = response.code == 206 ||
-                response.header("Accept-Ranges")?.contains("bytes", ignoreCase = true) == true
-            total?.takeIf { it >= ChunkPlan.MIN_TOTAL_BYTES && rangeSupported }
-        }
-    }.getOrNull()
-
-    /**
      * 分块并发下载。
      *
      * 每块独占一个区间、各自开一条连接、各自 seek 到自己的起点写入，互不重叠；
@@ -714,9 +859,11 @@ class DownloadEngine(
         target: DownloadDestination.Target,
         plan: ChunkPlan,
     ) {
-        // 立即把总大小与已有进度写到条目上：界面马上能显示正确的百分比
+        // 立即把总大小与已有进度写到条目上：界面马上能显示正确的百分比。
+        // 取库里的当前条目而不是入参：上面可能刚因为 Content-Disposition 改过名。
+        val current = tasks.value[taskId] ?: entry
         stateMutex.withLock {
-            val running = entry.copy(
+            val running = current.copy(
                 status = DownloadStatus.RUNNING,
                 totalBytes = plan.total,
                 downloadedBytes = plan.downloaded(),
@@ -879,6 +1026,7 @@ class DownloadEngine(
         taskUris.remove(taskId)
         taskOverwrite.remove(taskId)
         networkOverrides.remove(taskId)
+        taskImplicitNames.remove(taskId)
         // 已完成，分块现场不再需要
         ChunkStore.delete(appContext, taskId)
         var done: DownloadEntry? = null

@@ -43,6 +43,7 @@ import com.ling.browser.data.prefs.NightMode
 import com.ling.browser.data.prefs.ReaderFontSize
 import com.ling.browser.data.prefs.SearchEngine
 import com.ling.browser.download.ConflictAction
+import com.ling.browser.download.DownloadFileName
 import com.ling.browser.util.FaviconFetcher
 import com.ling.browser.util.UrlUtils
 import com.ling.browser.web.ConsoleEntry
@@ -907,22 +908,33 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
      * 界面显示「大小未知」而不是报错 —— 不能因为探不到大小就不让下载。
      */
     fun requestDownload(url: String, mimeType: String?, fileName: String? = null) {
-        val name = fileName
-            ?: url.substringAfterLast('/').substringBefore('?').takeIf { it.isNotBlank() }
-            ?: "download"
+        // 明确给出名字（脚本 / 调用方指定）时不允许再被响应头改掉。
+        val nameExplicit = fileName != null
+        val name = fileName ?: DownloadFileName.resolve(url, mimeType, contentDisposition = null)
         _pendingDownload.value = PendingDownload(
             url = url,
             fileName = name,
             mimeType = mimeType,
             sizeBytes = null,
             probing = true,
+            nameExplicit = nameExplicit,
         )
 
         viewModelScope.launch {
-            val size = probeContentLength(url)
-            // 期间用户可能已经取消或确认了，只在仍是同一个请求时回填
+            val info = probeDownloadInfo(url)
+            // HEAD 里若带了 Content-Disposition，就用服务端的名字替换推断出来的名字。
+            // 只在名字不是用户/脚本指定时才替换。
+            val resolved = if (!nameExplicit && info?.contentDisposition != null) {
+                DownloadFileName.resolve(url, mimeType, info.contentDisposition)
+            } else {
+                name
+            }
             _pendingDownload.update { cur ->
-                if (cur?.url == url) cur.copy(sizeBytes = size, probing = false) else cur
+                if (cur?.url == url) {
+                    cur.copy(fileName = resolved, sizeBytes = info?.sizeBytes, probing = false)
+                } else {
+                    cur
+                }
             }
         }
     }
@@ -978,7 +990,12 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
      */
     private fun enqueueDownload(req: PendingDownload) {
         viewModelScope.launch {
-            val id = container.downloads.enqueue(req.url, req.fileName, req.mimeType)
+            val id = container.downloads.enqueue(
+                req.url,
+                req.fileName,
+                req.mimeType,
+                explicitName = req.nameExplicit,
+            )
             _message.value = if (id != null) "已开始下载" else "无法下载该文件"
         }
     }
@@ -1015,12 +1032,13 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * 尽力获取远端文件大小。失败返回 null（界面显示「大小未知」）。
+     * 尽力获取远端文件信息（大小 + Content-Disposition）。
      *
+     * 失败返回 null（界面显示「大小未知」）。
      * 用 HEAD 而非 GET：只取响应头，不下载正文，代价极小。
      * 不用 DownloadManager 预检是因为它无法「只探测不下载」。
      */
-    private suspend fun probeContentLength(url: String): Long? = withContext(Dispatchers.IO) {
+    private suspend fun probeDownloadInfo(url: String): ProbeInfo? = withContext(Dispatchers.IO) {
         runCatching {
             val conn = (java.net.URL(url).openConnection() as java.net.HttpURLConnection).apply {
                 requestMethod = "HEAD"
@@ -1031,6 +1049,7 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
                 instanceFollowRedirects = true
             }
             try {
+                val disposition = conn.getHeaderField("Content-Disposition")
                 // 部分站点不实现 HEAD，回退到 Range 请求只取 1 字节
                 if (conn.responseCode !in 200..299) {
                     return@runCatching probeWithRange(url)
@@ -1038,7 +1057,12 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
                 // 不用 getContentLengthLong：它需要 API 24，而 minSdk 是 23。
                 // 直接解析响应头等价，且对分块传输同样返回 -1。
                 val len = conn.getHeaderField("Content-Length")?.toLongOrNull() ?: -1L
-                if (len > 0) len else probeWithRange(url)
+                if (len > 0) {
+                    ProbeInfo(len, disposition)
+                } else {
+                    val fallback = probeWithRange(url)
+                    ProbeInfo(fallback?.sizeBytes, disposition ?: fallback?.contentDisposition)
+                }
             } finally {
                 runCatching { conn.disconnect() }
             }
@@ -1046,7 +1070,7 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** HEAD 不可用时的退路：Range: bytes=0-0，从 Content-Range 里读总大小。 */
-    private fun probeWithRange(url: String): Long? = runCatching {
+    private fun probeWithRange(url: String): ProbeInfo? = runCatching {
         val conn = (java.net.URL(url).openConnection() as java.net.HttpURLConnection).apply {
             requestMethod = "GET"
             connectTimeout = PROBE_TIMEOUT_MS
@@ -1057,11 +1081,20 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
         try {
             // Content-Range: bytes 0-0/12345 → 取斜杠后的总大小
             val range = conn.getHeaderField("Content-Range")
-            range?.substringAfterLast('/')?.trim()?.toLongOrNull()
+            ProbeInfo(
+                sizeBytes = range?.substringAfterLast('/')?.trim()?.toLongOrNull()?.takeIf { it > 0 },
+                contentDisposition = conn.getHeaderField("Content-Disposition"),
+            )
         } finally {
             runCatching { conn.disconnect() }
         }
     }.getOrNull()
+
+    /** HEAD 探测的结果；两项都可能拿不到。 */
+    private data class ProbeInfo(
+        val sizeBytes: Long?,
+        val contentDisposition: String?,
+    )
 
     fun cancelDownload(entry: DownloadEntry) {
         viewModelScope.launch {
@@ -2439,6 +2472,8 @@ data class PendingDownload(
     val mimeType: String?,
     val sizeBytes: Long?,
     val probing: Boolean,
+    /** 名字是否由脚本 / 调用方明确指定；false 表示是推断来的，允许被响应头纠正。 */
+    val nameExplicit: Boolean = false,
 )
 
 /**

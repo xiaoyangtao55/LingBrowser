@@ -64,6 +64,7 @@ class DownloadRepository(
         headers: Map<String, String> = emptyMap(),
         targetUri: String? = null,
         conflict: ConflictAction? = null,
+        explicitName: Boolean = true,
     ): Long? {
         val settings = settingsProvider()
         // 与浏览页面用同一个 UA：部分站点会按 UA 拒绝非浏览器的下载请求。
@@ -80,6 +81,8 @@ class DownloadRepository(
                     url, fileName, mimeType, settings.downloadLocation, headers,
                     conflict = conflict,
                     userAgent = userAgent,
+                    // 内建引擎拿到响应的 Content-Disposition 后还能改名
+                    explicitName = explicitName,
                 )
             DownloaderType.SYSTEM ->
                 enqueueSystem(url, fileName, mimeType, settings.downloadLocation, headers)

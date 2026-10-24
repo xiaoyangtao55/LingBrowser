@@ -118,23 +118,10 @@ object DownloadDestination {
     /**
      * 把外部来源的文件名收敛成**单一文件名**。
      *
-     * 文件名可能来自用户脚本（`GM_download` 的 `n`）、服务器
-     * （`Content-Disposition`）或数据库里存下来的旧记录，都不可信：
-     *
-     *  - `../../files/x` → 只保留最后一段，杜绝路径穿越；
-     *  - `..` / `.` → 那是父目录/当前目录本身，退回默认名；
-     *  - NUL 等控制字符 → 部分文件系统会在 NUL 处截断，必须剔掉；
-     *  - 超长名字 → 截断，避免 `File(dir, name)` 在极端长度下失败。
-     *
-     * 净化放在 [resolve] / [uniqueName] / [deleteExisting] / [exists] 的**入口**，
-     * 而不是只在注入侧做一次：删旧文件这条路径同样吃这个名字。
+     * 实现统一放在 [sanitizeDownloadName]：这个名字会被 `resolve` / `uniqueName` /
+     * `deleteExisting` / `exists` / MediaStore 查询共同使用，路径穿越在这里堵死。
      */
-    internal fun sanitizeFileName(name: String): String {
-        val base = name.replace('\\', '/').substringAfterLast('/')
-        val cleaned = base.filter { it >= ' ' && it != '\u007f' }.trim()
-        if (cleaned.isEmpty() || cleaned == "." || cleaned == "..") return DEFAULT_FILE_NAME
-        return cleaned.take(MAX_FILE_NAME_LENGTH)
-    }
+    internal fun sanitizeFileName(name: String): String = sanitizeDownloadName(name)
 
     private fun exists(context: Context, fileName: String, location: DownloadLocation): Boolean {
         val safe = sanitizeFileName(fileName)
@@ -404,9 +391,3 @@ private const val CONTENT_SCHEME = "content://"
 
 /** `uniquify` 时最多尝试的序号，超过就退到时间戳，避免病态情况下死循环。 */
 private const val MAX_UNIQUE_TRIES = 100
-
-/** 文件名净化后为空（或只剩 `.` / `..`）时的兜底名。 */
-private const val DEFAULT_FILE_NAME = "download"
-
-/** 单个文件名的长度上限。多数文件系统单段上限 255 字节，这里给 UTF-8 多字节留余量。 */
-private const val MAX_FILE_NAME_LENGTH = 120

@@ -582,8 +582,8 @@ fun BrowserScreen(
             }.getOrElse { false }
         }
         viewModel.tabManager.onDownloadRequested = { url, mimeType ->
-            // 文件名交给 DownloadManager 从 Content-Disposition 推断
-            // （比在这里猜 URL 末段可靠），因此传 null。
+            // 名字不在这里定：requestDownload 会按「Content-Disposition → URL 末段
+            // → MIME 反推 + 时间戳」三级优先级推断，且允许被响应头纠正。
             // 注意这里只是「请求」，真正开始下载要等用户在确认框里点确认。
             viewModel.requestDownload(url, mimeType, fileName = null)
         }
