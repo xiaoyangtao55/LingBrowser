@@ -1,5 +1,6 @@
 package com.ling.browser.ui.screens
 
+import com.ling.browser.ui.components.lingTopBarColors
 import com.ling.browser.ui.theme.LingIcons
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
@@ -25,7 +26,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -77,9 +77,7 @@ fun DownloadsScreen(
                         TextButton(onClick = { clearDialog = true }) { Text("清空") }
                     }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                ),
+                colors = lingTopBarColors(),
             )
         },
     ) { inner ->

@@ -27,7 +27,6 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -38,6 +37,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.ling.browser.data.repo.BlockSubscription
+import com.ling.browser.ui.components.lingTopBarColors
 import com.ling.browser.ui.theme.LingIcons
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -93,9 +93,7 @@ fun AdBlockSubscriptionsScreen(
                 actions = {
                     TextButton(onClick = { showAdd = true }) { Text("添加") }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                ),
+                colors = lingTopBarColors(),
             )
         },
     ) { inner ->

@@ -891,6 +891,52 @@ resolvedDark = 跟随系统 ? 系统暗色 : (始终开启 ? true : false)
 > Compose 的 `isSystemInDarkTheme()` 已经把变化带进重组了，跟着它走比再挂一个
 > 系统回调更不容易漏。
 
+### 3.11 标题栏必须瞬变：Material3 的 `TopAppBar` 内部自带颜色动画
+
+从「更多」面板循环切换夜间模式时，会发现**设置页顶部标题栏**与**标题栏下方的
+设置项列表**变色的时间点对不上：下方列表「啪」地一下换色，标题栏却还在慢慢渐变。
+
+根因不在我们的代码，而在 Material3 内部。`TopAppBar` 的容器色走了一次
+`animateColorAsState`（`AppBar.kt`）：
+
+```kotlin
+val appBarContainerColor = animateColorAsState(
+    targetColor,
+    animationSpec = MotionSchemeKeyTokens.DefaultEffects.value(),
+)
+```
+
+`MotionSchemeKeyTokens.DefaultEffects` 是 `spring(dampingRatio = 1f, stiffness = 1600)`，
+于是标题栏底色有约 200~500ms 的渐变；而标题栏下方内容区来自 `Scaffold` 的
+`containerColor`（`colorScheme.background`），`Surface` 自身**不做**颜色动画，
+是瞬时切换的。两者一快一慢，视觉上就"脱节"了。
+
+> 注意：这不是 `TopAppBarDefaults.topAppBarColors()` 的问题 —— 它的文档明确写了
+> 「The default implementation **animates** between the provided colors」，
+> 这是 Material Design 规范要求的行为，我们改不掉，只能绕开。
+
+**解法：把标题栏容器色设为 `Color.Transparent`。**
+
+`animateColorAsState` 的目标值恒为 `Transparent`（明暗切换前后不变），
+动画就根本不会启动；标题栏区域改为透出 `Scaffold` 的 `background`，
+与下方列表严格同帧瞬变。
+
+这个改法成立的前提是 **`surface == background`**：
+
+- 静态色板 `FallbackLight` / `FallbackDark` 中两者取值相同；
+- Material You 动态色板中 `background` 与 `surface` 同为
+  `neutralVariant98`（浅色）/ `neutralVariant6`（深色）。
+
+所以视觉结果与改动前完全等价，零风险。该前提由单元测试
+`TopBarColorEquivalenceTest` 钉住，将来若给两者分配了不同色值会立刻失败。
+
+统一封装在 `ui/components/LingTopBar.kt` 的 `lingTopBarColors()`，
+替换了全部 9 处二级页面的标题栏配色（设置页及其 6 个分组子页，
+以及关于、广告拦截规则、广告拦截订阅、书签、下载、历史、资源嗅探、用户脚本）。
+
+> 顺带一提：底部工具栏没有这个问题 —— 它用的是 `Surface` 直接取色，
+> 而 `Surface` 不做颜色动画，天然是瞬变的。
+
 ### 4. 主页由 WebView 渲染，不用 Compose 覆盖层
 早期实现把主页做成 Compose 覆盖层（`HomeScreen`），有两个问题：主页不进入
 前进/后退历史；且切页时 `AndroidView` 会被销毁重建，打断正在加载的页面。

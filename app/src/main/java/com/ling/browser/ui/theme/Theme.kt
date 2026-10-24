@@ -21,7 +21,7 @@ private val LingGreen = Color(0xFF1B6C4B)
 private val LingGreenLight = Color(0xFF7EDBAE)
 private val LingGreenContainer = Color(0xFFA8F2CB)
 
-private val FallbackLight = lightColorScheme(
+internal val FallbackLight = lightColorScheme(
     primary = LingGreen,
     onPrimary = Color.White,
     primaryContainer = LingGreenContainer,
@@ -41,7 +41,7 @@ private val FallbackLight = lightColorScheme(
     outline = Color(0xFF707973),
 )
 
-private val FallbackDark = darkColorScheme(
+internal val FallbackDark = darkColorScheme(
     primary = LingGreenLight,
     onPrimary = Color(0xFF00391F),
     primaryContainer = Color(0xFF005231),
