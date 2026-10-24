@@ -66,9 +66,12 @@ class DownloadRepository(
         conflict: ConflictAction? = null,
     ): Long? {
         val settings = settingsProvider()
+        // 与浏览页面用同一个 UA：部分站点会按 UA 拒绝非浏览器的下载请求。
+        val userAgent = settings.userAgent.ifBlank { null }
         if (targetUri != null) {
             return engine.enqueue(
                 url, fileName, mimeType, settings.downloadLocation, headers, targetUri, conflict,
+                userAgent = userAgent,
             )
         }
         return when (settings.downloaderType) {
@@ -76,6 +79,7 @@ class DownloadRepository(
                 engine.enqueue(
                     url, fileName, mimeType, settings.downloadLocation, headers,
                     conflict = conflict,
+                    userAgent = userAgent,
                 )
             DownloaderType.SYSTEM ->
                 enqueueSystem(url, fileName, mimeType, settings.downloadLocation, headers)

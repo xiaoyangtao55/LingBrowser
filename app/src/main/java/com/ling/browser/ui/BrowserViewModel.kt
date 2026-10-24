@@ -35,6 +35,7 @@ import com.ling.browser.data.repo.parseNetscapeHtml
 import com.ling.browser.data.repo.planImport
 import com.ling.browser.data.repo.toNetscapeHtml
 import com.ling.browser.data.prefs.DownloadLocation
+import com.ling.browser.data.prefs.DownloadNetwork
 import com.ling.browser.data.prefs.DownloaderType
 import com.ling.browser.data.prefs.HomeBackground
 import com.ling.browser.data.prefs.LingSettings
@@ -212,7 +213,54 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
     private val _message = MutableStateFlow<String?>(null)
     val message: StateFlow<String?> = _message.asStateFlow()
 
+    /**
+     * 「下载完成」通知点进来时要打开的任务 id。
+     *
+     * 由 Activity 从 Intent 取出后写入，UI 消费并调 [consumeOpenDownload] 清空；
+     * 只传 id 不传路径，打开时按 id 查库，文件被删或改名都能得到准确结果。
+     */
+    private val _pendingOpenDownload = MutableStateFlow<Long?>(null)
+    val pendingOpenDownload: StateFlow<Long?> = _pendingOpenDownload.asStateFlow()
+
+    fun requestOpenDownload(taskId: Long) {
+        _pendingOpenDownload.value = taskId
+    }
+
+    fun consumeOpenDownload() {
+        _pendingOpenDownload.value = null
+    }
+
+    /**
+     * 因网络限制被暂停、正等待用户决定「要不要继续」的下载任务。
+     *
+     * 用列表而不是单个值：网络一变可能同时停掉好几个任务，UI 按顺序逐个询问，
+     * 回答一个就摘掉一个。
+     */
+    private val _networkPrompts = MutableStateFlow<List<DownloadEntry>>(emptyList())
+    val networkPrompts: StateFlow<List<DownloadEntry>> = _networkPrompts.asStateFlow()
+
+    /** 用户同意在当前网络下继续这个任务（只放行它，不改全局设置）。 */
+    fun allowDownloadOnCurrentNetwork(taskId: Long) {
+        dismissNetworkPrompt(taskId)
+        io { container.downloadEngine.forceResume(taskId) }
+    }
+
+    /** 用户拒绝：保持暂停，等网络恢复后引擎仍会自动续传。 */
+    fun keepDownloadPaused(taskId: Long) = dismissNetworkPrompt(taskId)
+
+    private fun dismissNetworkPrompt(taskId: Long) {
+        _networkPrompts.update { list -> list.filterNot { it.id == taskId } }
+    }
+
     init {
+        // 因网络限制被引擎暂停的任务：排队交给 UI 弹窗逐个征求同意
+        viewModelScope.launch {
+            container.downloadEngine.networkBlocked.collect { entry ->
+                _networkPrompts.update { list ->
+                    if (list.any { it.id == entry.id }) list else list + entry
+                }
+            }
+        }
         // 设置变化时同步到所有 WebView
         viewModelScope.launch {
             settings.collect { tabManager.applySettings(it) }
@@ -2120,6 +2168,15 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun setDownloadLocation(location: DownloadLocation) =
         io { container.settings.setDownloadLocation(location) }
+
+    /**
+     * 选择下载的网络限制。
+     *
+     * 立刻生效：引擎由设置流驱动（见 `AppContainer`），收紧后正在跑的越界任务
+     * 会被自动暂停，放宽后自动续传 —— 不需要重启应用。
+     */
+    fun setDownloadNetwork(network: DownloadNetwork) =
+        io { container.settings.setDownloadNetwork(network) }
 
     // ------------------------------------------------------------ 阅读模式
 

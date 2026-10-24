@@ -97,6 +97,18 @@ enum class DownloadLocation(val label: String) {
 }
 
 /**
+ * 下载的网络限制。
+ *
+ * 不满足条件时任务进入「已暂停」，等网络恢复后再自动继续 —— 引擎会把这些
+ * 任务单独记在 `autoPaused` 里，与用户主动暂停的任务区分开。
+ */
+enum class DownloadNetwork(val label: String, val description: String) {
+    ALL("不限网络", "移动数据和 Wi-Fi 都下载"),
+    UNMETERED("仅不计费网络", "计费网络下暂停，Wi-Fi / 以太网继续"),
+    WIFI_ONLY("仅 Wi-Fi", "只在 Wi-Fi 或以太网下下载"),
+}
+
+/**
  * 阅读模式的字号档位。
  *
  * 直接复用 [com.ling.browser.web.ReaderPage.FontSize]，不再另立一份定义 ——
@@ -235,6 +247,8 @@ data class LingSettings(
     val downloaderType: DownloaderType = DownloaderType.BUILT_IN,
     /** 下载保存位置，默认应用私有目录（无需存储权限）。 */
     val downloadLocation: DownloadLocation = DownloadLocation.APP_PRIVATE,
+    /** 下载的网络限制，默认不限（不改变旧行为）。 */
+    val downloadNetwork: DownloadNetwork = DownloadNetwork.ALL,
 ) {
     /**
      * 用户实际要打开的主页。
@@ -274,6 +288,7 @@ class SettingsStore(private val context: Context) {
         val AD_BLOCK_BLOCKED_TOTAL = longPreferencesKey("ad_block_blocked_total")
         val DOWNLOADER_TYPE = stringPreferencesKey("downloader_type")
         val DOWNLOAD_LOCATION = stringPreferencesKey("download_location")
+        val DOWNLOAD_NETWORK = stringPreferencesKey("download_network")
     }
 
     val settings: Flow<LingSettings> = context.dataStore.data.map { p ->
@@ -310,6 +325,9 @@ class SettingsStore(private val context: Context) {
             downloadLocation = p[Keys.DOWNLOAD_LOCATION]
                 ?.let { runCatching { DownloadLocation.valueOf(it) }.getOrNull() }
                 ?: DownloadLocation.APP_PRIVATE,
+            downloadNetwork = p[Keys.DOWNLOAD_NETWORK]
+                ?.let { runCatching { DownloadNetwork.valueOf(it) }.getOrNull() }
+                ?: DownloadNetwork.ALL,
         )
     }
 
@@ -398,6 +416,9 @@ class SettingsStore(private val context: Context) {
 
     suspend fun setDownloadLocation(location: DownloadLocation) =
         context.dataStore.edit { it[Keys.DOWNLOAD_LOCATION] = location.name }
+
+    suspend fun setDownloadNetwork(network: DownloadNetwork) =
+        context.dataStore.edit { it[Keys.DOWNLOAD_NETWORK] = network.name }
 
     suspend fun setTabCount(count: Int) =
         context.dataStore.edit { it[Keys.TAB_COUNT] = count }

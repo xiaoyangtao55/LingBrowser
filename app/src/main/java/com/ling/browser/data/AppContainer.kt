@@ -15,7 +15,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 
@@ -71,7 +73,23 @@ class AppContainer(context: Context) {
     val history: HistoryRepository = HistoryRepository(database)
 
     /** 内建下载引擎：真正执行下载、进度推送、断点续传。 */
-    val downloadEngine: DownloadEngine = DownloadEngine(appContext, database)
+    val downloadEngine: DownloadEngine = DownloadEngine(
+        appContext,
+        database,
+        initialSettings.downloadNetwork,
+    )
+
+    init {
+        // 网络限制变更即时下发：从「不限网络」收紧时立刻暂停越界任务，
+        // 放宽时把此前自动暂停的任务续起来（不等下一次网络事件）。
+        // 直接由设置流驱动而不用 latestSettings 快照，避免两次收集之间的时序竞争。
+        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+            settings.settings
+                .map { it.downloadNetwork }
+                .distinctUntilChanged()
+                .collect { downloadEngine.onNetworkPolicyChanged(it) }
+        }
+    }
 
     val downloads: DownloadRepository = DownloadRepository(
         appContext, database, downloadEngine,

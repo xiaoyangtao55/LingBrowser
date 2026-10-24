@@ -20,8 +20,11 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -61,6 +64,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.pow
 import com.ling.browser.data.db.DownloadEntry
 import com.ling.browser.data.prefs.NightMode
+import com.ling.browser.download.DownloadService
 import com.ling.browser.download.installApkFromUri
 import com.ling.browser.ui.BrowserViewModel
 import com.ling.browser.ui.screens.AdBlockRulesScreen
@@ -194,6 +198,12 @@ class MainActivity : ComponentActivity() {
      */
     private fun handleExternalIntent(intent: Intent?) {
         val incoming = intent ?: return
+        // 点「下载完成」通知进来：把任务 id 交给界面去打开文件。
+        val openDownloadId = incoming.getLongExtra(DownloadService.EXTRA_OPEN_DOWNLOAD_ID, -1L)
+        if (openDownloadId > 0) {
+            browserViewModel.requestOpenDownload(openDownloadId)
+            incoming.removeExtra(DownloadService.EXTRA_OPEN_DOWNLOAD_ID)
+        }
         when (incoming.action) {
             Intent.ACTION_VIEW -> {
                 val url = incoming.dataString?.trim().orEmpty()
@@ -536,6 +546,60 @@ private fun LingApp(viewModel: BrowserViewModel) {
         }
     }
 
+    // 点「下载完成」通知：回到 App 并直接打开那个文件。
+    val pendingOpenDownload by viewModel.pendingOpenDownload.collectAsStateWithLifecycle()
+    LaunchedEffect(pendingOpenDownload) {
+        val taskId = pendingOpenDownload ?: return@LaunchedEffect
+        // 先消费，避免重组或旋转后再打开一次。
+        viewModel.consumeOpenDownload()
+        // 冷启动时列表可能还没从库里读回来，短暂等它出现；等不到就按已删除处理。
+        val entry = viewModel.downloads.value.firstOrNull { it.id == taskId }
+            ?: withTimeoutOrNull(1500) {
+                viewModel.downloads.first { list -> list.any { it.id == taskId } }
+                    .first { it.id == taskId }
+            }
+        if (entry == null) {
+            viewModel.showMessage("下载记录已不存在")
+            return@LaunchedEffect
+        }
+        val error = try {
+            openDownloadedFile(context, entry)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            "打开失败：" + (e.message ?: e.javaClass.simpleName)
+        }
+        error?.let(viewModel::showMessage)
+    }
+
+    // 网络限制拦截：引擎已把任务停在「已暂停」，这里问一句要不要为它放行。
+    // 放在 LingApp 顶层而不是下载列表里 —— 下载可能是在浏览网页时触发的，
+    // 用户当时根本不在下载页。
+    val networkPrompts by viewModel.networkPrompts.collectAsStateWithLifecycle()
+    networkPrompts.firstOrNull()?.let { blocked ->
+        AlertDialog(
+            onDismissRequest = { viewModel.keepDownloadPaused(blocked.id) },
+            title = { Text("网络受限") },
+            text = {
+                Text(
+                    "当前网络不满足「${settings.downloadNetwork.label}」的限制，" +
+                        "下载已暂停。继续下载“${blocked.fileName}”可能产生流量费用，" +
+                        "是否继续？",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { viewModel.allowDownloadOnCurrentNetwork(blocked.id) }) {
+                    Text("继续下载")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { viewModel.keepDownloadPaused(blocked.id) }) {
+                    Text("保持暂停")
+                }
+            },
+        )
+    }
+
     // ── 二级页面过渡：显式双层 ────────────────────────────────────────────
     // 不用 AnimatedContent：它何时回收"退场"的旧内容不受我们控制，实测盖压
     // 动画进行到一半旧页就被卸载，左侧露出下层（曾出现"设置列表整块消失"）。
@@ -723,6 +787,7 @@ private fun LingApp(viewModel: BrowserViewModel) {
                     settings = settings,
                     onDownloaderType = viewModel::setDownloaderType,
                     onDownloadLocation = viewModel::setDownloadLocation,
+                    onDownloadNetwork = viewModel::setDownloadNetwork,
                     onBack = pop,
                 )
 

@@ -10,6 +10,7 @@ import android.content.Intent
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ServiceCompat
 import com.ling.browser.MainActivity
 import com.ling.browser.R
@@ -265,7 +266,19 @@ class DownloadService : Service() {
 
     companion object {
         private const val CHANNEL_ID = "download"
+        private const val CHANNEL_COMPLETE = "download_complete"
         private const val NOTIFICATION_ID = 1001
+
+        /** 完成通知的 id 前缀：与进度通知（[NOTIFICATION_ID]）分开，互不覆盖。 */
+        private const val COMPLETE_ID_BASE = 2000
+
+        /**
+         * 完成通知携带的任务 id。
+         *
+         * 只传 id、不传路径：点击时回主界面按 id 查库，路径与状态都以库为准，
+         * 避免通知里残留过期信息。
+         */
+        const val EXTRA_OPEN_DOWNLOAD_ID = "com.ling.browser.extra.OPEN_DOWNLOAD_ID"
 
         private const val EXTRA_TASK_ID = "com.ling.browser.extra.TASK_ID"
         private const val ACTION_PAUSE = "com.ling.browser.action.PAUSE"
@@ -286,6 +299,56 @@ class DownloadService : Service() {
 
         fun stop(context: Context) {
             context.stopService(Intent(context, DownloadService::class.java))
+        }
+
+        /**
+         * 发一条「下载完成」通知：点通知或点「打开」都直接打开那个文件。
+         *
+         * 独立渠道、静默（无声无振动）：批量下载时不该每完成一条就响一下，
+         * 但要在通知栏留下可点的痕迹。进度通知是会随服务退出而消失的，
+         * 所以完成提示必须由引擎单独发，不能挂在服务上。
+         */
+        fun notifyComplete(context: Context, entry: DownloadEntry) {
+            if (!NotificationManagerCompat.from(context).areNotificationsEnabled()) return
+            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            ensureCompleteChannel(nm)
+
+            val open = Intent(context, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                putExtra(EXTRA_OPEN_DOWNLOAD_ID, entry.id)
+            }
+            // 每条任务一个 requestCode，否则后完成的通知会覆盖前一条的 extras。
+            val token = (entry.id % 100_000L).toInt()
+            val pi = PendingIntent.getActivity(
+                context,
+                token,
+                open,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            val notification = NotificationCompat.Builder(context, CHANNEL_COMPLETE)
+                .setSmallIcon(R.drawable.ic_download)
+                .setContentTitle("下载完成")
+                .setContentText(entry.fileName)
+                .setContentIntent(pi)
+                .setAutoCancel(true)
+                .addAction(R.drawable.ic_download, "打开", pi)
+                .build()
+            runCatching { nm.notify(COMPLETE_ID_BASE + token, notification) }
+        }
+
+        private fun ensureCompleteChannel(nm: NotificationManager) {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+            if (nm.getNotificationChannel(CHANNEL_COMPLETE) != null) return
+            val channel = NotificationChannel(
+                CHANNEL_COMPLETE,
+                "下载完成",
+                NotificationManager.IMPORTANCE_DEFAULT,
+            ).apply {
+                description = "文件下载完成的提示，点击可直接打开"
+                setSound(null, null)
+                enableVibration(false)
+            }
+            nm.createNotificationChannel(channel)
         }
     }
 }

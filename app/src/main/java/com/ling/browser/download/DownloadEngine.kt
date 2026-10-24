@@ -2,27 +2,42 @@ package com.ling.browser.download
 
 import android.content.ContentValues
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.webkit.CookieManager
+import android.webkit.WebSettings
 import com.ling.browser.data.db.DownloadEntry
 import com.ling.browser.data.db.DownloadStatus
 import com.ling.browser.data.db.LingDatabase
 import com.ling.browser.data.db.downloadValues
 import com.ling.browser.data.db.toDownload
 import com.ling.browser.data.prefs.DownloadLocation
+import com.ling.browser.data.prefs.DownloadNetwork
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import okhttp3.Cookie
+import okhttp3.CookieJar
+import okhttp3.Headers
+import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -47,8 +62,13 @@ import java.util.concurrent.TimeUnit
 class DownloadEngine(
     private val context: Context,
     private val db: LingDatabase,
+    /** 初始网络限制策略；之后由设置层通过 [onNetworkPolicyChanged] 推送新值。 */
+    initialNetwork: DownloadNetwork = DownloadNetwork.ALL,
 ) {
     private val appContext = context.applicationContext
+
+    /** 当前网络限制策略。切换后立即重算：越界的任务暂停，放宽后自动续传。 */
+    private val networkPolicy = MutableStateFlow(initialNetwork)
 
     /** 引擎自己的协程作用域：随进程存活，下载任务挂在这里。 */
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -60,7 +80,39 @@ class DownloadEngine(
             // 读超时用「每字节超时」语义（OkHttp 默认），大文件慢速下载不会被误杀
             .readTimeout(30, TimeUnit.SECONDS)
             .writeTimeout(30, TimeUnit.SECONDS)
+            // 带上浏览器里的 Cookie，否则需要登录态的文件（网盘、论坛附件）会直接 403。
+            //
+            // 这里刻意用 CookieJar 而不是把 `Cookie` 头钉死在请求上：CookieJar 会在
+            // **每一跳**（含 301/302 重定向）按当前 URL 重新解析，所以跨域跳转时
+            // 不会把原站的 Cookie 捎给第三方 —— 固定请求头做不到这点，会泄露凭据。
+            .cookieJar(webViewCookieJar)
             .build()
+    }
+
+    /** 把 WebView 的 Cookie 按请求 URL 实时解析成 OkHttp 的 Cookie。 */
+    private val webViewCookieJar = object : CookieJar {
+        /** 只借浏览器的 Cookie 用，不回写：下载不该反过来改登录态。 */
+        override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) = Unit
+
+        override fun loadForRequest(url: HttpUrl): List<Cookie> {
+            val header = runCatching {
+                CookieManager.getInstance().getCookie(url.toString())
+            }.getOrNull().orEmpty()
+            if (header.isEmpty()) return emptyList()
+            return runCatching {
+                Cookie.parseAll(url, Headers.headersOf("Cookie", header))
+            }.getOrDefault(emptyList())
+        }
+    }
+
+    /**
+     * 兜底 UA：下载请求不是 WebView 发的，不带 UA 会被一部分站点按"爬虫"拒绝。
+     *
+     * 优先用设置里的自定义 UA（与浏览页面保持一致），为空时用系统 WebView 的默认值。
+     */
+    private val defaultUserAgent: String by lazy {
+        runCatching { WebSettings.getDefaultUserAgent(appContext) }
+            .getOrDefault("Mozilla/5.0 (Linux; Android) LingBrowser")
     }
 
     /** taskId -> 内存中的任务状态。写库前的单一真相源。 */
@@ -70,12 +122,67 @@ class DownloadEngine(
     private val jobs = mutableMapOf<Long, Job>()
 
     /**
+     * 因网络限制被**自动**暂停的 taskId。
+     *
+     * 必须与用户主动暂停区分开：网络恢复后只续传这里面的任务，不能替用户
+     * 「擅自继续」他手动停掉的那批。用户主动暂停/继续/删除时同步清理。
+     */
+    private val autoPaused = mutableSetOf<Long>()
+
+    /** 并发槽位：同时最多 [MAX_CONCURRENT_DOWNLOADS] 个任务真正在传输，其余排队。 */
+    private val downloadSlots = Semaphore(MAX_CONCURRENT_DOWNLOADS)
+
+    /**
+     * 用户明确同意「在当前网络下继续」的任务。
+     *
+     * 网络限制是默认策略，不该变成硬墙：用户看到弹窗确认后，这个任务就不再受
+     * 策略约束，直到它结束。只记内存 —— 进程重启后重新征求一次意见更稳妥。
+     */
+    private val networkOverrides = mutableSetOf<Long>()
+
+    /**
+     * 「因网络限制被暂停」的事件流，供 UI 弹窗征求用户意见。
+     *
+     * 用 SharedFlow 而非 StateFlow：这是一次性提醒，没有订阅者时丢掉也不影响
+     * 任务状态（它本来就已经安全地停在 PAUSED），不需要回放。
+     */
+    private val _networkBlocked = MutableSharedFlow<DownloadEntry>(extraBufferCapacity = 16)
+    val networkBlocked: SharedFlow<DownloadEntry> = _networkBlocked.asSharedFlow()
+
+    private val connectivityManager: ConnectivityManager? =
+        appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+
+    private var networkMonitorRegistered = false
+
+    /**
+     * 默认网络的连通性监听。
+     *
+     * 只在「默认网络」上挂：判断依据是当前主网络是否满足策略，与其它并存网络无关。
+     * `onAvailable` / `onLost` / `onCapabilitiesChanged` 都归一到 [syncNetworkState]，
+     * 因为它读的是即时状态而不是事件本身，重复触发不会产生副作用。
+     */
+    private val defaultNetworkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) = onNetworkEvent()
+        override fun onLost(network: Network) = onNetworkEvent()
+        override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) =
+            onNetworkEvent()
+    }
+
+    /**
      * taskId -> 调用方附加的请求头（目前只有用户脚本的 `GM_download` 会用）。
      *
      * 只存在内存里：进程被杀后恢复下载会丢掉这些头，与"下载任务本身也不重启"
      * 的行为一致；为它加一列数据库迁移不值得。
      */
     private val taskHeaders = mutableMapOf<Long, Map<String, String>>()
+
+    /**
+     * taskId -> 本次下载使用的 UA。
+     *
+     * 与 [taskHeaders] 一样只存在内存：UA 只影响首字母请求，进程被杀后续传
+     * 会退回默认 UA，对已开始的传输没有影响。
+     */
+    private val taskUserAgents = mutableMapOf<Long, String>()
 
     /** taskId -> SAF 选定的目标 URI（`GM_download` 的 `saveAs`）。与请求头一样只存内存。 */
     private val taskUris = mutableMapOf<Long, String>()
@@ -100,13 +207,23 @@ class DownloadEngine(
     val downloads: StateFlow<List<DownloadEntry>> = _downloads.asStateFlow()
 
     init {
-        // 启动时把库里的记录载入内存；进行中的标记为「已暂停」——
-        // 进程被杀后不可能在跑，直接标失败会让用户已下载的部分没法续传。
-        val saved = queryAll().map { entry ->
+        // 启动时把库里的记录载入内存；进行中的先落成「已暂停」。
+        // 进程被杀后不可能还有任务在跑，直接标失败会让已下载的部分白白浪费，
+        // 所以统一退回 PAUSED，再自动续传（见下）—— 这才是「崩溃后接着下」。
+        val saved = queryAll()
+        val interrupted = saved.filter { it.isRunning }.map { it.id }
+        tasks.value = saved.map { entry ->
             if (entry.isRunning) entry.copy(status = DownloadStatus.PAUSED) else entry
-        }
-        tasks.value = saved.associateBy { it.id }
+        }.associateBy { it.id }
         publish()
+        registerNetworkMonitor()
+        if (interrupted.isNotEmpty()) {
+            scope.launch {
+                // 逐个走公开的 resume：它会重新登记任务、按网络策略决定立即开跑
+                // 还是先停着等网，与用户点「继续」完全同一条路径。
+                interrupted.forEach { resume(it) }
+            }
+        }
     }
 
     // -------------------------------------------------------------- 公开 API
@@ -120,6 +237,8 @@ class DownloadEngine(
      * @param targetUri 用户脚本 `saveAs` 选定的 SAF 文档；给出时忽略 [location]。
      * @param conflict 同名文件的处理策略（`GM_download` 的 `conflictAction`）；
      *   `UNIQUE` 在入队时改名，`OVERWRITE` 在开写前删掉旧文件。
+     * @param userAgent 本次下载使用的 UA；为空时退回引擎默认值。带上页面同款 UA
+     *   能避免一部分站点把下载请求当成爬虫。
      */
     suspend fun enqueue(
         url: String,
@@ -129,6 +248,7 @@ class DownloadEngine(
         headers: Map<String, String> = emptyMap(),
         targetUri: String? = null,
         conflict: ConflictAction? = null,
+        userAgent: String? = null,
     ): Long? = withContext(Dispatchers.IO) {
             if (!url.startsWith("http://") && !url.startsWith("https://")) {
                 return@withContext null
@@ -152,6 +272,7 @@ class DownloadEngine(
             ) ?: return@withContext null
 
             if (headers.isNotEmpty()) taskHeaders[id] = headers
+            userAgent?.takeIf { it.isNotBlank() }?.let { taskUserAgents[id] = it }
             if (targetUri != null) taskUris[id] = targetUri
             if (targetUri == null && conflict == ConflictAction.OVERWRITE) taskOverwrite.add(id)
             val entry = DownloadEntry(
@@ -175,10 +296,12 @@ class DownloadEngine(
     /** 暂停：取消下载协程，保留已下载部分，状态置 PAUSED。 */
     suspend fun pause(taskId: Long) {
         stateMutex.withLock {
+            // 用户主动暂停：退出「自动暂停」集合，否则下一次网络事件会把任务又拉起来
+            autoPaused.remove(taskId)
             jobs.remove(taskId)?.cancel()
             tasks.value[taskId]?.let { cur ->
                 if (cur.isRunning) {
-                    val paused = cur.copy(status = DownloadStatus.PAUSED)
+                    val paused = cur.copy(status = DownloadStatus.PAUSED, speedBytesPerSec = 0L)
                     tasks.update { it + (taskId to paused) }
                     persist(paused)
                 }
@@ -197,6 +320,8 @@ class DownloadEngine(
         // 进行中的任务」而立刻 stopSelf，通知一闪而过 —— 这正是
         // 「暂停后再继续，通知消失」的根因。
         stateMutex.withLock {
+            // 用户已明确要求继续，不再算作「因网络自动暂停」
+            autoPaused.remove(taskId)
             tasks.value[taskId]?.let { cur ->
                 val pending = cur.copy(status = DownloadStatus.PENDING, speedBytesPerSec = 0L)
                 tasks.update { it + (taskId to pending) }
@@ -222,8 +347,11 @@ class DownloadEngine(
             tasks.update { it - taskId }
             speedSamples.remove(taskId)
             taskHeaders.remove(taskId)
+            taskUserAgents.remove(taskId)
             taskUris.remove(taskId)
             taskOverwrite.remove(taskId)
+            autoPaused.remove(taskId)
+            networkOverrides.remove(taskId)
         }
         publish()
         stopServiceIfIdle()
@@ -240,8 +368,11 @@ class DownloadEngine(
             tasks.value = emptyMap()
             speedSamples.clear()
             taskHeaders.clear()
+            taskUserAgents.clear()
             taskUris.clear()
             taskOverwrite.clear()
+            autoPaused.clear()
+            networkOverrides.clear()
         }
         publish()
         stopServiceIfIdle()
@@ -263,6 +394,29 @@ class DownloadEngine(
 
     /** 兼容旧的轮询接口：引擎是推送式的，这里只需把内存状态重发一次。 */
     fun refresh() = publish()
+
+    /**
+     * 用户在弹窗里点了「继续下载」：给这个任务放行，并立刻恢复。
+     *
+     * 放行只针对这一个任务（不动全局设置），一直有效到它完成或被删除 ——
+     * 用户既然已经愿意为这次下载花流量，中途再按网络类型反复打断就没有意义。
+     */
+    suspend fun forceResume(taskId: Long) {
+        stateMutex.withLock { networkOverrides.add(taskId) }
+        resume(taskId)
+    }
+
+    /**
+     * 设置层推送新的网络限制策略。
+     *
+     * 切换后立即重算当前网络：收紧时把越界的任务停下（记入 [autoPaused]），
+     * 放宽时把此前自动暂停的任务续起来。传入相同值直接忽略。
+     */
+    fun onNetworkPolicyChanged(network: DownloadNetwork) {
+        if (networkPolicy.value == network) return
+        networkPolicy.value = network
+        scope.launch { syncNetworkState() }
+    }
 
     /**
      * 用系统下载器的条目覆盖内存中对应的记录。
@@ -288,12 +442,50 @@ class DownloadEngine(
 
     // -------------------------------------------------------------- 下载核心
 
+    /**
+     * 启动一个下载协程。
+     *
+     * 两层闸门，顺序不能反：
+     *   1. 网络策略：不达标直接停在 PAUSED，**不占并发名额** —— 否则一批
+     *      受限任务会把槽位全占满，网络恢复后真正能跑的任务反而排不上；
+     *   2. 并发上限：超出 [MAX_CONCURRENT_DOWNLOADS] 的任务在 Semaphore 上排队，
+     *      属于「已入队但还没开始传」，状态保持 PENDING。
+     *
+     * 用 `LAZY` 启动并先登记 Job 再 `start()`：协程可能瞬间结束（例如网络不达标），
+     * 若它先跑完、自己把自己从 [jobs] 里摘掉，随后这里再写入的就是一个已完成的
+     * Job —— 用户点「暂停」会 cancel 到幽灵对象。先登记可彻底避免这个窗口。
+     */
     private suspend fun startDownload(taskId: Long) {
-        val job = scope.launch {
-            runDownload(taskId)
+        val job = scope.launch(start = CoroutineStart.LAZY) {
+            val self = currentCoroutineContext()[Job]
+            try {
+                if (!isNetworkAllowed(taskId)) {
+                    markNetworkPaused(taskId)
+                    return@launch
+                }
+                downloadSlots.acquire()
+                try {
+                    // 排队期间网络可能已经变了，拿到槽位后再确认一次
+                    if (!isNetworkAllowed(taskId)) {
+                        markNetworkPaused(taskId)
+                        return@launch
+                    }
+                    runDownload(taskId)
+                } finally {
+                    downloadSlots.release()
+                }
+            } finally {
+                // 只摘自己这一条：暂停后立刻继续会先取消旧 Job、再登记新 Job，
+                // 无条件 remove 会把新 Job 的记录抹掉，让下一次「暂停」按不到
+                // 真正在跑的任务。
+                stateMutex.withLock {
+                    if (jobs[taskId] === self) jobs.remove(taskId)
+                }
+            }
         }
         stateMutex.withLock { jobs[taskId] = job }
         ensureServiceStarted()
+        job.start()
     }
 
     /**
@@ -312,6 +504,12 @@ class DownloadEngine(
             val entry = tasks.value[taskId] ?: return
             // 用户可能在重试间隙取消了
             if (entry.status == DownloadStatus.FAILED || entry.status == DownloadStatus.SUCCESS) {
+                return
+            }
+            // 网络策略已不满足（例如从 Wi-Fi 切到计费流量）：转入自动暂停，
+            // 等网络恢复后续传。若继续重试，只会把任务耗成 FAILED。
+            if (!isNetworkAllowed(taskId)) {
+                markNetworkPaused(taskId)
                 return
             }
             try {
@@ -374,9 +572,21 @@ class DownloadEngine(
 
         val request = Request.Builder().url(entry.url).apply {
             // 脚本给的请求头（如 Referer / Authorization）；Range 由引擎自己算，不让脚本覆盖。
+            // Cookie 也不让脚本覆盖：凭据统一来自 CookieManager，按域收窄，避免脚本
+            // 把任意 Cookie 头带出去（跨域重定向时尤其危险）。
             taskHeaders[taskId]?.forEach { (key, value) ->
-                if (!key.equals("Range", ignoreCase = true)) header(key, value)
+                val lower = key.lowercase()
+                if (lower != "range" && lower != "cookie" && lower != "user-agent") {
+                    header(key, value)
+                }
             }
+            // UA：脚本显式指定优先，其次本次任务带的页面 UA，最后退回默认值。
+            val explicitUa = taskHeaders[taskId]?.entries
+                ?.firstOrNull { it.key.equals("User-Agent", ignoreCase = true) }?.value
+            header(
+                "User-Agent",
+                explicitUa ?: taskUserAgents[taskId] ?: defaultUserAgent,
+            )
             if (existing > 0) header("Range", "bytes=$existing-")
         }.build()
 
@@ -435,20 +645,27 @@ class DownloadEngine(
         target.finalize()
         // 任务已完成，附加请求头没有保留价值（重试/续传才会用到）。
         taskHeaders.remove(taskId)
+        taskUserAgents.remove(taskId)
         taskUris.remove(taskId)
         taskOverwrite.remove(taskId)
+        networkOverrides.remove(taskId)
+        var done: DownloadEntry? = null
         stateMutex.withLock {
             tasks.value[taskId]?.let { cur ->
-                val done = cur.copy(
+                val success = cur.copy(
                     status = DownloadStatus.SUCCESS,
                     downloadedBytes = if (cur.totalBytes > 0) cur.totalBytes else target.length(),
                     localPath = target.displayPath(),
                 )
-                tasks.update { it + (taskId to done) }
-                persist(done)
+                tasks.update { it + (taskId to success) }
+                persist(success)
+                done = success
             }
         }
         publish()
+        // 完成提示放在 publish 之后：此时记录已是 SUCCESS，点击通知去查库能拿到
+        // 正确的 localPath。
+        done?.let { DownloadService.notifyComplete(appContext, it) }
         stopServiceIfIdle()
     }
 
@@ -558,6 +775,109 @@ class DownloadEngine(
         return prev.speed
     }
 
+    // -------------------------------------------------------------- 网络限制
+
+    /**
+     * 当前网络是否满足 [networkPolicy]。
+     *
+     * 判定以「系统当前默认网络」为准：Wi-Fi 与移动数据并存时，实际出流量走的是
+     * 默认网络，按它判断才与用户账单一致。拿不到网络能力时（极少数 ROM 或权限
+     * 受限）一律放行 —— 宁可能下完，也不要因为读不到状态把下载永久卡住。
+     *
+     * 传 [taskId] 时先看它是否已被用户单独放行（见 [forceResume]）。
+     */
+    private fun isNetworkAllowed(taskId: Long? = null): Boolean {
+        if (taskId != null && networkOverrides.contains(taskId)) return true
+        val policy = networkPolicy.value
+        if (policy == DownloadNetwork.ALL) return true
+        val cm = connectivityManager ?: return true
+        val caps = runCatching { cm.getNetworkCapabilities(cm.activeNetwork) }.getOrNull()
+            ?: return false
+        if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) return false
+        return when (policy) {
+            DownloadNetwork.ALL -> true
+            DownloadNetwork.UNMETERED ->
+                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
+            DownloadNetwork.WIFI_ONLY ->
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
+        }
+    }
+
+    private fun onNetworkEvent() {
+        scope.launch { syncNetworkState() }
+    }
+
+    /** 网络（或策略）变化后的统一入口：满足条件就续传，不满足就自动暂停。 */
+    private suspend fun syncNetworkState() {
+        if (isNetworkAllowed()) resumeAutoPaused() else pauseAutoPaused()
+    }
+
+    /** 把当前在跑/排队中的任务全部停下，并记入 [autoPaused]。 */
+    private suspend fun pauseAutoPaused() {
+        val changed = mutableListOf<DownloadEntry>()
+        stateMutex.withLock {
+            // 已放行的任务不受影响：用户已经为此买过单了
+            tasks.value.values
+                .filter { it.isRunning && it.id !in networkOverrides }
+                .forEach { cur ->
+                    autoPaused.add(cur.id)
+                    // 排队中的任务同样要停：它们的协程还挂在 Semaphore 上，
+                    // 网络不达标时没必要继续占位等。
+                    jobs.remove(cur.id)?.cancel()
+                    val paused = cur.copy(status = DownloadStatus.PAUSED, speedBytesPerSec = 0L)
+                    tasks.update { it + (cur.id to paused) }
+                    persist(paused)
+                    changed.add(paused)
+                }
+        }
+        if (changed.isNotEmpty()) {
+            publish()
+            changed.forEach { _networkBlocked.tryEmit(it) }
+        }
+    }
+
+    /** 网络恢复：只续传「因网络自动暂停」的任务，不碰用户手动暂停的。 */
+    private suspend fun resumeAutoPaused() {
+        val ids = stateMutex.withLock { autoPaused.toList().also { autoPaused.clear() } }
+        ids.forEach { id ->
+            val entry = tasks.value[id] ?: return@forEach
+            if (entry.status == DownloadStatus.PAUSED) resume(id)
+        }
+    }
+
+    /**
+     * 单个任务因网络策略不达标而暂停。
+     *
+     * 与 [pauseAutoPaused] 的区别是它由任务自己的协程调用（此时 [jobs] 里
+     * 可能还是自己），所以不能去 cancel Job —— 只落状态、进 [autoPaused]。
+     */
+    private suspend fun markNetworkPaused(taskId: Long) {
+        var blocked: DownloadEntry? = null
+        stateMutex.withLock {
+            tasks.value[taskId]?.let { cur ->
+                if (cur.isRunning) {
+                    val paused = cur.copy(status = DownloadStatus.PAUSED, speedBytesPerSec = 0L)
+                    tasks.update { it + (taskId to paused) }
+                    persist(paused)
+                    blocked = paused
+                }
+                autoPaused.add(taskId)
+            }
+        }
+        publish()
+        // 交给 UI 弹窗：这里只是「按策略停了」，用户点继续就放行（见 forceResume）。
+        blocked?.let { _networkBlocked.tryEmit(it) }
+    }
+
+    private fun registerNetworkMonitor() {
+        if (networkMonitorRegistered) return
+        val cm = connectivityManager ?: return
+        networkMonitorRegistered = runCatching {
+            cm.registerDefaultNetworkCallback(defaultNetworkCallback)
+        }.isSuccess
+    }
+
     // -------------------------------------------------------------- 服务保活
 
     private var serviceRunning = false
@@ -654,6 +974,14 @@ class DownloadEngine(
     companion object {
         /** 失败重试上限（不含首次）。3 次对临时网络抖动足够，再多意义不大。 */
         private const val MAX_RETRIES = 3
+
+        /**
+         * 同时真正在传输的任务数上限。
+         *
+         * 超过这个数就排队（状态保持 PENDING）。3 是对移动网络与磁盘都比较友好的值：
+         * 再多容易被服务端限速，也会让每个任务的进度慢到像卡住。
+         */
+        private const val MAX_CONCURRENT_DOWNLOADS = 3
 
         /** 流式写盘缓冲区：8 KiB，与 OkHttp 内部一致。 */
         private const val BUFFER_SIZE = 8 * 1024

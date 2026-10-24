@@ -41,6 +41,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.ling.browser.data.prefs.DownloadLocation
+import com.ling.browser.data.prefs.DownloadNetwork
 import com.ling.browser.data.prefs.DownloaderType
 import com.ling.browser.data.prefs.HomeBackground
 import com.ling.browser.data.prefs.LingSettings
@@ -664,11 +665,13 @@ fun DownloadSettingsScreen(
     settings: LingSettings,
     onDownloaderType: (DownloaderType) -> Unit,
     onDownloadLocation: (DownloadLocation) -> Unit,
+    onDownloadNetwork: (DownloadNetwork) -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var showDownloaderTypeDialog by remember { mutableStateOf(false) }
     var showDownloadLocationDialog by remember { mutableStateOf(false) }
+    var showDownloadNetworkDialog by remember { mutableStateOf(false) }
 
     SettingsPageScaffold(
         title = SettingsGroup.DOWNLOAD.title,
@@ -694,6 +697,14 @@ fun DownloadSettingsScreen(
                             "公共下载目录（其它应用可见，Android 9 及以下需存储权限）"
                     },
                     onClick = { showDownloadLocationDialog = true },
+                )
+            }
+            item {
+                SettingRow(
+                    icon = LingIcons.Public,
+                    title = "网络限制",
+                    subtitle = settings.downloadNetwork.description,
+                    onClick = { showDownloadNetworkDialog = true },
                 )
             }
         },
@@ -794,6 +805,51 @@ fun DownloadSettingsScreen(
             },
             confirmButton = {
                 TextButton(onClick = { showDownloadLocationDialog = false }) { Text("完成") }
+            },
+        )
+    }
+
+    // ---- 网络限制选择 ----
+    if (showDownloadNetworkDialog) {
+        AlertDialog(
+            onDismissRequest = { showDownloadNetworkDialog = false },
+            title = { Text("网络限制") },
+            text = {
+                Column {
+                    DownloadNetwork.entries.forEach { network ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    onDownloadNetwork(network)
+                                    showDownloadNetworkDialog = false
+                                }
+                                .padding(vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RadioButton(
+                                selected = settings.downloadNetwork == network,
+                                onClick = {
+                                    onDownloadNetwork(network)
+                                    showDownloadNetworkDialog = false
+                                },
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(network.label, style = MaterialTheme.typography.bodyLarge)
+                                Text(
+                                    text = network.description +
+                                        "；切换网络时自动暂停，恢复后接着下",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showDownloadNetworkDialog = false }) { Text("完成") }
             },
         )
     }
