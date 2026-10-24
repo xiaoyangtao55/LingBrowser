@@ -95,11 +95,24 @@ class LingIconsTest {
         "Article" to LingIcons.Article,
         "Block" to LingIcons.Block,
         "Movie" to LingIcons.Movie,
+        "Pause" to LingIcons.Pause,
+        "PlayArrow" to LingIcons.PlayArrow,
+        "FileImage" to LingIcons.FileImage,
+        "FileVideo" to LingIcons.FileVideo,
+        "FileAudio" to LingIcons.FileAudio,
+        "FileArchive" to LingIcons.FileArchive,
+        "FileApk" to LingIcons.FileApk,
+        "FilePdf" to LingIcons.FilePdf,
+        "FileDoc" to LingIcons.FileDoc,
+        "FileSheet" to LingIcons.FileSheet,
+        "FileSlide" to LingIcons.FileSlide,
+        "FileCode" to LingIcons.FileCode,
+        "FileUnknown" to LingIcons.FileUnknown,
     )
 
     @Test
     fun `图标集完整`() {
-        assertEquals("图标数量发生变化时请同步更新本测试", 30, allIcons.size)
+        assertEquals("图标数量发生变化时请同步更新本测试", 43, allIcons.size)
     }
 
     @Test

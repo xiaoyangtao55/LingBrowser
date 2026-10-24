@@ -93,25 +93,39 @@ fun DownloadsScreen(
             return@Scaffold
         }
 
+        // 时间分段（今天 / 昨天 / 最近 7 天 / …），组内新 → 旧。
+        // downloads 在下载中会高频变化，但分段只依赖 createdAt，重算成本可忽略。
+        val sections = remember(downloads) { downloadSections(downloads) }
+
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(inner),
             contentPadding = PaddingValues(vertical = 8.dp),
         ) {
-            items(downloads, key = { it.id }) { entry ->
-                DownloadRow(
-                    entry = entry,
-                    onCancel = { onCancel(entry) },
-                    onPause = { onPause(entry) },
-                    onResume = { onResume(entry) },
-                    onRemove = { deleteFile -> onRemove(entry, deleteFile) },
-                    onOpen = { onOpen(entry) },
-                )
-                HorizontalDivider(
-                    modifier = Modifier.padding(start = 20.dp),
-                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
-                )
+            sections.forEach { section ->
+                item(key = "section:${section.group.name}") {
+                    Text(
+                        text = section.group.label,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 20.dp, top = 12.dp, bottom = 4.dp),
+                    )
+                }
+                items(section.entries, key = { it.id }) { entry ->
+                    DownloadRow(
+                        entry = entry,
+                        onCancel = { onCancel(entry) },
+                        onPause = { onPause(entry) },
+                        onResume = { onResume(entry) },
+                        onRemove = { deleteFile -> onRemove(entry, deleteFile) },
+                        onOpen = { onOpen(entry) },
+                    )
+                    HorizontalDivider(
+                        modifier = Modifier.padding(start = 20.dp),
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
+                    )
+                }
             }
         }
     }
@@ -170,7 +184,7 @@ private fun DownloadRow(
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Icon(
-                imageVector = LingIcons.Download,
+                imageVector = fileIconFor(entry.fileName, entry.mimeType),
                 contentDescription = null,
                 tint = when (entry.status) {
                     DownloadStatus.SUCCESS -> MaterialTheme.colorScheme.primary
