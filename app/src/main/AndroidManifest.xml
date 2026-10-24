@@ -15,6 +15,9 @@
     <!-- 内建下载器的前台服务：下载进行中时常驻保活，防止进程被杀导致断流 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- 在下载列表里直接安装已下载的 APK（PackageInstaller 会话）。
+         首次安装时系统会引导用户打开「允许安装未知应用」。 -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <!-- 网页权限：定位 / 摄像头 / 麦克风。
          全部按"网页请求 → 应用内确认 → 系统运行时授权"两段式申请，
@@ -93,6 +96,11 @@
             android:name=".download.DownloadService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- APK 安装会话的结果回调（只接收自己 PendingIntent 发来的广播） -->
+        <receiver
+            android:name=".download.ApkInstallReceiver"
+            android:exported="false" />
     </application>
 
 </manifest>

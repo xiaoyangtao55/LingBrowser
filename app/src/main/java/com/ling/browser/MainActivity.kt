@@ -61,6 +61,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.pow
 import com.ling.browser.data.db.DownloadEntry
 import com.ling.browser.data.prefs.NightMode
+import com.ling.browser.download.installApkFromUri
 import com.ling.browser.ui.BrowserViewModel
 import com.ling.browser.ui.screens.AdBlockRulesScreen
 import com.ling.browser.ui.screens.AdBlockSubscriptionsScreen
@@ -642,8 +643,19 @@ private fun LingApp(viewModel: BrowserViewModel) {
                     onRemove = { entry, deleteFile -> viewModel.removeDownload(entry, deleteFile) },
                     onClearAll = viewModel::clearDownloads,
                     onOpen = { entry ->
-                        // 打开失败时明确说一声，否则用户只觉得"点了没反应"
-                        openDownloadedFile(context, entry)?.let(viewModel::showMessage)
+                        // 打开失败时明确说一声，否则用户只觉得"点了没反应"。
+                        // 打开前有一步"等文件真正可读"，所以放协程里做。
+                        scope.launch {
+                            val error = try {
+                                openDownloadedFile(context, entry)
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Throwable) {
+                                // 任何意料之外的异常都要变成可见提示，不能静默吞掉。
+                                "打开失败：" + (e.message ?: e.javaClass.simpleName)
+                            }
+                            error?.let(viewModel::showMessage)
+                        }
                     },
                     onBack = pop,
                 )
@@ -906,7 +918,7 @@ private const val UNDER_SHIFT = 0.06f
  *
  * 返回 null 表示已成功拉起；否则返回给用户看的失败原因。
  */
-private fun openDownloadedFile(
+private suspend fun openDownloadedFile(
     context: android.content.Context,
     entry: DownloadEntry,
 ): String? {
@@ -914,22 +926,103 @@ private fun openDownloadedFile(
         return it.message ?: "无法打开这个文件"
     }
 
+    val mime = mimeTypeFor(context, entry, uri)
+    // SUCCESS 落库与文件真正可读之间有很窄的窗口：MediaStore 条目刚清掉
+    // IS_PENDING、或旧版公共目录刚 close 时，目标应用可能读到 0 字节并报
+    // "文件损坏"。这里只在这个窗口内等（见 [awaitNonEmpty]），正常条目
+    // 探测一次就返回，不做无条件 sleep。
+    awaitNonEmpty(context, uri, entry.downloadedBytes.takeIf { it > 0 } ?: entry.totalBytes)
+
+    // APK 单独走一条路：用 PackageInstaller 会话直接交给系统安装器。
+    //
+    // 不走 ACTION_VIEW 的 apk MIME：各家 ROM 对 `application/vnd.android.
+    // package-archive` 的注册不一致，部分机型根本没有应用认领它 —— 结果
+    // 要么选择框里全是别的应用（没有安装器），要么点下去毫无反应。
+    // 会话方式由系统自己弹安装界面，不依赖 MIME 匹配、也不依赖 URI 授权。
+    if (mime == APK_MIME && installApkFromUri(context, uri)) return null
+
     val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
-        setDataAndType(uri, mimeTypeFor(context, entry, uri))
-        addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+        setDataAndType(uri, mime)
+        grantRead(uri, entry.fileName)
     }
 
     return try {
         context.startActivity(intent)
         null
     } catch (e: android.content.ActivityNotFoundException) {
-        // 系统里没有任何应用认领这个类型（常见于 .bin / 冷门后缀）
-        "没有可以打开这个文件的应用"
+        // 系统里没有任何应用认领这个类型（常见于 .bin / 冷门后缀）。
+        // 退一步弹分享面板：比"点了没反应"或一句 toast 更有用，
+        // 也绕开了部分 ROM 上 ACTION_VIEW 授权不生效的问题。
+        if (shareChooser(context, uri, mime, entry.fileName)) null
+        else "没有可以打开这个文件的应用"
     } catch (e: SecurityException) {
         "没有权限打开这个文件"
     }
 }
+
+/**
+ * 给 Intent 挂上读权限。
+ *
+ * 只加 FLAG 在部分定制系统（老 MIUI 等）上会被目标应用忽略，把 URI 同时放进
+ * [android.content.ClipData] 才稳定 —— 系统会连同 clip 里的 URI 一起授权。
+ */
+private fun android.content.Intent.grantRead(
+    uri: android.net.Uri,
+    label: String,
+) {
+    addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+    clipData = android.content.ClipData.newRawUri(label, uri)
+}
+
+/** 兜底：弹系统分享面板，让用户挑一个能处理该文件的应用。 */
+private fun shareChooser(
+    context: android.content.Context,
+    uri: android.net.Uri,
+    mime: String,
+    label: String,
+): Boolean {
+    val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+        type = mime
+        putExtra(android.content.Intent.EXTRA_STREAM, uri)
+        grantRead(uri, label)
+    }
+    val chooser = android.content.Intent.createChooser(send, "打开方式").apply {
+        addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    return runCatching { context.startActivity(chooser) }.isSuccess
+}
+
+/**
+ * 等到文件确实有内容再发 Intent（只处理"刚完成、还是 0 字节"的窄窗口）。
+ *
+ * 记录里的期望字节数未知时直接跳过 —— 否则真正的 0 字节文件（比如空日志）
+ * 每次打开都会白等一轮。
+ */
+private suspend fun awaitNonEmpty(
+    context: android.content.Context,
+    uri: android.net.Uri,
+    expectedBytes: Long,
+) {
+    if (expectedBytes <= 0) return
+    if ((sizeOf(context, uri) ?: return) > 0) return
+    repeat(READY_POLL_COUNT) {
+        kotlinx.coroutines.delay(READY_POLL_MILLIS)
+        if ((sizeOf(context, uri) ?: return) > 0) return
+    }
+}
+
+/** 文件当前长度；拿不到（权限、provider 不支持）时返回 null。 */
+private fun sizeOf(context: android.content.Context, uri: android.net.Uri): Long? =
+    when (uri.scheme) {
+        "file" -> uri.path?.let { path ->
+            java.io.File(path).takeIf { it.exists() }?.length()
+        }
+        "content" -> runCatching {
+            context.contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize }
+        }.getOrNull()?.takeIf { it >= 0 }
+        else -> null
+    }
 
 /**
  * 找出该下载条目对应的可分享 URI。
@@ -1003,52 +1096,111 @@ private fun mediaStoreDownloadUri(
     fileName: String,
 ): android.net.Uri? {
     if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q) return null
-    val collection = android.provider.MediaStore.Downloads.getContentUri(
-        android.provider.MediaStore.VOLUME_EXTERNAL_PRIMARY,
-    )
-    return runCatching {
-        context.contentResolver.query(
-            collection,
-            arrayOf(android.provider.MediaStore.Downloads._ID),
-            "${android.provider.MediaStore.Downloads.DISPLAY_NAME} = ?",
-            arrayOf(fileName),
-            null,
-        )?.use { c ->
-            if (c.moveToFirst()) android.net.Uri.withAppendedPath(collection, c.getLong(0).toString())
-            else null
-        }
-    }.getOrNull()
+    // 同名文件可能有多条记录（重新下载、别的应用也下过同一个名字），
+    // 按 DATE_ADDED 倒序取最新的一条，否则会打开一个旧文件。
+    // 逐个卷查：外置 SD 卡上的下载不在 VOLUME_EXTERNAL_PRIMARY 里。
+    val volumes = runCatching {
+        android.provider.MediaStore.getExternalVolumeNames(context).toList()
+    }.getOrNull().orEmpty().ifEmpty {
+        listOf(android.provider.MediaStore.VOLUME_EXTERNAL_PRIMARY)
+    }
+    for (volume in volumes) {
+        val collection = android.provider.MediaStore.Downloads.getContentUri(volume)
+        val uri = queryLatestDownload(context, collection, fileName)
+        if (uri != null) return uri
+    }
+    return null
 }
+
+private fun queryLatestDownload(
+    context: android.content.Context,
+    collection: android.net.Uri,
+    fileName: String,
+): android.net.Uri? = runCatching {
+    context.contentResolver.query(
+        collection,
+        arrayOf(android.provider.MediaStore.Downloads._ID),
+        "${android.provider.MediaStore.Downloads.DISPLAY_NAME} = ?",
+        arrayOf(fileName),
+        "${android.provider.MediaStore.Downloads.DATE_ADDED} DESC",
+    )?.use { c ->
+        if (c.moveToFirst()) android.net.Uri.withAppendedPath(collection, c.getLong(0).toString())
+        else null
+    }
+}.getOrNull()
 
 /**
  * 推断打开文件时该用的 MIME。
  *
- * 优先用下载时记录的类型，但 `application/octet-stream` 等于"不知道"，不能直接
- * 用它去 ACTION_VIEW —— 几乎没有应用认领这个类型，表现就是点了没反应。这类
- * 情况退回查表：`content://` 先问 ContentResolver，其余按文件名的后缀查 MimeTypeMap。
+ * 优先级：
+ *  1. **可信后缀**（[MIME_BY_EXTENSION]）—— APK 必须压过记录值：服务器常把
+ *     安装包标成 `application/octet-stream` 或干脆标错，而 `MimeTypeMap` 在
+ *     部分 ROM 上查不到 `apk`，两条路都会退成全通配 MIME，结果选择框里
+ *     全是认领通配的应用、安装器反而缺席；
+ *  2. 下载时记录的类型（去掉 `; charset=` 之类参数，否则 `setType` 会拿到非法值）；
+ *  3. `content://` 问 ContentResolver；
+ *  4. 按后缀查 `MimeTypeMap`；
+ *  5. 都推不出才用全通配。
+ *
+ * `application/octet-stream` 等于"不知道"，不能直接拿去 ACTION_VIEW ——
+ * 几乎没有应用认领这个类型，表现就是点了没反应。
  */
 private fun mimeTypeFor(
     context: android.content.Context,
     entry: DownloadEntry,
     uri: android.net.Uri,
 ): String {
+    val ext = entry.fileName.substringAfterLast('.', "").lowercase()
+    MIME_BY_EXTENSION[ext]?.let { return it }
+
     val recorded = entry.mimeType
-        ?.takeIf { it.isNotBlank() && it != "application/octet-stream" }
+        ?.substringBefore(';')
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() && it !in GENERIC_MIME_TYPES }
     if (recorded != null) return recorded
 
     if (uri.scheme == "content") {
         runCatching { context.contentResolver.getType(uri) }
             .getOrNull()
-            ?.takeIf { it.isNotBlank() }
+            ?.substringBefore(';')
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() && it !in GENERIC_MIME_TYPES }
             ?.let { return it }
     }
 
     // 后缀从文件名取，不能从 URI 取：content:// 的最后一段是数字 ID
-    val ext = entry.fileName.substringAfterLast('.', "")
     if (ext.isNotEmpty()) {
         android.webkit.MimeTypeMap.getSingleton()
-            .getMimeTypeFromExtension(ext.lowercase())
+            .getMimeTypeFromExtension(ext)
             ?.let { return it }
     }
     return "*/*"
 }
+
+/** 打开安装包时使用的标准 MIME。 */
+private const val APK_MIME = "application/vnd.android.package-archive"
+
+/**
+ * 扩展名 → 权威 MIME。
+ *
+ * 只收"记录值不可信、且系统查表也可能失败"的几个：`apk` 是必须精确的，
+ * `apks` / `xapk` 本质是 zip（交给安装器只会报"解析失败"），按压缩包处理。
+ */
+private val MIME_BY_EXTENSION = mapOf(
+    "apk" to APK_MIME,
+    "apks" to "application/zip",
+    "xapk" to "application/zip",
+)
+
+/** 这些类型等于"不知道真实类型"，不能拿去匹配应用。 */
+private val GENERIC_MIME_TYPES = setOf(
+    "*/*",
+    "application/octet-stream",
+    "binary/octet-stream",
+    "application/x-download",
+    "application/unknown",
+)
+
+/** 等待文件可读的轮询次数与间隔（合计约 500ms）。 */
+private const val READY_POLL_COUNT = 20
+private const val READY_POLL_MILLIS = 25L

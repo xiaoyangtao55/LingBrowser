@@ -517,6 +517,11 @@ class DownloadEngine(
                     }
                 }
             }
+            // 关闭前把页缓存刷到磁盘：写完立刻会标记 SUCCESS，用户可能在几十
+            // 毫秒内就点开文件。不 sync 时个别文件系统/目标应用会先看到 0 字节，
+            // 表现成"文件损坏"。失败不影响下载结果，只是少一层持久化保证。
+            out.flush()
+            runCatching { (out as? java.io.FileOutputStream)?.fd?.sync() }
         }
     }
 
