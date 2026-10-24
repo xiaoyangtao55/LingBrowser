@@ -352,6 +352,7 @@ class DownloadEngine(
             taskOverwrite.remove(taskId)
             autoPaused.remove(taskId)
             networkOverrides.remove(taskId)
+            ChunkStore.delete(appContext, taskId)
         }
         publish()
         stopServiceIfIdle()
@@ -373,6 +374,7 @@ class DownloadEngine(
             taskOverwrite.clear()
             autoPaused.clear()
             networkOverrides.clear()
+            ChunkStore.clearAll(appContext)
         }
         publish()
         stopServiceIfIdle()
@@ -566,29 +568,43 @@ class DownloadEngine(
         entry: DownloadEntry,
         target: DownloadDestination.Target,
     ) {
+        // 1) 优先接续分块现场：上一轮可能是被暂停、或进程被杀打断的。
+        //    分块写的文件中间有空洞，绝对不能用 length() 当进度（见 ChunkPlan）。
+        val saved = ChunkStore.load(appContext, taskId)
+        if (saved != null) {
+            when {
+                // 落点变了（换保存位置 / 重命名）：旧现场不再对应这个文件
+                saved.path != target.displayPath() -> ChunkStore.delete(appContext, taskId)
+                saved.isComplete() && target.length() >= saved.total -> {
+                    ChunkStore.delete(appContext, taskId)
+                    markSuccess(taskId, target)
+                    return
+                }
+                // 记录已完成但文件长度不够（被删/被截断）→ 当没有现场
+                saved.isComplete() -> ChunkStore.delete(appContext, taskId)
+                target.supportsRandomAccess && target.length() > 0 ->
+                    return runChunked(taskId, entry, target, saved)
+                // 目标不支持随机写 / 文件不见了 → 现场作废，重新开始
+                else -> ChunkStore.delete(appContext, taskId)
+            }
+        }
+
         // 续传起点取**目标上真实的字节数**，而不是库里的进度：进度是节流写库的，
         // 回退用它当起点会和真实文件错位，追加时拼出脏数据。
         val existing = target.length()
 
-        val request = Request.Builder().url(entry.url).apply {
-            // 脚本给的请求头（如 Referer / Authorization）；Range 由引擎自己算，不让脚本覆盖。
-            // Cookie 也不让脚本覆盖：凭据统一来自 CookieManager，按域收窄，避免脚本
-            // 把任意 Cookie 头带出去（跨域重定向时尤其危险）。
-            taskHeaders[taskId]?.forEach { (key, value) ->
-                val lower = key.lowercase()
-                if (lower != "range" && lower != "cookie" && lower != "user-agent") {
-                    header(key, value)
-                }
+        // 2) 全新任务且目标能随机写：先探一下服务端是否支持 Range。
+        //    支持就分块并发，能明显改善「单连接被限速」的大文件下载。
+        if (existing == 0L && target.supportsRandomAccess) {
+            val total = probeRangeSupport(taskId, entry)
+            val plan = total?.let { ChunkPlan.of(it, target.displayPath()) }
+            if (plan != null) {
+                return runChunked(taskId, entry, target, plan)
             }
-            // UA：脚本显式指定优先，其次本次任务带的页面 UA，最后退回默认值。
-            val explicitUa = taskHeaders[taskId]?.entries
-                ?.firstOrNull { it.key.equals("User-Agent", ignoreCase = true) }?.value
-            header(
-                "User-Agent",
-                explicitUa ?: taskUserAgents[taskId] ?: defaultUserAgent,
-            )
-            if (existing > 0) header("Range", "bytes=$existing-")
-        }.build()
+        }
+
+        // 3) 单流路径（原有逻辑）
+        val request = buildRequest(taskId, entry, if (existing > 0) "bytes=$existing-" else null)
 
         client.newCall(request).execute().use { response ->
             val contentLength = response.body?.contentLength() ?: -1L
@@ -636,6 +652,220 @@ class DownloadEngine(
     }
 
     /**
+     * 构造下载请求。
+     *
+     * 脚本给的请求头（Referer / Authorization 等）会带上，但 Range / Cookie / UA
+     * 由引擎自己决定：Range 决定续传与分块语义，Cookie 必须按域收窄（避免跨域
+     * 重定向把凭据带给第三方），UA 缺了会被部分站点按爬虫拒绝。
+     */
+    private fun buildRequest(taskId: Long, entry: DownloadEntry, range: String?): Request =
+        Request.Builder().url(entry.url).apply {
+            taskHeaders[taskId]?.forEach { (key, value) ->
+                val lower = key.lowercase()
+                if (lower != "range" && lower != "cookie" && lower != "user-agent") {
+                    header(key, value)
+                }
+            }
+            // UA：脚本显式指定优先，其次本次任务带的页面 UA，最后退回默认值。
+            val explicitUa = taskHeaders[taskId]?.entries
+                ?.firstOrNull { it.key.equals("User-Agent", ignoreCase = true) }?.value
+            header(
+                "User-Agent",
+                explicitUa ?: taskUserAgents[taskId] ?: defaultUserAgent,
+            )
+            range?.let { header("Range", it) }
+        }.build()
+
+    /**
+     * 探测服务端是否支持 Range，并顺带拿到文件总大小。
+     *
+     * 用 `HEAD` + `Range: bytes=0-0` 而不是先发一个真实 GET 再掐断：后者会让服务端
+     * 白送一段数据、也多占一条连接。探测失败（405/403、超时、服务器乱来）一律
+     * 返回 null，退回单流下载 —— 分块只是提速手段，不能成为下载的前置条件。
+     */
+    private fun probeRangeSupport(taskId: Long, entry: DownloadEntry): Long? = runCatching {
+        val request = buildRequest(taskId, entry, "bytes=0-0")
+            .newBuilder()
+            .head()
+            .build()
+        client.newCall(request).execute().use { response ->
+            // 206 本身就证明支持 Range；200 则要看 Accept-Ranges。
+            val total = when {
+                response.code == 206 -> parseContentRangeTotal(response.header("Content-Range"))
+                response.isSuccessful -> response.body?.contentLength() ?: -1L
+                else -> -1L
+            }
+            val rangeSupported = response.code == 206 ||
+                response.header("Accept-Ranges")?.contains("bytes", ignoreCase = true) == true
+            total?.takeIf { it >= ChunkPlan.MIN_TOTAL_BYTES && rangeSupported }
+        }
+    }.getOrNull()
+
+    /**
+     * 分块并发下载。
+     *
+     * 每块独占一个区间、各自开一条连接、各自 seek 到自己的起点写入，互不重叠；
+     * 进度取各块之和。进度现场（[ChunkPlan.written]）会周期性落盘，所以暂停或
+     * 进程被杀后能从断点继续，而不是从头再来。
+     */
+    private suspend fun runChunked(
+        taskId: Long,
+        entry: DownloadEntry,
+        target: DownloadDestination.Target,
+        plan: ChunkPlan,
+    ) {
+        // 立即把总大小与已有进度写到条目上：界面马上能显示正确的百分比
+        stateMutex.withLock {
+            val running = entry.copy(
+                status = DownloadStatus.RUNNING,
+                totalBytes = plan.total,
+                downloadedBytes = plan.downloaded(),
+                localPath = target.displayPath(),
+            )
+            tasks.update { it + (taskId to running) }
+            persist(running)
+        }
+        publish()
+        speedSamples.remove(taskId)
+
+        val stateLock = Any()
+        val progress = java.util.concurrent.atomic.AtomicLong(plan.downloaded())
+        var lastPublishAt = 0L
+        var lastPublishBytes = progress.get()
+        var lastSaveAt = 0L
+
+        /**
+         * 每写入一小段就回调一次，在这里做节流：
+         *  - 进度刷新沿用单流路径的「256 KiB 或 300ms」，避免把库打爆；
+         *  - 现场落盘更稀一些（1s），崩溃最多重下最近一秒的字节。
+         */
+        val onProgress: suspend (Long) -> Unit = { delta ->
+            val written = progress.addAndGet(delta)
+            val now = System.currentTimeMillis()
+            var speed = 0L
+            var shouldPublish = false
+            synchronized(stateLock) {
+                if (written - lastPublishBytes >= PROGRESS_INTERVAL_BYTES ||
+                    now - lastPublishAt >= PROGRESS_INTERVAL_MS
+                ) {
+                    lastPublishBytes = written
+                    lastPublishAt = now
+                    shouldPublish = true
+                    speed = measureSpeed(taskId, written, now)
+                }
+                if (now - lastSaveAt >= STATE_SAVE_INTERVAL_MS) {
+                    lastSaveAt = now
+                    ChunkStore.save(appContext, taskId, plan)
+                }
+            }
+            if (shouldPublish) publishProgress(taskId, plan.total, written, speed)
+        }
+
+        try {
+            kotlinx.coroutines.coroutineScope {
+                for (index in 0 until plan.chunkCount) {
+                    launch {
+                        downloadChunk(taskId, entry, target, plan, index, onProgress)
+                    }
+                }
+            }
+        } finally {
+            // 暂停 / 取消 / 异常都要留下现场，下一次从这里接着下
+            synchronized(stateLock) { ChunkStore.save(appContext, taskId, plan) }
+        }
+
+        if (!plan.isComplete()) throw java.io.IOException("分块未下载完整")
+        ChunkStore.delete(appContext, taskId)
+        markSuccess(taskId, target)
+    }
+
+    /**
+     * 下载计划中的一块。
+     *
+     * @param onProgress 每写入一段回调一次，参数是本次新增字节数。
+     */
+    private suspend fun downloadChunk(
+        taskId: Long,
+        entry: DownloadEntry,
+        target: DownloadDestination.Target,
+        plan: ChunkPlan,
+        index: Int,
+        onProgress: suspend (Long) -> Unit,
+    ) {
+        val chunkStart = plan.chunkStart(index)
+        val chunkLength = plan.chunkLength(index)
+        var offset = plan.written[index]
+        if (offset >= chunkLength) return
+
+        val rangeStart = chunkStart + offset
+        val rangeEnd = chunkStart + chunkLength - 1
+        val request = buildRequest(taskId, entry, "bytes=$rangeStart-$rangeEnd")
+
+        client.newCall(request).execute().use { response ->
+            // 这一块必须是 206：200 说明服务端无视了 Range，写下去会覆盖别的块
+            if (response.code != 206) {
+                throw java.io.IOException(
+                    if (response.code == 200) "服务器忽略了 Range" else "HTTP ${response.code}",
+                )
+            }
+            // 校验服务器确实从我们要的位置开始给数据
+            val returnedStart = parseContentRangeStart(response.header("Content-Range"))
+            if (returnedStart != null && returnedStart != rangeStart) {
+                throw java.io.IOException("服务器返回了错误的区间")
+            }
+            val body = response.body ?: throw java.io.IOException("empty body")
+
+            target.outputStreamAt(rangeStart).use { out ->
+                body.byteStream().use { input ->
+                    val buffer = ByteArray(BUFFER_SIZE)
+                    while (true) {
+                        // 与单流写入一致：阻塞读写不会自动响应协程取消
+                        currentCoroutineContext().ensureActive()
+                        val read = input.read(buffer)
+                        if (read == -1) break
+                        // 防御：万一服务器多发了，就截在本块边界，不能越界写坏下一块
+                        val writable = minOf(read.toLong(), chunkLength - offset)
+                        if (writable <= 0) break
+                        out.write(buffer, 0, writable.toInt())
+                        offset += writable
+                        plan.written[index] = offset
+                        onProgress(writable)
+                        if (writable < read) break
+                    }
+                }
+                out.flush()
+                runCatching { (out as? java.io.FileOutputStream)?.fd?.sync() }
+            }
+        }
+
+        // 连接正常结束但块没满：服务端提前掐断了，交给上层重试（会从这里续）
+        if (plan.written[index] < chunkLength) throw java.io.IOException("分块提前结束")
+    }
+
+    /** 分块下载的进度推送（与单流路径的写法保持一致）。 */
+    private suspend fun publishProgress(
+        taskId: Long,
+        totalBytes: Long,
+        downloadedBytes: Long,
+        speed: Long,
+    ) {
+        stateMutex.withLock {
+            tasks.value[taskId]?.let { cur ->
+                val updated = cur.copy(
+                    // 四条连接各自算出快照后并发推送，完成顺序不保证；
+                    // 取较大值，避免进度条偶尔往回跳。
+                    downloadedBytes = maxOf(downloadedBytes, cur.downloadedBytes),
+                    totalBytes = if (totalBytes > 0) totalBytes else cur.totalBytes,
+                    speedBytesPerSec = speed,
+                )
+                tasks.update { it + (taskId to updated) }
+                persist(updated)
+            }
+        }
+        publish()
+    }
+
+    /**
      * 把任务标记为完成：落定目标（提交 MediaStore 条目）并写库。
      *
      * 抽出成独立方法是因为成功路径有两处入口 —— 正常写完，以及服务器返回
@@ -649,6 +879,8 @@ class DownloadEngine(
         taskUris.remove(taskId)
         taskOverwrite.remove(taskId)
         networkOverrides.remove(taskId)
+        // 已完成，分块现场不再需要
+        ChunkStore.delete(appContext, taskId)
         var done: DownloadEntry? = null
         stateMutex.withLock {
             tasks.value[taskId]?.let { cur ->
@@ -991,6 +1223,14 @@ class DownloadEngine(
 
         /** 进度刷盘时间间隔：300ms，兼顾实时感与性能。 */
         private const val PROGRESS_INTERVAL_MS = 300L
+
+        /**
+         * 分块下载的现场落盘间隔：1s。
+         *
+         * 比进度刷新稀得多：它每次都要重写一个小 JSON，而丢一秒的进度
+         * 最多只是恢复时重下这一小段，代价可以忽略。
+         */
+        private const val STATE_SAVE_INTERVAL_MS = 1000L
 
         /**
          * 速度采样的最短窗口：300ms。

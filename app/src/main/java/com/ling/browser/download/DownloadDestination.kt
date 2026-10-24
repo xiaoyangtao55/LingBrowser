@@ -240,6 +240,18 @@ object DownloadDestination {
         /** 打开一个可写入的输出流。append=true 时从文件末尾追加。 */
         fun outputStream(append: Boolean): OutputStream
 
+        /**
+         * 是否支持在任意偏移写入 —— 分块并发下载的前提。
+         *
+         * 文件与 MediaStore 的 fd 都可以 seek；SAF 选定的文档不行（provider 对
+         * 随机访问没有可靠语义），所以 [UriTarget] 保持 false。
+         */
+        val supportsRandomAccess: Boolean get() = false
+
+        /** 从 [offset] 开始写入。仅当 [supportsRandomAccess] 为真时可用。 */
+        fun outputStreamAt(offset: Long): OutputStream =
+            throw UnsupportedOperationException("target does not support random access")
+
         /** 完成后调用：标记 MediaStore 条目为非 pending（对 FileTarget 无操作）。 */
         fun finalize() {}
 
@@ -259,6 +271,19 @@ object DownloadDestination {
             // File.outputStream() 没有 append 参数，必须用 FileOutputStream 构造函数。
             return java.io.FileOutputStream(file, append)
         }
+
+        override val supportsRandomAccess: Boolean get() = true
+
+        override fun outputStreamAt(offset: Long): OutputStream {
+            val parent = file.parentFile
+            if (parent != null && !parent.exists()) parent.mkdirs()
+            // 不能用 FileOutputStream(file, true)：O_APPEND 会让所有写入都跑到文件尾，
+            // position 被系统忽略。RandomAccessFile 打开才是真正的随机写。
+            val raf = java.io.RandomAccessFile(file, "rw")
+            raf.seek(offset)
+            return java.nio.channels.Channels.newOutputStream(raf.channel)
+        }
+
         override fun displayPath(): String = file.absolutePath
         override fun delete() { runCatching { file.delete() } }
     }
@@ -306,6 +331,18 @@ object DownloadDestination {
             // ParcelFileDescriptor 的 fd 直接构造（它需要真实文件路径），
             // 这里用 FileOutputStream 的 fd 构造函数写入。
             return java.io.FileOutputStream(fd.fileDescriptor)
+        }
+
+        override val supportsRandomAccess: Boolean get() = true
+
+        override fun outputStreamAt(offset: Long): OutputStream {
+            // "rw" 允许 seek 写；打开后把通道位置移到块的起点即可。
+            // fd 的所有权交给 FileOutputStream（close 时一并关闭），与 [outputStream] 一致。
+            val pfd = context.contentResolver.openFileDescriptor(uri, "rw")
+                ?: throw java.io.IOException("无法打开 MediaStore 输出流")
+            val out = java.io.FileOutputStream(pfd.fileDescriptor)
+            out.channel.position(offset)
+            return out
         }
 
         override fun finalize() {

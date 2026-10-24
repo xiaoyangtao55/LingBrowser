@@ -56,3 +56,20 @@ internal fun planResume(
 
 private const val HTTP_PARTIAL_CONTENT = 206
 private const val HTTP_RANGE_NOT_SATISFIABLE = 416
+
+/** `Content-Range: bytes 1000-1999/10000`；总长也可能是 `*`（未知）。 */
+private val CONTENT_RANGE_PATTERN =
+    Regex("""bytes\s+(\d+)-(\d+)/(\d+|\*)""", RegexOption.IGNORE_CASE)
+
+/**
+ * 取 `Content-Range` 的区间起点。
+ *
+ * 分块下载必须校验它：服务器如果无视我们请求的 Range 从 0 开始给数据，
+ * 直接往块的偏移写就会把别的块覆盖掉。格式不认识时返回 null（不做强校验）。
+ */
+internal fun parseContentRangeStart(header: String?): Long? =
+    header?.let { CONTENT_RANGE_PATTERN.find(it)?.groupValues?.get(1)?.toLongOrNull() }
+
+/** 取 `Content-Range` 的文件总大小；`*` 或格式不认识时返回 null。 */
+internal fun parseContentRangeTotal(header: String?): Long? =
+    header?.let { CONTENT_RANGE_PATTERN.find(it)?.groupValues?.get(3)?.toLongOrNull() }
