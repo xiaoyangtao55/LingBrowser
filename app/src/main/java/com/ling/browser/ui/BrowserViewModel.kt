@@ -59,6 +59,7 @@ import com.ling.browser.web.UserScriptMenuCommand
 import com.ling.browser.web.WebTabManager
 import com.ling.browser.web.connectAllowed
 import com.ling.browser.web.jsString
+import com.ling.browser.web.scriptMarker
 import java.io.ByteArrayOutputStream
 import java.net.SocketTimeoutException
 import java.util.Locale
@@ -1325,17 +1326,18 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
     /**
      * 处理页面里 GM 垫片发来的消息。
      *
-     * 消息是页面 JS 构造的，因此**不可信**：脚本 id 必须在仓库里存在且启用
-     * （由 [com.ling.browser.data.repo.UserScriptRepository.setValue] 二次校验），
-     * 非法 JSON 直接丢弃。写入只进该脚本自己的值文件，不碰任何其它状态。
+     * 消息是页面 JS 构造的，因此**不可信**：消息里的 `s` 是脚本 id 的摘要，
+     * 只能按摘要反查"存在且启用"的脚本（见 [scriptMarker]），查不到直接丢弃。
+     * 非法 JSON 同样丢弃。写入只进该脚本自己的值文件，不碰任何其它状态。
      */
     private fun handleUserScriptMessage(tabId: String, raw: String) {
         val obj = runCatching { JSONObject(raw) }.getOrNull() ?: return
-        val scriptId = obj.optString("s")
-        if (scriptId.isEmpty()) return
-        // 桥对象对整个页面可见，消息本身不可信：脚本必须存在且启用。
+        val marker = obj.optString("s")
+        if (marker.isEmpty()) return
+        // 桥对象对整个页面可见，消息本身不可信：摘要必须对得上一个存在且启用的脚本。
         // 这一道同时挡住"已停用脚本继续开标签 / 读剪贴板 / 发通知"。
-        if (container.userScripts.enabledScripts.value.none { it.id == scriptId }) return
+        val scriptId = container.userScripts.enabledScripts.value
+            .firstOrNull { scriptMarker(it.id) == marker }?.id ?: return
         when (obj.optString("t")) {
             "set" -> {
                 val key = obj.optString("k")
@@ -1670,9 +1672,22 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
         val requestId = details.optString("id").takeIf { it.isNotEmpty() } ?: return
         val script = container.userScripts.enabledScripts.value.firstOrNull { it.id == scriptId }
             ?: return
+        // 当前标签正在展示的页面。GM 桥对整个页面可见，光有脚本身份还不够：
+        // 页面可以在自己的上下文里冒用该脚本发消息。
+        val pageUrl = tabManager.tabs.value.firstOrNull { it.id == tabId }?.url
 
         fun fail(message: String) {
             deliverScriptEvent(tabId, scriptId, requestId, "error", scriptFailurePayload(message))
+        }
+
+        // ★ 脚本必须**匹配当前页面**才允许借用它的身份发请求。
+        // 少了这道校验，任意网页只要拿到某脚本的身份，就能让原生侧带着用户在该
+        // 目标站点的真实 Cookie 发起跨域请求，响应再回传页面 —— 等同于浏览器
+        // 层面的 CSRF + 凭据窃取。有了它，页面最多只能借用"本来就该在这个站点
+        // 运行"的脚本身份，跨站冒充被挡住。
+        if (pageUrl == null || !script.script.matches(pageUrl)) {
+            fail("脚本未匹配当前页面，拒绝发起请求")
+            return
         }
 
         if (scriptRequests.size >= MAX_SCRIPT_REQUESTS) {
@@ -1689,7 +1704,7 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
         // @connect 是作者声明的目标白名单。没有声明时放行（Tampermonkey 会弹窗
         // 询问，我们没有逐请求确认 UI，静默拒绝会让老脚本全部失效）。
         val targetHost = uri.host?.lowercase(Locale.ROOT)
-        val pageHost = tabManager.tabs.value.firstOrNull { it.id == tabId }?.url
+        val pageHost = pageUrl
             ?.let { runCatching { Uri.parse(it).host?.lowercase(Locale.ROOT) }.getOrNull() }
         if (!connectAllowed(script.script.connects, targetHost, pageHost)) {
             fail("@connect 未授权访问 $targetHost")
@@ -1818,6 +1833,14 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
         val requestId = details.optString("id").takeIf { it.isNotEmpty() } ?: return
         fun fail(message: String) {
             deliverScriptEvent(tabId, scriptId, requestId, "error", scriptFailurePayload(message))
+        }
+        // 与 GM_xmlhttpRequest 同理：下载请求同样带 Cookie，必须验证脚本身份
+        // 与当前页面匹配，不能只看"脚本存在且启用"。
+        val pageUrl = tabManager.tabs.value.firstOrNull { it.id == tabId }?.url
+        val script = container.userScripts.enabledScripts.value.firstOrNull { it.id == scriptId }
+        if (pageUrl == null || script == null || !script.script.matches(pageUrl)) {
+            fail("脚本未匹配当前页面，拒绝下载")
+            return
         }
         val url = details.optString("u")
         val scheme = runCatching { Uri.parse(url).scheme?.lowercase(Locale.ROOT) }.getOrNull()
@@ -2051,7 +2074,7 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
         payload: JSONObject,
     ) {
         val js = "window.__lingGMDispatch&&window.__lingGMDispatch(" +
-            jsString(scriptId) + "," +
+            jsString(scriptMarker(scriptId)) + "," +
             jsString(requestId) + "," +
             jsString(event) + ",JSON.parse(" +
             jsString(payload.toString()) + "))"

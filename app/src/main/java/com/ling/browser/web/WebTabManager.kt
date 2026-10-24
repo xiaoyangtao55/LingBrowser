@@ -637,7 +637,7 @@ class WebTabManager(private val context: Context) {
             // document-start 不可用时 START 直接降级到 END，无需探测；
             // 可用时先问页面"这份脚本跑过了吗"，避免同一页重复执行。
             if (actual == ScriptRunAt.START && documentStartSupported) {
-                val probe = "!!(window.__lingGMInjected&&window.__lingGMInjected[${jsString(entry.id)}])"
+                val probe = "!!(window.__lingGMInjected&&window.__lingGMInjected[${jsString(scriptMarker(entry.id))}])"
                 wv.evaluateJavascript(probe) { seen ->
                     if (seen != "true") wv.evaluateJavascript(code, null)
                 }
@@ -708,7 +708,7 @@ class WebTabManager(private val context: Context) {
         val wv = webViews[tabId]
         if (!registered || wv == null) return false
         wv.evaluateJavascript(
-            "window.__lingGMMenu&&window.__lingGMMenu(${jsString(scriptId)},${jsString(commandId)})",
+            "window.__lingGMMenu&&window.__lingGMMenu(${jsString(scriptMarker(scriptId))},${jsString(commandId)})",
             null,
         )
         return true
@@ -729,7 +729,7 @@ class WebTabManager(private val context: Context) {
     ) {
         if (webViews.isEmpty()) return
         val js = "window.__lingGMValue&&window.__lingGMValue(" +
-            "${jsString(scriptId)},${jsString(key)},${jsLiteral(oldValue)},${jsLiteral(newValue)},true)"
+            "${jsString(scriptMarker(scriptId))},${jsString(key)},${jsLiteral(oldValue)},${jsLiteral(newValue)},true)"
         for ((tabId, wv) in webViews) {
             if (tabId == exceptTabId) continue
             if (_tabs.value.firstOrNull { it.id == tabId }?.isIncognito == true) continue
@@ -741,7 +741,7 @@ class WebTabManager(private val context: Context) {
     fun dispatchUserScriptNotificationClick(tabId: String, scriptId: String, notificationId: String) {
         val wv = webViews[tabId] ?: return
         wv.evaluateJavascript(
-            "window.__lingGMNotice&&window.__lingGMNotice(${jsString(scriptId)},${jsString(notificationId)},'click')",
+            "window.__lingGMNotice&&window.__lingGMNotice(${jsString(scriptMarker(scriptId))},${jsString(notificationId)},'click')",
             null,
         )
     }
@@ -755,7 +755,7 @@ class WebTabManager(private val context: Context) {
     fun dispatchUserScriptNotificationDone(tabId: String, scriptId: String, notificationId: String) {
         val wv = webViews[tabId] ?: return
         wv.evaluateJavascript(
-            "window.__lingGMNotice&&window.__lingGMNotice(${jsString(scriptId)},${jsString(notificationId)},'done')",
+            "window.__lingGMNotice&&window.__lingGMNotice(${jsString(scriptMarker(scriptId))},${jsString(notificationId)},'done')",
             null,
         )
     }

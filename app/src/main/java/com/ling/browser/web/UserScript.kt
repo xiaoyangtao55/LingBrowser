@@ -431,6 +431,11 @@ internal fun scriptWrapper(
 ): String {
     // 没有匹配规则 = 永远不该运行。生成一段空脚本而不是 `var inc=;` 这种语法错误。
     if (script.includes.isEmpty()) return "(function(){})();"
+    // 页面里出现的一切"脚本身份"都用 [scriptMarker] 的摘要，不用裸 id：
+    // 桥对象（`window.LingGM`）与下面这些注册表对**整个页面**可见，
+    // 裸 id 一旦写在 window 上，任意网页 JS 读出来就能冒充该脚本调原生能力
+    // （最危险的是带 Cookie 的跨域请求）。
+    val key = scriptMarker(scriptId)
     return buildString {
         append("(function(){try{")
         append("var u=location;")
@@ -453,15 +458,16 @@ internal fun scriptWrapper(
         // 同一文档内只跑一次。document-start 注册可能没挂上（脚本是页面打开之后
         // 才导入的，或注册被系统拒绝），原生侧会在 END 补一次探测式注入；
         // 这个标记让"补注入"与"注册成功"竞争时也不会被执行两遍。
+        // 键是 id 的摘要，页面即便枚举也拿不到可用的脚本身份。
         append("window.__lingGMInjected=window.__lingGMInjected||{};")
-        append("if(window.__lingGMInjected[").append(jsString(scriptId)).append("])return;")
-        append("window.__lingGMInjected[").append(jsString(scriptId)).append("]=1;")
+        append("if(window.__lingGMInjected[").append(jsString(key)).append("])return;")
+        append("window.__lingGMInjected[").append(jsString(key)).append("]=1;")
         append("var V=").append(valuesJson.takeIf { it.isNotBlank() } ?: "{}").append(";")
         append("var RES=").append(resourcesJson.takeIf { it.isNotBlank() } ?: "{}").append(";")
         // 资源名称 → 声明时的地址：`GM_info.script.resources[].url` 要的是这个，
         // 内容里的 base64 给不了。
         append("var RESU=").append(resourceUrlsJson(script)).append(";")
-        append(gmPrelude(script, scriptId))
+        append(gmPrelude(script, key))
         append("\n")
         // 依赖必须在脚本正文之前：Greasyfork 上大量脚本直接使用 jQuery/$。
         // 与正文同处一个 IIFE，依赖里声明的顶层 var 才能被脚本看到。
@@ -500,8 +506,11 @@ private fun resourceUrlsJson(script: UserScript): String =
  * `GM_info` 只填脚本自身元数据与脚本管理器名：Tampermonkey 的 `GM_info` 还有
  * 运行环境字段，但脚本实际只读 `script.name/version` 这几项，多填反而更容易
  * 让脚本走 Tampermonkey 专属分支。
+ *
+ * @param scriptKey 页面里用来说"我是谁"的键，是脚本 id 的摘要（见 [scriptMarker]）。
+ *   原生侧收到消息后按同样的摘要反查脚本，裸 id 不出现在页面里。
  */
-private fun gmPrelude(script: UserScript, scriptId: String): String {
+private fun gmPrelude(script: UserScript, scriptKey: String): String {
     fun granted(name: String): Boolean {
         if (script.grants.contains(name) || script.grants.contains("GM.*") ||
             script.grants.contains("*")
@@ -518,9 +527,9 @@ private fun gmPrelude(script: UserScript, scriptId: String): String {
         granted("GM_deleteValue") || granted("GM_listValues")
 
     return buildString {
-        append("var SID=").append(jsString(scriptId)).append(";")
+        append("var SID=").append(jsString(scriptKey)).append(";")
         append("function post(m){try{m.s=SID;if(window.LingGM)window.LingGM.postMessage(JSON.stringify(m))}catch(e){}}")
-        // 原生 → 页面的回调分发：按脚本 id 分表，避免多个脚本的请求 id 互相撞车。
+        // 原生 → 页面的回调分发：按脚本键分表，避免多个脚本的请求 id 互相撞车。
         // 定义在 window 上并做幂等判断：同一页可能注入多个脚本，只需一份分发器。
         append("var CB={};window.__lingGMCB=window.__lingGMCB||{};window.__lingGMCB[SID]=CB;")
         append("window.__lingGMDispatch=window.__lingGMDispatch||function(s,i,e,p){")
@@ -790,6 +799,40 @@ internal fun jsString(value: String): String = buildString {
     }
     append('"')
 }
+
+/**
+ * 脚本 id → 页面可见的"脚本身份"键（SHA-256 摘要）。
+ *
+ * ## 为什么不直接放 id
+ *
+ * `window.LingGM` 桥对象和 GM 垫片往 window 上挂的那几张注册表
+ * （`__lingGMInjected` / `__lingGMCB` / `__lingGMValueMap` …）对**整个页面**可见。
+ * 页面 JS 只要 `Object.keys(...)` 读到脚本 id，就能拿它冒充脚本向原生侧发消息
+ * —— 最危险的是 `GM_xmlhttpRequest`：原生会带上用户在该站点的真实 Cookie 发起
+ * 跨域请求，响应再回传页面，等同于浏览器层面的 CSRF + 凭据窃取。
+ *
+ * 换成不可逆摘要后，页面能读到的只是一串哈希：既无法据此还原/枚举脚本 id，
+ * 也拿不到一个"看起来像 id"的东西去试探。原生侧收到消息后按同样的摘要反查
+ * 启用中的脚本（见 `BrowserViewModel.handleUserScriptMessage`），再用真实 id
+ * 走后续逻辑，因此存储、菜单、通知等路径都不受影响。
+ *
+ * ⚠️ 摘要只能挡住"从 window 上白拿身份"，挡不住页面在 END 注入前劫持
+ * `postMessage` 抓包；真正的越权边界是原生侧的 `@match` 复核 —— 页面最多只能
+ * 借用"本来就该在这个站点运行"的脚本身份。
+ */
+internal fun scriptMarker(scriptId: String): String {
+    val digest = java.security.MessageDigest.getInstance("SHA-256")
+        .digest(scriptId.toByteArray(Charsets.UTF_8))
+    return buildString(digest.size * 2) {
+        for (b in digest) {
+            val v = b.toInt() and 0xFF
+            append(HEX_DIGITS[v ushr 4])
+            append(HEX_DIGITS[v and 0x0F])
+        }
+    }
+}
+
+private const val HEX_DIGITS = "0123456789abcdef"
 
 /**
  * 判断 `GM_xmlhttpRequest` 的目标主机是否在脚本声明的 `@connect` 白名单里。

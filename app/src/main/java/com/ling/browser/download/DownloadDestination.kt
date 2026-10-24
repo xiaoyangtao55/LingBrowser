@@ -52,9 +52,12 @@ object DownloadDestination {
         if (existingPath != null && existingPath.startsWith(CONTENT_SCHEME)) {
             return MediaStoreTarget(context, Uri.parse(existingPath))
         }
+        // 所有落点都用同一个净化后的名字：`File(dir, name)` 一旦让 `../` 进来，
+        // 就是任意路径写入（删旧文件时更糟，是任意路径删除）。
+        val name = sanitizeFileName(fileName)
         return when (location) {
-            DownloadLocation.APP_PRIVATE -> resolvePrivate(context, fileName)
-            DownloadLocation.PUBLIC_DOWNLOADS -> resolvePublic(context, fileName)
+            DownloadLocation.APP_PRIVATE -> resolvePrivate(context, name)
+            DownloadLocation.PUBLIC_DOWNLOADS -> resolvePublic(context, name)
         }
     }
 
@@ -67,10 +70,11 @@ object DownloadDestination {
      * 试满 [MAX_UNIQUE_TRIES] 次仍有冲突时退到时间戳后缀，保证一定返回可用名。
      */
     fun uniqueName(context: Context, fileName: String, location: DownloadLocation): String {
-        if (!exists(context, fileName, location)) return fileName
-        val dot = fileName.lastIndexOf('.')
-        val base = if (dot > 0) fileName.substring(0, dot) else fileName
-        val ext = if (dot > 0) fileName.substring(dot) else ""
+        val safe = sanitizeFileName(fileName)
+        if (!exists(context, safe, location)) return safe
+        val dot = safe.lastIndexOf('.')
+        val base = if (dot > 0) safe.substring(0, dot) else safe
+        val ext = if (dot > 0) safe.substring(dot) else ""
         for (i in 1..MAX_UNIQUE_TRIES) {
             val candidate = "$base ($i)$ext"
             if (!exists(context, candidate, location)) return candidate
@@ -83,14 +87,17 @@ object DownloadDestination {
      *
      * 必须删掉而不是直接用：解析目标时会把已有字节数当成续传起点，
      * 不删就会把新内容追加到旧文件尾部，拼出一个坏文件。
+     *
+     * ⚠️ 名字必须先净化：这里的 `delete()` 会把"越界写"升级成"越界删"。
      */
     fun deleteExisting(context: Context, fileName: String, location: DownloadLocation) {
+        val safe = sanitizeFileName(fileName)
         when (location) {
             DownloadLocation.APP_PRIVATE ->
-                runCatching { File(privateDir(context), fileName).delete() }
+                runCatching { File(privateDir(context), safe).delete() }
             DownloadLocation.PUBLIC_DOWNLOADS ->
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    mediaStoreId(context, fileName)?.let { id ->
+                    mediaStoreId(context, safe)?.let { id ->
                         runCatching {
                             context.contentResolver.delete(
                                 Uri.withAppendedPath(mediaStoreCollection(), id.toString()),
@@ -100,7 +107,7 @@ object DownloadDestination {
                         }
                     }
                 } else {
-                    runCatching { File(publicDir(), fileName).delete() }
+                    runCatching { File(publicDir(), safe).delete() }
                 }
         }
     }
@@ -108,16 +115,39 @@ object DownloadDestination {
     /** 用户通过 SAF 选定的目标（`GM_download` 的 `saveAs`）。 */
     fun resolveUri(context: Context, uri: Uri): Target = UriTarget(context, uri)
 
-    private fun exists(context: Context, fileName: String, location: DownloadLocation): Boolean =
-        when (location) {
-            DownloadLocation.APP_PRIVATE -> File(privateDir(context), fileName).exists()
+    /**
+     * 把外部来源的文件名收敛成**单一文件名**。
+     *
+     * 文件名可能来自用户脚本（`GM_download` 的 `n`）、服务器
+     * （`Content-Disposition`）或数据库里存下来的旧记录，都不可信：
+     *
+     *  - `../../files/x` → 只保留最后一段，杜绝路径穿越；
+     *  - `..` / `.` → 那是父目录/当前目录本身，退回默认名；
+     *  - NUL 等控制字符 → 部分文件系统会在 NUL 处截断，必须剔掉；
+     *  - 超长名字 → 截断，避免 `File(dir, name)` 在极端长度下失败。
+     *
+     * 净化放在 [resolve] / [uniqueName] / [deleteExisting] / [exists] 的**入口**，
+     * 而不是只在注入侧做一次：删旧文件这条路径同样吃这个名字。
+     */
+    internal fun sanitizeFileName(name: String): String {
+        val base = name.replace('\\', '/').substringAfterLast('/')
+        val cleaned = base.filter { it >= ' ' && it != '\u007f' }.trim()
+        if (cleaned.isEmpty() || cleaned == "." || cleaned == "..") return DEFAULT_FILE_NAME
+        return cleaned.take(MAX_FILE_NAME_LENGTH)
+    }
+
+    private fun exists(context: Context, fileName: String, location: DownloadLocation): Boolean {
+        val safe = sanitizeFileName(fileName)
+        return when (location) {
+            DownloadLocation.APP_PRIVATE -> File(privateDir(context), safe).exists()
             DownloadLocation.PUBLIC_DOWNLOADS ->
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    mediaStoreId(context, fileName) != null
+                    mediaStoreId(context, safe) != null
                 } else {
-                    File(publicDir(), fileName).exists()
+                    File(publicDir(), safe).exists()
                 }
         }
+    }
 
     private fun privateDir(context: Context): File =
         context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
@@ -337,3 +367,9 @@ private const val CONTENT_SCHEME = "content://"
 
 /** `uniquify` 时最多尝试的序号，超过就退到时间戳，避免病态情况下死循环。 */
 private const val MAX_UNIQUE_TRIES = 100
+
+/** 文件名净化后为空（或只剩 `.` / `..`）时的兜底名。 */
+private const val DEFAULT_FILE_NAME = "download"
+
+/** 单个文件名的长度上限。多数文件系统单段上限 255 字节，这里给 UTF-8 多字节留余量。 */
+private const val MAX_FILE_NAME_LENGTH = 120

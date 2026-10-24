@@ -287,8 +287,11 @@ class UserScriptTest {
         // 守卫必须放在标记之前，否则会把内部页误标成"已注入"。
         assertTrue(js.contains("u.hostname==='home.ling.invalid'||u.hostname==='reader.ling.invalid'"))
         // 同一文档内只跑一次的标记：END 的探测式补注入靠它避免重复执行。
-        assertTrue(js.contains("window.__lingGMInjected[\"u123\"]=1"))
-        assertTrue(js.indexOf("if(!inc)return;") < js.indexOf("window.__lingGMInjected[\"u123\"]=1"))
+        // 键是脚本 id 的摘要（见 scriptMarker），页面里不出现裸 id。
+        val key = scriptMarker("u123")
+        assertTrue(js.contains("window.__lingGMInjected[\"$key\"]=1"))
+        assertTrue(js.indexOf("if(!inc)return;") < js.indexOf("window.__lingGMInjected[\"$key\"]=1"))
+        assertFalse(js.contains("\"u123\""))
         // 元数据头只作为 `GM_info.script.metaStr` 的数据带进页面（供 GM_config
         // 之类解析自定义字段的库使用），不会被当成脚本正文执行。
         assertTrue(js.contains("metaStr:\"// ==UserScript=="))
@@ -502,6 +505,15 @@ class UserScriptTest {
         val js = scriptWrapper(script, "u1", "{}")
         // 无条件提供：不写 @grant 的脚本也在用 window.close。
         assertTrue(js.contains("window.close=function(){post({t:'winClose'})};"))
+    }
+
+    @Test
+    fun `页面里的脚本身份是摘要而不是裸 id`() {
+        // 同一个 id 永远映射到同一个键（注入侧与原生侧各算一次，必须一致）。
+        assertEquals(scriptMarker("u123"), scriptMarker("u123"))
+        assertFalse(scriptMarker("u123") == scriptMarker("u124"))
+        // SHA-256 的十六进制形态。
+        assertEquals(64, scriptMarker("u123").length)
     }
 
     @Test
