@@ -4,18 +4,22 @@ import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
+import androidx.activity.BackEventCompat
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.BackHandler
+import androidx.activity.compose.PredictiveBackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
+import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
@@ -23,17 +27,38 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import androidx.core.view.WindowCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.math.pow
 import com.ling.browser.data.db.DownloadEntry
 import com.ling.browser.data.prefs.NightMode
 import com.ling.browser.ui.BrowserViewModel
@@ -211,42 +236,229 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun LingApp(viewModel: BrowserViewModel) {
     val context = LocalContext.current
-    // 返回栈：栈底始终是 Browser，只有二级页面才会入栈
+    // 返回栈：栈底始终是 Browser，只有二级页面才会入栈。
     val backStack = remember { mutableStateListOf<Route>(Route.Browser) }
-    // 当前栈顶路由。作为下面过渡状态机的触发键：它一变就重算谁当静态底、
-    // 谁做水平位移。
     val stackRoute = backStack.last()
 
-    // 出入栈方向，供过渡动画判断滑动朝向：
-    // 前进（push）新页面自右滑入，返回（pop）当前页面整体向右滑出。
-    // 不能只凭目标路由推断 —— 同一个路由既可能前进也可能返回
-    // （设置 → 广告拦截规则 → 返回设置），只有 push/pop 知道真实方向。
-    var navForward by remember { mutableStateOf(true) }
+    // 一次正在进行的过渡。null = 没有过渡，此时只渲染栈顶。
+    // 有过渡时由它决定铺哪两层；**栈在动画开始前就已经改好**，
+    // 所以 hasOverlay / canHandleBack 立刻反映真实层级，不必等动画收尾。
+    var transition by remember { mutableStateOf<PageTransition?>(null) }
+    // 单向进度：0 = 上层完全覆盖，1 = 上层完全移出右侧。进出场共用同一个值。
+    val slide = remember { Animatable(0f) }
+    // 滑动层完成布局的次数。新页面真正排过一次版它才会变 —— 动画要等它，
+    // 否则重页面（下载列表之类）会从屏幕中间"冒"出来。
+    var placedToken by remember { mutableIntStateOf(0) }
+    // 是否正在过渡（含手势驱动）。返回手势据此让路。
+    var animating by remember { mutableStateOf(false) }
+    // 是否正被手指驱动。回前台时若仍为真，说明手势被系统打断了。
+    var gestureActive by remember { mutableStateOf(false) }
+    // 退场方向：+1 = 向右退（左边缘右滑，绝大多数机型），-1 = 向左退（右边缘左滑）。
+    // 只在 `graphicsLayer` 里读，改它不会触发重组，只让那一层重绘。
+    var swipeDirection by remember { mutableFloatStateOf(1f) }
+    // 过渡串行化：连点两次「设置」时后一次排队，避免两段动画抢同一份状态。
+    val navMutex = remember { Mutex() }
+    // 每段过渡的序号。反向承接时，旧段的 `finally` 会晚于新段执行；
+    // 只有"自己仍是最新一段"才允许清过渡状态，否则会把接手方铺好的场景抹掉。
+    var navSeq by remember { mutableIntStateOf(0) }
+    val scope = rememberCoroutineScope()
 
-    // 统一的入栈/出栈
-    val push: (Route) -> Unit = {
-        navForward = true
-        backStack.add(it)
+    /** 进出场共用同一份弹簧，避免两条路径的时长/手感不一致。 */
+    val slideSpec = remember {
+        spring<Float>(
+            stiffness = SPRING_STIFFNESS,
+            dampingRatio = Spring.DampingRatioNoBouncy,
+            // 默认 0.01 会让尾帧"啪"地吸到位
+            visibilityThreshold = 0.0005f,
+        )
     }
-    val pop: () -> Unit = {
-        if (backStack.size > 1) {
-            navForward = false
-            backStack.removeAt(backStack.lastIndex)
+
+    /**
+     * 播一段过渡。[commit] 在动画开始前改栈，返回过渡结束后停在栈顶的路由。
+     *
+     * 收尾（清过渡 + 栈已改好）都在**不挂起**的同一段里完成，同帧生效，
+     * 因此不会出现"旧页已卸、新页未上"的空白帧。
+     */
+    fun runTransition(forward: Boolean, commit: () -> Route) {
+        scope.launch {
+            navMutex.withLock {
+                // 上一段可能正被"反向承接"：它的锁已经放了、动画却还在跑。
+                // 必须等它彻底停下再改场景，否则两段会抢同一个 slide。
+                snapshotFlow { animating }.first { !it }
+                val seq = ++navSeq
+                val from = backStack.last()
+                val to = commit()
+                // 点击返回/进入固定向右，先复位方向，避免上一次右边缘手势的 -1 残留
+                swipeDirection = 1f
+                transition = PageTransition(
+                    under = (if (forward) from else to).takeIf { it != Route.Browser },
+                    over = if (forward) to else from,
+                    forward = forward,
+                )
+                animating = true
+                try {
+                    slide.snapTo(if (forward) 1f else 0f)
+                    // ★ 等首帧真实布局完成再起动画
+                    val placed = placedToken
+                    withTimeoutOrNull(WAIT_PLACED_MILLIS) {
+                        snapshotFlow { placedToken }.first { it != placed }
+                    }
+                    // 等布局期间可能已经被"反向承接"（返回键/网页打开）。
+                    // 此时驱动权归对方，本段不能再抢，否则会把折返动画打断成瞬移。
+                    if (navSeq != seq) return@withLock
+                    slide.animateTo(
+                        targetValue = if (forward) 0f else 1f,
+                        animationSpec = slideSpec,
+                    )
+                } catch (_: CancellationException) {
+                    // 驱动权被反向承接那段抢走（Animatable 的互斥量会取消前一段）。
+                    // 场景与目标都由它负责，这里不清任何状态；只有本协程自己被
+                    // 销毁时 ensureActive 才会照常抛出。
+                    currentCoroutineContext().ensureActive()
+                } finally {
+                    if (navSeq == seq) {
+                        transition = null
+                        animating = false
+                    }
+                }
+            }
         }
     }
 
-    // 返回键的归属，由下面两处**显式**划分，不依赖 BackHandler 的注册顺序：
+    /**
+     * 反向承接：正在播「进入」时按返回，不重铺场景，让同一张卡片原路倒回去。
+     *
+     * 能这么做的原因：进入与返回的**场景完全相同**
+     * （进入是 over = to / under = from，返回是 over = from / under = to），
+     * 所以这里既不换层也不 snapTo —— 从当前进度接着往回弹，观感是"滑到一半折返"。
+     * 新的 `animateTo` 会通过 Animatable 的互斥量接管驱动权，旧段自动被取消。
+     */
+    fun reverseExit() {
+        // 抢在取消生效之前作废旧段的收尾权，否则旧段的 finally 会清掉这里铺的场景
+        val seq = ++navSeq
+        scope.launch {
+            try {
+                slide.animateTo(targetValue = 1f, animationSpec = slideSpec)
+            } finally {
+                if (navSeq == seq) {
+                    transition = null
+                    animating = false
+                }
+            }
+        }
+    }
+
+    val push: (Route) -> Unit = { route ->
+        runTransition(forward = true) {
+            backStack.add(route)
+            route
+        }
+    }
+    val pop: () -> Unit = {
+        if (backStack.size > 1) {
+            val scene = transition
+            // 反向承接：这段是「进入」、还在跑，且栈顶正是那张卡片 → 直接倒放。
+            // 否则（连续返回、手势退场中、三层以上栈）照旧排队，交给 runTransition。
+            if (animating && scene != null && scene.forward && backStack.last() == scene.over) {
+                backStack.removeAt(backStack.lastIndex)
+                reverseExit()
+            } else {
+                runTransition(forward = false) {
+                    backStack.removeAt(backStack.lastIndex)
+                    backStack.last()
+                }
+            }
+        }
+    }
+
+    // 返回键的归属，仍由两处**显式**划分，不依赖处理器注册顺序：
     //
-    //   - 有二级页面时：本处理器 enabled=true，接管返回，弹出栈顶；
+    //   - 栈里有二级页面时：这里 enabled，接管返回（并带系统预测性返回预览）；
     //     同时传给 BrowserScreen 的 canHandleBack=false，浏览页不参与竞争。
-    //   - 只有浏览页时：本处理器 enabled=false 自动让位，返回交给浏览页
+    //   - 只有浏览页时：enabled=false 自动让位，返回交给浏览页
     //     （网页历史 → 退出确认）。
     //
     // 为什么不靠"后注册的优先"：那个顺序取决于组合树结构，一旦结构调整
     // （例如把 BrowserScreen 提到 when 之外）就会静默失效 ——
     // 而这正是"设置页按返回却直接退出应用"的成因。
     val hasOverlay = backStack.size > 1
-    BackHandler(enabled = hasOverlay) { pop() }
+    PredictiveBackHandler(enabled = hasOverlay) { progress ->
+        // 守卫 1：上一次过渡还没收尾 → 把整个手势吃掉，不碰正在动的场景。
+        if (animating) {
+            progress.collect()
+            return@PredictiveBackHandler
+        }
+        val top = backStack.last()
+        val under = backStack.getOrNull(backStack.lastIndex - 1)
+        val seq = ++navSeq
+        transition = PageTransition(
+            under = under?.takeIf { it != Route.Browser },
+            over = top,
+            forward = false,
+        )
+        animating = true
+        gestureActive = true
+        slide.snapTo(0f)
+        var committed = false
+        // 收尾统一走 `animateTo(1f)`，不再区分"有没有收到进度事件"。
+        //
+        // ① 预测性返回：手势通常停在 0.9 左右，这里只是把最后一点补完
+        //    （参考实现里 `onDisappear` 的 animateTo(0) 就是干这个），不会跳帧；
+        // ② 非预测性返回：`PredictiveBackHandler` 只会把 channel 关闭、**一个进度事件
+        //    都不发**（三键导航、ROM 把侧滑合成为返回键、系统没开预览）。此时这里就是
+        //    整段退场动画 —— 早先无条件 `snapTo(1f)` 会让卡片瞬间跳到屏幕外，
+        //    表现正是"返回没有动画"。
+        var firstEvent = true
+        try {
+            // 跟手：手势进度直接 snapTo 到同一个 Animatable，不用 animateTo ——
+            // 后者会和手指抢驱动权，拖到一半松手就跳变。
+            progress.collect { event ->
+                if (firstEvent) {
+                    firstEvent = false
+                    // 从右边缘往左滑时页面应该往左退，方向反了会像"被弹回去"
+                    swipeDirection =
+                        if (event.swipeEdge == BackEventCompat.EDGE_RIGHT) -1f else 1f
+                }
+                slide.snapTo(event.progress.coerceIn(0f, 1f))
+            }
+            committed = true
+            slide.animateTo(targetValue = 1f, animationSpec = slideSpec)
+        } catch (_: CancellationException) {
+            // 守卫 2：手势被取消（第二根手指、切后台…）→ 推回原状，不能停在半屏。
+            // 此刻协程已是取消状态，归位动画必须用 NonCancellable 才跑得完。
+            withContext(NonCancellable) {
+                slide.animateTo(targetValue = 0f, animationSpec = slideSpec)
+            }
+        } finally {
+            if (navSeq == seq) {
+                transition = null
+                animating = false
+            }
+            gestureActive = false
+            if (committed && backStack.size > 1) backStack.removeAt(backStack.lastIndex)
+            // 复位成默认方向：下一段过渡（push / 点击返回）必须向右
+            swipeDirection = 1f
+        }
+    }
+
+    // 守卫 3：手势进行中切后台，系统会停发动画帧，页面可能永久停在半屏。
+    // 回到前台若"手指驱动"标记还在，说明手势已被打断，直接归位。
+    val lifecycleOwner = context as? LifecycleOwner
+    DisposableEffect(lifecycleOwner) {
+        if (lifecycleOwner == null) return@DisposableEffect onDispose { }
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME && gestureActive) {
+                scope.launch {
+                    slide.snapTo(0f)
+                    transition = null
+                    gestureActive = false
+                    animating = false
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     // 存储权限申请器（仅 Android 9 及以下选公共目录时用到）。
     // 结果回传给 ViewModel，由它决定继续下载还是提示用户。
@@ -296,51 +508,34 @@ private fun LingApp(viewModel: BrowserViewModel) {
     // 屏幕上却还是二级页面 —— 看起来依旧像"点了没反应"。
     val showBrowser by viewModel.showBrowser.collectAsStateWithLifecycle()
     LaunchedEffect(showBrowser) {
-        if (showBrowser > 0) {
-            // 回到浏览页属于"返回"：让上层页面按返回动画向右滑出。
-            navForward = false
-            backStack.clear()
-            backStack.add(Route.Browser)
+        if (showBrowser > 0 && backStack.size > 1) {
+            // 回到浏览页属于"返回"：上层页面按返回动画整体向右滑出。
+            runTransition(forward = false) {
+                backStack.clear()
+                backStack.add(Route.Browser)
+                Route.Browser
+            }
         }
     }
 
-    // ── 二级页面过渡：显式双层栈 ──────────────────────────────────────────
+    // ── 二级页面过渡：显式双层 ────────────────────────────────────────────
     // 不用 AnimatedContent：它何时回收"退场"的旧内容不受我们控制，实测盖压
     // 动画进行到一半旧页就被卸载，左侧露出下层（曾出现"设置列表整块消失"）。
-    // 改成自己管两层，行为完全可预期：
+    // 改成自己管两层，行为完全可预期：过渡期间两层**同时在组合里**，
+    // 旧页必然自始至终在场，不依赖任何库内部的回收时机。
     //
-    //   baseRoute  —— 静态底。整段过渡原地不动、保持不透明。
-    //   slideRoute —— 上层。带水平位移：push 从右滑入（1→0），pop 向右滑出（0→1）。
-    //
-    // 过渡时长内两层**同时在组合里**，旧页因此必然自始至终在场，不依赖任何
-    // 库内部的回收时机；动画结束时只留 baseRoute（即当前栈顶）。
-    var baseRoute by remember { mutableStateOf<Route?>(null) }
-    var slideRoute by remember { mutableStateOf<Route?>(null) }
-    val slide = remember { Animatable(0f) }
-    // 上一次的栈顶，用来判断 push/pop 时谁当静态底、谁做位移。
-    var lastRoute by remember { mutableStateOf<Route?>(null) }
-
-    LaunchedEffect(stackRoute) {
-        val previous = lastRoute
-        lastRoute = stackRoute
-        if (previous == null || previous == stackRoute) return@LaunchedEffect
-
-        if (navForward) {
-            // 前进：旧栈顶沉作静态底，新页自右侧滑入盖压上来。
-            baseRoute = if (previous == Route.Browser) null else previous
-            slideRoute = stackRoute
-            slide.snapTo(1f)
-            slide.animateTo(0f, animationSpec = tween(300))
-            // 新页已盖满全屏，这时才把旧页卸掉、新页转为静态底。
-            slideRoute = null
-            baseRoute = if (stackRoute == Route.Browser) null else stackRoute
-        } else {
-            // 返回：新栈顶（下层页）作静态底，旧栈顶整体向右滑出。
-            baseRoute = if (stackRoute == Route.Browser) null else stackRoute
-            slideRoute = previous
-            slide.snapTo(0f)
-            slide.animateTo(1f, animationSpec = tween(300))
-            slideRoute = null
+    // 下层整组（浏览页 + 静态底）吃同一份变换：两者都是全屏、同中心，
+    // 分别施加相同缩放与位移，视觉上等价于"整组一起退后"。
+    val underModifier = if (transition == null) {
+        Modifier
+    } else {
+        Modifier.graphicsLayer {
+            val enter = 1f - slide.value
+            val scale = UNDER_MIN_SCALE + (1f - UNDER_MIN_SCALE) * slide.value
+            scaleX = scale
+            scaleY = scale
+            // 方向跟随手势边缘：从右边缘往左滑时，下层要往右让
+            translationX = -UNDER_SHIFT * enter * size.width * swipeDirection
         }
     }
 
@@ -351,16 +546,37 @@ private fun LingApp(viewModel: BrowserViewModel) {
     // 注：「标签页」与「更多」两个面板现在由 BrowserScreen 内部的
     // ModalBottomSheet 承载，不再经过这里的路由。
     Box(modifier = Modifier.fillMaxSize()) {
-        // 底层：浏览页常驻。上层叠加时它不再处理返回键。
-        BrowserScreen(
-            viewModel = viewModel,
-            onOpenBookmarks = { push(Route.Bookmarks) },
-            onOpenHistory = { push(Route.History) },
-            onOpenDownloads = { push(Route.Downloads) },
-            onOpenSettings = { push(Route.Settings) },
-            onOpenSniff = { push(Route.SniffedResources) },
-            canHandleBack = !hasOverlay,
+        // 卡片背后的底色：下层缩小时露出的那条边用它，而不是直接露窗口背景
+        // （那会在深浅主题切换时闪一下）。
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.16f)),
         )
+
+        // 底层：浏览页常驻。上层叠加时它不再处理返回键。
+        //
+        // ⚠️ 背景色必须画在 `underModifier` **之后**（即图层内部）：这样它跟着
+        // 卡片一起缩放位移，只在卡片缩小后露出的那条边上才看得见下面的底色。
+        // 若把它放在图层外，它会一直铺满全屏、把底色整个盖掉，过渡就没有层次了。
+        // 同时这块不透明背景也保证地址栏的 60% 半透明底色始终叠在同一层颜色上
+        // —— 否则它会直接叠在 scrim 上，静止时就无端发灰。
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .then(underModifier)
+                .background(MaterialTheme.colorScheme.background),
+        ) {
+            BrowserScreen(
+                viewModel = viewModel,
+                onOpenBookmarks = { push(Route.Bookmarks) },
+                onOpenHistory = { push(Route.History) },
+                onOpenDownloads = { push(Route.Downloads) },
+                onOpenSettings = { push(Route.Settings) },
+                onOpenSniff = { push(Route.SniffedResources) },
+                canHandleBack = !hasOverlay,
+            )
+        }
 
         // 各二级页面的内容渲染。抽成局部 lambda，供下面"静态底"和"滑动上层"
         // 两个插槽复用 —— 过渡期间两页同时在组合里，各占一层，因此都能画出来。
@@ -547,25 +763,50 @@ private fun LingApp(viewModel: BrowserViewModel) {
             }
         }
 
-        // 静态底：整段过渡原地不动、保持不透明。
-        // 只画当前需要的那一页 —— 过渡期间它是"旧页"，无过渡时它就是栈顶页。
-        baseRoute?.let { route ->
+        // 没有过渡时只铺栈顶；过渡期间铺 transition 指定的两层。
+        // 两者都吃 underModifier，因此下层的缩放/位移始终一致。
+        val pageTransition = transition
+        val underRoute = if (pageTransition != null) {
+            pageTransition.under
+        } else {
+            stackRoute.takeIf { it != Route.Browser }
+        }
+        val overRoute = pageTransition?.over
+
+        // 静态底：无过渡时它就是栈顶页；过渡期间它是"下页"。
+        underRoute?.let { route ->
             key(route) {
-                Box(modifier = Modifier.fillMaxSize().zIndex(1f)) {
+                Box(modifier = Modifier.fillMaxSize().zIndex(1f).then(underModifier)) {
                     renderRoute(route)
                 }
             }
         }
 
-        // 滑动上层：translationX 由 slide 驱动 —— push 时 1→0（自右向左盖压上来），
-        // pop 时 0→1（整体向右滑出）。全程不透明，不做任何交叉淡化。
-        slideRoute?.let { route ->
+        // 滑动上层：卡片。translationX / 缩放 / 圆角 / 阴影都从同一个 slide 派生，
+        // 且只在 graphicsLayer 里读 —— 每帧不触发任何重组。
+        overRoute?.let { route ->
             key(route) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
                         .zIndex(2f)
-                        .graphicsLayer { translationX = slide.value * size.width },
+                        // 新页面排过一次版才放行动画（见 runTransition）
+                        .onGloballyPositioned { placedToken++ }
+                        .graphicsLayer {
+                            val enter = 1f - slide.value
+                            translationX = slide.value * size.width * swipeDirection
+                            val scale = CARD_MIN_SCALE + (1f - CARD_MIN_SCALE) * enter
+                            scaleX = scale
+                            scaleY = scale
+                            // 圆角用 8 次曲线（参考实现）：进场时这张卡片一直保持圆角，
+                            // 直到快要贴合才迅速收平；退场时则一开始就重新长出圆角。
+                            // 线性插值会让页面"刚动就变卡片"，显廉价。
+                            shape = RoundedCornerShape(
+                                CARD_RADIUS.toPx() * (1f - enter.pow(8)),
+                            )
+                            clip = true
+                            shadowElevation = CARD_SHADOW.toPx() * slide.value
+                        },
                 ) {
                     renderRoute(route)
                 }
@@ -593,6 +834,43 @@ private sealed interface Route {
     data object UserScripts : Route
     data object SniffedResources : Route
 }
+
+/**
+ * 一次正在进行的二级页面过渡。
+ *
+ * [under] 是压在下面的一层（`null` 表示浏览页 —— 它常驻，不需要额外渲染）；
+ * [over] 是从右侧滑动的卡片。栈在过渡开始时就已经改好，这个对象只描述"画什么"。
+ */
+private data class PageTransition(
+    val under: Route?,
+    val over: Route,
+    /**
+     * true = 上层正滑入（进入）；false = 滑出（返回）。
+     * 反向承接靠它判断：只有"进入"才允许被返回直接倒放。
+     */
+    val forward: Boolean,
+)
+
+/** 过渡弹簧刚度。越大越快：420 大约 0.28s 走完主要行程，300 会明显偏"拖"。 */
+private const val SPRING_STIFFNESS = 420f
+
+/** 等滑动层首帧布局的上限：正常一帧就够，这里只是防止永远等下去。 */
+private const val WAIT_PLACED_MILLIS = 120L
+
+/** 卡片进场起始缩放（0.92 → 1）。 */
+private const val CARD_MIN_SCALE = 0.92f
+
+/** 卡片起始圆角，随进度收拢到 0。 */
+private val CARD_RADIUS = 20.dp
+
+/** 卡片阴影高度，随进度收拢到 0。 */
+private val CARD_SHADOW = 20.dp
+
+/** 下层整组的最小缩放（1 → 0.90）。太浅（0.96）时几乎看不出"退后一层"。 */
+private const val UNDER_MIN_SCALE = 0.90f
+
+/** 下层整组左移比例。与缩放一起构成"退后一层"的观感。 */
+private const val UNDER_SHIFT = 0.06f
 
 /**
  * 用系统「打开方式」打开已下载的文件。

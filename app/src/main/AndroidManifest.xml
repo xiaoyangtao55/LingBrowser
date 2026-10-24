@@ -46,6 +46,7 @@
         android:hardwareAccelerated="true"
         android:theme="@style/Theme.Ling"
         android:usesCleartextTraffic="true"
+        android:enableOnBackInvokedCallback="true"
         tools:targetApi="34">
 
         <activity
