@@ -422,20 +422,37 @@ private fun LingApp(viewModel: BrowserViewModel) {
                 slide.snapTo(event.progress.coerceIn(0f, 1f))
             }
             committed = true
-            slide.animateTo(targetValue = 1f, animationSpec = slideSpec)
-        } catch (_: CancellationException) {
-            // 守卫 2：手势被取消（第二根手指、切后台…）→ 推回原状，不能停在半屏。
-            // 此刻协程已是取消状态，归位动画必须用 NonCancellable 才跑得完。
+            // 一旦提交，返回就已经生效，退场必须走完。
+            // ⚠️ 这里必须 NonCancellable：刚松手时立刻起第二段手势（或系统重发
+            // onBackStarted），Compose 会 cancel 本段协程 —— 若退场动画被中途打断，
+            // 就会落进下面的 catch 把页面**推回原位**，可栈已经弹了，视觉上先是
+            // 「关于」滑回来、再闪成「设置」，看起来像多返回了一次。
             withContext(NonCancellable) {
-                slide.animateTo(targetValue = 0f, animationSpec = slideSpec)
+                slide.animateTo(targetValue = 1f, animationSpec = slideSpec)
+            }
+        } catch (_: CancellationException) {
+            // 守卫 2：只有**还没提交**的取消才是真的取消（第二根手指、切后台…），
+            // 这时推回原状、不弹栈。已提交的取消不归这里管（见上）。
+            if (!committed) {
+                withContext(NonCancellable) {
+                    slide.animateTo(targetValue = 0f, animationSpec = slideSpec)
+                }
             }
         } finally {
-            if (navSeq == seq) {
+            val isOwner = navSeq == seq
+            if (isOwner) {
                 transition = null
                 animating = false
             }
             gestureActive = false
-            if (committed && backStack.size > 1) backStack.removeAt(backStack.lastIndex)
+            // 只弹「本段动画出去的那一页」：
+            //   - 自己已不是最新一段（被反向承接/新过渡接手）→ 弹栈的责任在接手方；
+            //   - 栈顶已经不是 [top]（别处已经弹过）→ 再 removeAt 只会多弹一层。
+            // 早先无条件 `removeAt(lastIndex)` 正是"关于→设置→关于→设置→主页"里
+            // 多退一层、退错页面的来源。
+            if (committed && isOwner && backStack.size > 1 && backStack.last() == top) {
+                backStack.removeAt(backStack.lastIndex)
+            }
             // 复位成默认方向：下一段过渡（push / 点击返回）必须向右
             swipeDirection = 1f
         }
