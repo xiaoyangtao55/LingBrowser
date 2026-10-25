@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.9.0](https://github.com/xiaoyangtao55/LingBrowser/compare/v1.8.0...v1.9.0) (2026-10-25)
+
+
+### Features
+
+* 下载列表按文件类型显示图标并按时间分段 ([94eb71c](https://github.com/xiaoyangtao55/LingBrowser/commit/94eb71c03104ebe9bce46c9cff04121ffcace804))
+* 下载支持 Cookie/UA、完成通知、并发与网络限制 ([d85f03f](https://github.com/xiaoyangtao55/LingBrowser/commit/d85f03f4c93606725bc3462cb1904ffae0017342))
+* 下载支持单文件分块并发与断点续传 ([c2131e7](https://github.com/xiaoyangtao55/LingBrowser/commit/c2131e740f0ff9f59f140d4f4e5da1de9a33c3f8))
+* 下载文件名按 Content-Disposition、URL、MIME 三级解析 ([9a2e949](https://github.com/xiaoyangtao55/LingBrowser/commit/9a2e9497bb81f38ae3772ca8cfbec604b3a45fdd))
+* 二级页面改为卡片层次过渡并支持预测性返回 ([5014518](https://github.com/xiaoyangtao55/LingBrowser/commit/50145182600e1a91b7d2aa910e7610bafe4e09ee))
+* 新增六套主题配色预设，低版本隐藏动态取色开关 ([eb9eb0c](https://github.com/xiaoyangtao55/LingBrowser/commit/eb9eb0cd823168297ce00ab9eb6aa71a574410fd))
+* 设置增强（自定义搜索引擎/UA、历史导入、选择性清除）并修复输入法上方空白 ([a724dc6](https://github.com/xiaoyangtao55/LingBrowser/commit/a724dc65ae620abd5488a8dd5dbf841721d8340e))
+
+
+### Bug Fixes
+
+* 下载列表打开文件不再静默失败 ([6e3d152](https://github.com/xiaoyangtao55/LingBrowser/commit/6e3d15294d8037867c29438fcbb56d6a93c21053))
+* 图标造型与 Material Symbols 官方源对齐 ([36ae00e](https://github.com/xiaoyangtao55/LingBrowser/commit/36ae00e26f244420755dc5c6a7312879d6d1d120))
+* 收口用户脚本身份泄露与下载文件名路径穿越 ([faef6f4](https://github.com/xiaoyangtao55/LingBrowser/commit/faef6f421d1062827cc26fc15b2b7741c486766a))
+* 标题栏与内容区在明暗切换时同帧换色 ([b0fe3d1](https://github.com/xiaoyangtao55/LingBrowser/commit/b0fe3d14d0b2e5ce6bb16053a587b8f3d7a96583))
+* 预测性返回在收尾动画期间被打断时会多退一层 ([3382b35](https://github.com/xiaoyangtao55/LingBrowser/commit/3382b35f6ffb456922314ff8f6a7fdef4c7fdb3e))
+
 ## [1.8.0](https://github.com/xiaoyangtao55/LingBrowser/compare/v1.7.0...v1.8.0) (2026-10-23)
 
 
