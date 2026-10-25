@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.9.1](https://github.com/xiaoyangtao55/LingBrowser/compare/v1.9.0...v1.9.1) (2026-10-25)
+
+
+### Bug Fixes
+
+* 修复低版本系统上的 NewApi lint 错误 ([e92530b](https://github.com/xiaoyangtao55/LingBrowser/commit/e92530bc24844eb9277626759b0882a6bb70e282))
+
 ## [1.9.0](https://github.com/xiaoyangtao55/LingBrowser/compare/v1.8.0...v1.9.0) (2026-10-25)
 
 
