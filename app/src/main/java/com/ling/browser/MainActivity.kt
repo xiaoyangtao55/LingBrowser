@@ -126,6 +126,7 @@ class MainActivity : ComponentActivity() {
             LingTheme(
                 darkTheme = darkTheme,
                 dynamicColor = settings.dynamicColor,
+                accentColor = settings.accentColor,
             ) {
                 // 让状态栏图标颜色跟随主题
                 val view = LocalContext.current
@@ -759,6 +760,7 @@ private fun LingApp(viewModel: BrowserViewModel) {
                     settings = settings,
                     onNightMode = viewModel::setNightMode,
                     onDynamicColor = viewModel::setDynamicColor,
+                    onAccentColor = viewModel::setAccentColor,
                     onReaderFontSize = viewModel::setReaderFontSize,
                     onRestoreSession = viewModel::setRestoreSession,
                     onBack = pop,

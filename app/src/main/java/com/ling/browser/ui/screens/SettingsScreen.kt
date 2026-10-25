@@ -2,9 +2,12 @@ package com.ling.browser.ui.screens
 
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -17,6 +20,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.Checkbox
@@ -41,6 +45,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import com.ling.browser.data.prefs.AccentColor
 import com.ling.browser.data.prefs.DownloadLocation
 import com.ling.browser.data.prefs.DownloadNetwork
 import com.ling.browser.data.prefs.DownloaderType
@@ -51,6 +56,7 @@ import com.ling.browser.data.prefs.ReaderFontSize
 import com.ling.browser.data.prefs.SearchEngine
 import com.ling.browser.ui.components.lingTopBarColors
 import com.ling.browser.ui.theme.LingIcons
+import com.ling.browser.ui.theme.accentSwatchColor
 
 /**
  * 设置首页列出的分组。
@@ -534,6 +540,7 @@ fun AppearanceSettingsScreen(
     settings: LingSettings,
     onNightMode: (NightMode) -> Unit,
     onDynamicColor: (Boolean) -> Unit,
+    onAccentColor: (AccentColor) -> Unit,
     onReaderFontSize: (ReaderFontSize) -> Unit,
     onRestoreSession: (Boolean) -> Unit,
     onBack: () -> Unit,
@@ -541,6 +548,7 @@ fun AppearanceSettingsScreen(
 ) {
     var showNightModeDialog by remember { mutableStateOf(false) }
     var showReaderFontDialog by remember { mutableStateOf(false) }
+    var showAccentDialog by remember { mutableStateOf(false) }
 
     SettingsPageScaffold(
         title = SettingsGroup.APPEARANCE.title,
@@ -555,13 +563,31 @@ fun AppearanceSettingsScreen(
                     onClick = { showNightModeDialog = true },
                 )
             }
+            // Android 12 以下没有动态取色，开关放出来只会让人以为"点了没反应"，
+            // 直接不显示；低版本靠下面的「主题配色」预设换色。
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                item {
+                    SwitchRow(
+                        icon = LingIcons.AutoAwesome,
+                        title = "Material You 动态取色",
+                        subtitle = "从壁纸提取配色",
+                        checked = settings.dynamicColor,
+                        onCheckedChange = onDynamicColor,
+                    )
+                }
+            }
             item {
-                SwitchRow(
-                    icon = LingIcons.AutoAwesome,
-                    title = "Material You 动态取色",
-                    subtitle = "Android 12+ 从壁纸提取配色",
-                    checked = settings.dynamicColor,
-                    onCheckedChange = onDynamicColor,
+                SettingRow(
+                    icon = LingIcons.Palette,
+                    title = "主题配色",
+                    subtitle = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                        settings.dynamicColor
+                    ) {
+                        "动态取色生效中；选择预设会自动关闭它"
+                    } else {
+                        "当前：${settings.accentColor.label}"
+                    },
+                    onClick = { showAccentDialog = true },
                 )
             }
             item {
@@ -665,6 +691,60 @@ fun AppearanceSettingsScreen(
             },
             confirmButton = {
                 TextButton(onClick = { showReaderFontDialog = false }) { Text("完成") }
+            },
+        )
+    }
+
+    // ---- 主题配色预设 ----
+    if (showAccentDialog) {
+        AlertDialog(
+            onDismissRequest = { showAccentDialog = false },
+            title = { Text("主题配色") },
+            text = {
+                Column {
+                    Text(
+                        text = "Android 12 以下的系统无法从壁纸取色，用这里的预设换一套强调色；" +
+                            "Android 12 及以上选择预设会自动关闭动态取色。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    AccentColor.entries.forEach { accent ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    onAccentColor(accent)
+                                    showAccentDialog = false
+                                }
+                                .padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            // 小色块先给出"这套配色长什么样"，光看名字选不出来
+                            Box(
+                                modifier = Modifier
+                                    .size(22.dp)
+                                    .background(accentSwatchColor(accent), CircleShape),
+                            )
+                            Spacer(Modifier.width(12.dp))
+                            Text(
+                                text = accent.label,
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.weight(1f),
+                            )
+                            RadioButton(
+                                selected = settings.accentColor == accent,
+                                onClick = {
+                                    onAccentColor(accent)
+                                    showAccentDialog = false
+                                },
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showAccentDialog = false }) { Text("关闭") }
             },
         )
     }

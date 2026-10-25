@@ -2,6 +2,7 @@ package com.ling.browser.ui.theme
 
 import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.dynamicDarkColorScheme
@@ -10,12 +11,18 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import com.ling.browser.data.prefs.AccentColor
 
 /**
  * Material You 3 配色方案。
  *
  * 动态取色（Dynamic Color）是 Material You 的核心：Android 12(API 31) 及以上
- * 直接从系统壁纸推导整套色板。低版本回退到手工调校的「翎」品牌绿。
+ * 直接从系统壁纸推导整套色板。低版本没有这个能力，只能退回固定配色 ——
+ * 为了避免"低版本永远是同一片绿"，提供了一组预设色（见 [AccentColor]）。
+ *
+ * 预设只改「强调色系」（primary / secondary / tertiary 及其容器），
+ * 中性色（background / surface / outline）沿用调校好的绿色方案：
+ * 既保证六套配色观感统一，也避免手写六份完整色板带来的对比度错误。
  */
 private val LingGreen = Color(0xFF1B6C4B)
 private val LingGreenLight = Color(0xFF7EDBAE)
@@ -61,14 +68,195 @@ internal val FallbackDark = darkColorScheme(
     outline = Color(0xFF8A938C),
 )
 
+/** 在绿色中性色之上换一套强调色。 */
+private fun scheme(
+    dark: Boolean,
+    primary: Color,
+    onPrimary: Color,
+    primaryContainer: Color,
+    onPrimaryContainer: Color,
+    secondary: Color,
+    secondaryContainer: Color,
+    onSecondaryContainer: Color,
+    tertiary: Color,
+    tertiaryContainer: Color,
+    onTertiaryContainer: Color,
+): ColorScheme = (if (dark) FallbackDark else FallbackLight).copy(
+    primary = primary,
+    onPrimary = onPrimary,
+    primaryContainer = primaryContainer,
+    onPrimaryContainer = onPrimaryContainer,
+    secondary = secondary,
+    secondaryContainer = secondaryContainer,
+    onSecondaryContainer = onSecondaryContainer,
+    tertiary = tertiary,
+    tertiaryContainer = tertiaryContainer,
+    onTertiaryContainer = onTertiaryContainer,
+)
+
+private val BlueLight = scheme(
+    dark = false,
+    primary = Color(0xFF0B57D0),
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFFD3E3FD),
+    onPrimaryContainer = Color(0xFF041E49),
+    secondary = Color(0xFF545F71),
+    secondaryContainer = Color(0xFFD8E2F1),
+    onSecondaryContainer = Color(0xFF111C2B),
+    tertiary = Color(0xFF00639B),
+    tertiaryContainer = Color(0xFFC2E7FF),
+    onTertiaryContainer = Color(0xFF001D33),
+)
+
+private val BlueDark = scheme(
+    dark = true,
+    primary = Color(0xFFA8C7FA),
+    onPrimary = Color(0xFF062E6F),
+    primaryContainer = Color(0xFF0842A0),
+    onPrimaryContainer = Color(0xFFD3E3FD),
+    secondary = Color(0xFFBCC7DC),
+    secondaryContainer = Color(0xFF3C4758),
+    onSecondaryContainer = Color(0xFFD8E2F1),
+    tertiary = Color(0xFF7FCFFF),
+    tertiaryContainer = Color(0xFF004A77),
+    onTertiaryContainer = Color(0xFFC2E7FF),
+)
+
+private val PurpleLight = scheme(
+    dark = false,
+    primary = Color(0xFF6750A4),
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFFEADDFF),
+    onPrimaryContainer = Color(0xFF21005D),
+    secondary = Color(0xFF625B71),
+    secondaryContainer = Color(0xFFE8DEF8),
+    onSecondaryContainer = Color(0xFF1D192B),
+    tertiary = Color(0xFF7D5260),
+    tertiaryContainer = Color(0xFFFFD8E4),
+    onTertiaryContainer = Color(0xFF31111D),
+)
+
+private val PurpleDark = scheme(
+    dark = true,
+    primary = Color(0xFFD0BCFF),
+    onPrimary = Color(0xFF381E72),
+    primaryContainer = Color(0xFF4F378B),
+    onPrimaryContainer = Color(0xFFEADDFF),
+    secondary = Color(0xFFCCC2DC),
+    secondaryContainer = Color(0xFF49454F),
+    onSecondaryContainer = Color(0xFFE8DEF8),
+    tertiary = Color(0xFFEFB8C8),
+    tertiaryContainer = Color(0xFF633B48),
+    onTertiaryContainer = Color(0xFFFFD8E4),
+)
+
+private val RoseLight = scheme(
+    dark = false,
+    primary = Color(0xFFB32446),
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFFFFD9DE),
+    onPrimaryContainer = Color(0xFF40000D),
+    secondary = Color(0xFF77565B),
+    secondaryContainer = Color(0xFFF2DDE0),
+    onSecondaryContainer = Color(0xFF2B1518),
+    tertiary = Color(0xFF7C5635),
+    tertiaryContainer = Color(0xFFFFDCC1),
+    onTertiaryContainer = Color(0xFF2D1600),
+)
+
+private val RoseDark = scheme(
+    dark = true,
+    primary = Color(0xFFFFB1C0),
+    onPrimary = Color(0xFF66002C),
+    primaryContainer = Color(0xFF8F0F3C),
+    onPrimaryContainer = Color(0xFFFFD9DE),
+    secondary = Color(0xFFE3BDC3),
+    secondaryContainer = Color(0xFF5B3F44),
+    onSecondaryContainer = Color(0xFFFFD9DE),
+    tertiary = Color(0xFFEFBD94),
+    tertiaryContainer = Color(0xFF5C3F22),
+    onTertiaryContainer = Color(0xFFFFDCC1),
+)
+
+private val OrangeLight = scheme(
+    dark = false,
+    primary = Color(0xFF9A4600),
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFFFFDCC2),
+    onPrimaryContainer = Color(0xFF301400),
+    secondary = Color(0xFF75584A),
+    secondaryContainer = Color(0xFFF5DED2),
+    onSecondaryContainer = Color(0xFF2C160C),
+    tertiary = Color(0xFF5B6236),
+    tertiaryContainer = Color(0xFFDFE6B6),
+    onTertiaryContainer = Color(0xFF1A1D00),
+)
+
+private val OrangeDark = scheme(
+    dark = true,
+    primary = Color(0xFFFFB77C),
+    onPrimary = Color(0xFF542100),
+    primaryContainer = Color(0xFF783200),
+    onPrimaryContainer = Color(0xFFFFDCC2),
+    secondary = Color(0xFFE3BFAC),
+    secondaryContainer = Color(0xFF5B4134),
+    onSecondaryContainer = Color(0xFFFFDCC2),
+    tertiary = Color(0xFFC3CA9A),
+    tertiaryContainer = Color(0xFF434A1E),
+    onTertiaryContainer = Color(0xFFDFE6B6),
+)
+
+private val TealLight = scheme(
+    dark = false,
+    primary = Color(0xFF006A60),
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFF9EF2E6),
+    onPrimaryContainer = Color(0xFF00201C),
+    secondary = Color(0xFF4A635F),
+    secondaryContainer = Color(0xFFCCE8E2),
+    onSecondaryContainer = Color(0xFF051F1C),
+    tertiary = Color(0xFF416179),
+    tertiaryContainer = Color(0xFFC4E7FF),
+    onTertiaryContainer = Color(0xFF001E2E),
+)
+
+private val TealDark = scheme(
+    dark = true,
+    primary = Color(0xFF82D5C9),
+    onPrimary = Color(0xFF003731),
+    primaryContainer = Color(0xFF005048),
+    onPrimaryContainer = Color(0xFF9EF2E6),
+    secondary = Color(0xFFB1CCC6),
+    secondaryContainer = Color(0xFF324B47),
+    onSecondaryContainer = Color(0xFFCCE8E2),
+    tertiary = Color(0xFFA9CBE7),
+    tertiaryContainer = Color(0xFF284A60),
+    onTertiaryContainer = Color(0xFFC4E7FF),
+)
+
+/** 取某个预设的完整配色；动态取色不可用时走这里。 */
+private fun schemeFor(accent: AccentColor, dark: Boolean): ColorScheme = when (accent) {
+    AccentColor.GREEN -> if (dark) FallbackDark else FallbackLight
+    AccentColor.BLUE -> if (dark) BlueDark else BlueLight
+    AccentColor.PURPLE -> if (dark) PurpleDark else PurpleLight
+    AccentColor.ROSE -> if (dark) RoseDark else RoseLight
+    AccentColor.ORANGE -> if (dark) OrangeDark else OrangeLight
+    AccentColor.TEAL -> if (dark) TealDark else TealLight
+}
+
+/** 设置页色块用的代表色。固定取浅色方案的主色：深浅背景下都能看清。 */
+fun accentSwatchColor(accent: AccentColor): Color = schemeFor(accent, dark = false).primary
+
 /**
  * @param darkTheme 是否使用深色配色。由调用方根据「跟随系统 / 强制开 / 强制关」决定。
+ * @param accentColor 动态取色不可用或关闭时使用的预设配色。
  */
 @Composable
 fun LingTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
     /** 是否启用 Material You 动态取色（仅 Android 12+ 生效）。 */
     dynamicColor: Boolean = true,
+    accentColor: AccentColor = AccentColor.GREEN,
     content: @Composable () -> Unit,
 ) {
     val context = LocalContext.current
@@ -76,8 +264,7 @@ fun LingTheme(
         dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
             if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
         }
-        darkTheme -> FallbackDark
-        else -> FallbackLight
+        else -> schemeFor(accentColor, darkTheme)
     }
 
     MaterialTheme(

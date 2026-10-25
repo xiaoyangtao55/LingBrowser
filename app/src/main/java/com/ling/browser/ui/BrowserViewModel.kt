@@ -27,6 +27,15 @@ import com.ling.browser.data.repo.BlockSubscription
 import com.ling.browser.data.repo.ImportResult
 import com.ling.browser.data.repo.MAX_BACKUP_BYTES
 import com.ling.browser.data.repo.ScriptImportResult
+import com.ling.browser.data.prefs.AccentColor
+import com.ling.browser.data.prefs.DownloadLocation
+import com.ling.browser.data.prefs.DownloadNetwork
+import com.ling.browser.data.prefs.DownloaderType
+import com.ling.browser.data.prefs.HomeBackground
+import com.ling.browser.data.prefs.LingSettings
+import com.ling.browser.data.prefs.NightMode
+import com.ling.browser.data.prefs.ReaderFontSize
+import com.ling.browser.data.prefs.SearchEngine
 import com.ling.browser.data.repo.ScriptPreview
 import com.ling.browser.data.repo.UserScriptEntry
 import com.ling.browser.data.repo.ValueWrite
@@ -37,14 +46,6 @@ import com.ling.browser.data.repo.planHistoryImport
 import com.ling.browser.data.repo.planImport
 import com.ling.browser.data.repo.toHistoryHtml
 import com.ling.browser.data.repo.toNetscapeHtml
-import com.ling.browser.data.prefs.DownloadLocation
-import com.ling.browser.data.prefs.DownloadNetwork
-import com.ling.browser.data.prefs.DownloaderType
-import com.ling.browser.data.prefs.HomeBackground
-import com.ling.browser.data.prefs.LingSettings
-import com.ling.browser.data.prefs.NightMode
-import com.ling.browser.data.prefs.ReaderFontSize
-import com.ling.browser.data.prefs.SearchEngine
 import com.ling.browser.download.ConflictAction
 import com.ling.browser.download.DownloadFileName
 import com.ling.browser.util.FaviconFetcher
@@ -2312,6 +2313,20 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
         tabManager.evalInTab(tabId, js)
     }
     fun setDynamicColor(on: Boolean) = io { container.settings.setDynamicColor(on) }
+
+    /**
+     * 选择固定配色预设。
+     *
+     * 在支持动态取色的机型上会**顺手关掉动态取色**：两者是二选一关系
+     * （动态取色始终优先），不关的话用户点完看不到任何变化，会以为功能坏了。
+     * Android 12 以下本来就没有动态取色，只改预设即可。
+     */
+    fun setAccentColor(color: AccentColor) = io {
+        container.settings.setAccentColor(color)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && settings.value.dynamicColor) {
+            container.settings.setDynamicColor(false)
+        }
+    }
 
     /**
      * 切换"恢复上次浏览页面"。

@@ -108,11 +108,12 @@ class LingIconsTest {
         "FileSlide" to LingIcons.FileSlide,
         "FileCode" to LingIcons.FileCode,
         "FileUnknown" to LingIcons.FileUnknown,
+        "Palette" to LingIcons.Palette,
     )
 
     @Test
     fun `图标集完整`() {
-        assertEquals("图标数量发生变化时请同步更新本测试", 43, allIcons.size)
+        assertEquals("图标数量发生变化时请同步更新本测试", 44, allIcons.size)
     }
 
     @Test

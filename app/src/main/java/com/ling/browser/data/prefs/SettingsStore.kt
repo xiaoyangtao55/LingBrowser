@@ -20,6 +20,22 @@ private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(na
 enum class NightMode { FOLLOW_SYSTEM, ALWAYS_ON, ALWAYS_OFF }
 
 /**
+ * 主题配色预设。
+ *
+ * 只在「动态取色不可用 / 已关闭」时生效：Android 12 以下没有 Material You，
+ * 只能给一套固定品牌色；预设就是让这类设备也有得选，而不是永远一片绿。
+ * 具体色值见 `ui/theme/Theme.kt`（数据层只存名字，不掺 UI 颜色）。
+ */
+enum class AccentColor(val label: String) {
+    GREEN("翎绿"),
+    BLUE("晴蓝"),
+    PURPLE("鸢紫"),
+    ROSE("绯红"),
+    ORANGE("暮橙"),
+    TEAL("青碧"),
+}
+
+/**
  * 内置主页的背景模式。
  *
  * 移植自 OnyxBrowser 的起始页背景设计，但做了轻量化取舍：
@@ -185,6 +201,12 @@ data class LingSettings(
      */
     val customUserAgent: String = "",
     val dynamicColor: Boolean = true,
+    /**
+     * 动态取色不可用（Android 12 以下）或关闭时使用的固定配色。
+     *
+     * 默认 [AccentColor.GREEN] 保持旧观感；Android 12+ 开着动态取色时本项被忽略。
+     */
+    val accentColor: AccentColor = AccentColor.GREEN,
     val incognito: Boolean = false,
     /**
      * 网页内容是否跟随夜间模式暗化。
@@ -332,6 +354,7 @@ class SettingsStore(private val context: Context) {
         val DESKTOP_MODE = booleanPreferencesKey("desktop_mode")
         val CUSTOM_USER_AGENT = stringPreferencesKey("custom_user_agent")
         val DYNAMIC_COLOR = booleanPreferencesKey("dynamic_color")
+        val ACCENT_COLOR = stringPreferencesKey("accent_color")
         val FORCE_DARK = booleanPreferencesKey("force_dark_web")
         val BLOCK_IMAGES = booleanPreferencesKey("block_images")
         val JS_ENABLED = booleanPreferencesKey("js_enabled")
@@ -364,6 +387,9 @@ class SettingsStore(private val context: Context) {
             desktopMode = p[Keys.DESKTOP_MODE] ?: false,
             customUserAgent = (p[Keys.CUSTOM_USER_AGENT] ?: "").trim(),
             dynamicColor = p[Keys.DYNAMIC_COLOR] ?: true,
+            accentColor = p[Keys.ACCENT_COLOR]
+                ?.let { runCatching { AccentColor.valueOf(it) }.getOrNull() }
+                ?: AccentColor.GREEN,
             forceDarkWebPages = p[Keys.FORCE_DARK] ?: true,
             blockImages = p[Keys.BLOCK_IMAGES] ?: false,
             javaScriptEnabled = p[Keys.JS_ENABLED] ?: true,
@@ -448,6 +474,9 @@ class SettingsStore(private val context: Context) {
 
     suspend fun setDynamicColor(enabled: Boolean) =
         context.dataStore.edit { it[Keys.DYNAMIC_COLOR] = enabled }
+
+    suspend fun setAccentColor(color: AccentColor) =
+        context.dataStore.edit { it[Keys.ACCENT_COLOR] = color.name }
 
     suspend fun setForceDarkWebPages(enabled: Boolean) =
         context.dataStore.edit { it[Keys.FORCE_DARK] = enabled }
