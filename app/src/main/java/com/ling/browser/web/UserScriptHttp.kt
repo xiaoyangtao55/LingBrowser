@@ -63,7 +63,9 @@ internal class ScriptHttpRequest(
 
             val status = conn.responseCode
             val stream = if (status >= 400) conn.errorStream else conn.inputStream
-            val total = conn.contentLengthLong
+            // contentLengthLong 是 API 24+；脚本响应另有体积上限，
+            // 用 int 版（API 1）换算即可，也省去版本分支。
+            val total = conn.contentLength.toLong()
             val bytes = stream?.let { input ->
                 input.use { readLimited(it, total) }
             } ?: ByteArray(0)

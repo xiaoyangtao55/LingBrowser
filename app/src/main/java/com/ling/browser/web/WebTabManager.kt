@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Bitmap
 import android.net.Uri
+import android.os.Build
 import android.webkit.ClientCertRequest
 import android.webkit.ConsoleMessage
 import android.webkit.CookieManager
@@ -1687,6 +1688,10 @@ class WebTabManager(private val context: Context) {
         threatType: Int,
         callback: SafeBrowsingResponse,
     ) {
+        // SafeBrowsingResponse 及其方法都是 API 27+；低版本根本不会触发
+        // onSafeBrowsingHit。显式守卫让 Lint 能证明边界，也避免误调用时
+        // 触发 NoSuchMethodError。
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O_MR1) return
         if (safeQueue.size >= MAX_PENDING_SAFE) {
             callback.backToSafety(true)
             return
@@ -1703,6 +1708,7 @@ class WebTabManager(private val context: Context) {
 
     /** 用户对 Safe Browsing 警告的选择：true = 继续访问，false = 返回安全页。 */
     fun resolveSafeBrowsing(proceed: Boolean) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O_MR1) return
         val item = safeShown ?: return
         safeShown = null
         if (proceed) item.callback.proceed(false) else item.callback.backToSafety(true)
@@ -1711,6 +1717,7 @@ class WebTabManager(private val context: Context) {
 
     /** UI 销毁时把待裁决项全部按「返回安全页」兑现，避免 callback 悬空。 */
     fun cancelSafeBrowsing() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O_MR1) return
         val items = ArrayList<PendingSafeBrowsing>()
         safeShown?.let { items.add(it) }
         safeShown = null
@@ -1723,6 +1730,7 @@ class WebTabManager(private val context: Context) {
 
     /** 关标签时只清理该标签的待裁决项。 */
     private fun cancelSafeBrowsingFor(tabId: String) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O_MR1) return
         safeShown?.takeIf { it.prompt.tabId == tabId }?.let {
             it.callback.backToSafety(true)
             safeShown = null
@@ -1739,6 +1747,7 @@ class WebTabManager(private val context: Context) {
     }
 
     private fun showNextSafe() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O_MR1) return
         if (safeShown == null) {
             while (true) {
                 val next = safeQueue.removeFirstOrNull() ?: break

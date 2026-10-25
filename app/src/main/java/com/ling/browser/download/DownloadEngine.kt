@@ -5,6 +5,8 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.NetworkRequest
+import android.os.Build
 import android.webkit.CookieManager
 import android.webkit.WebSettings
 import com.ling.browser.data.db.DownloadEntry
@@ -1254,7 +1256,18 @@ class DownloadEngine(
         if (networkMonitorRegistered) return
         val cm = connectivityManager ?: return
         networkMonitorRegistered = runCatching {
-            cm.registerDefaultNetworkCallback(defaultNetworkCallback)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                cm.registerDefaultNetworkCallback(defaultNetworkCallback)
+            } else {
+                // API 23 没有 registerDefaultNetworkCallback（24 才加），
+                // 用等价的请求式注册：只关心「有默认网络」这一个信号。
+                cm.registerNetworkCallback(
+                    NetworkRequest.Builder()
+                        .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                        .build(),
+                    defaultNetworkCallback,
+                )
+            }
         }.isSuccess
     }
 
