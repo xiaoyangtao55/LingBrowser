@@ -161,10 +161,12 @@ else:
 
 # ---------- 6. 清除数据 ----------
 print("\n6. 清除数据是否连会话一起清")
-if re.search(r"fun clearAllData\(\)[\s\S]{0,600}?clearSession\(\)", vm):
-    ok("clearAllData 会清会话快照")
+# 清除已改为可选择项（history / cookies / cache / session），
+# 勾选了「标签页会话」就必须清快照，否则重启后标签会复活。
+if re.search(r"fun clearBrowsingData\([\s\S]{0,800}?if \(session\) clearSession\(\)", vm):
+    ok("勾选「标签页会话」时会清掉会话快照")
 else:
-    bad("clearAllData 未清会话快照 —— 清除数据后重启标签会复活")
+    bad("clearBrowsingData 未按 session 选项清会话快照 —— 清除数据后重启标签会复活")
 
 # ---------- 7. attachHost 的补挂 ----------
 print("\n7. attachHost 是否能在 WebView 尚未创建时补挂")

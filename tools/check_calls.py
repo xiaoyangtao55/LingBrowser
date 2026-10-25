@@ -39,7 +39,10 @@ def strip_code(code):
             while j < n and code[j] != '"':
                 j += 2 if code[j] == "\\" else 1
             j = min(j + 1, n)
-            out.append(" " * (j - i)); i = j
+            # 用占位符而不是空格：空格会让 split_top_level 丢掉这个实参，
+            # `foo(a, b, "x", c)` 被数成 3 个实参，进而误报"缺少必填参数"
+            # （deliverScriptEvent 就这么被误判过）。
+            out.append("".join(c if c == "\n" else "x" for c in code[i:j])); i = j
         else:
             out.append(code[i]); i += 1
     return "".join(out)
@@ -57,6 +60,27 @@ def balanced_slice(code, start, open_ch="(", close_ch=")"):
                 return code[start + 1:i]
         i += 1
     return ""
+
+
+def has_other_receiver(code, name_start):
+    """调用点是否写在别的对象上（如 `engine.enqueue(...)`）。
+
+    同名方法在不同类里可以有不同签名。只有裸调用或 `this.name(...)` 才能
+    确定用的是本文件的声明；`engine.enqueue(...)` 可能来自另一个类，
+    拿本文件的签名去比对必然误报。
+    """
+    i = name_start - 1
+    while i >= 0 and code[i] in " \t\r\n":
+        i -= 1
+    if i < 0 or code[i] != ".":
+        return False
+    j = i - 1
+    while j >= 0 and code[j] in " \t\r\n":
+        j -= 1
+    k = j
+    while k >= 0 and (code[k].isalnum() or code[k] == "_"):
+        k -= 1
+    return code[k + 1:j + 1] != "this"
 
 
 def split_top_level(text):
@@ -174,6 +198,7 @@ def main():
                 op = m.end() - 1
                 if op in decl_pos:
                     continue
+                external = has_other_receiver(code, m.start())
                 args = balanced_slice(code, op)
                 passed = set()
                 for a in split_top_level(args):
@@ -183,7 +208,7 @@ def main():
 
                 # 只在"本文件定义了该函数"时才判定未知参数，
                 # 否则可能因为同名函数而误报。
-                if name in local:
+                if name in local and not external:
                     unknown = passed - allp
                     if unknown:
                         line = code[:m.start()].count("\n") + 1
@@ -193,7 +218,7 @@ def main():
 
                 positional = [a for a in split_top_level(args) if not re.match(r"\w+\s*=", a)]
                 missing = {x for x in req if x not in passed}
-                if name in local and len(positional) < len(missing):
+                if name in local and not external and len(positional) < len(missing):
                     line = code[:m.start()].count("\n") + 1
                     problems.append(
                         f"{rel}:{line} {name}() 可能缺少必填参数 {sorted(missing)}"

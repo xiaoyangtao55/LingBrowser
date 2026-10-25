@@ -39,11 +39,46 @@ def ok(m):
 
 
 def strip_code(code):
-    code = re.sub(r"/\*.*?\*/", " ", code, flags=re.S)
-    code = re.sub(r"//[^\n]*", " ", code)
-    code = re.sub(r'"""(?:.|\n)*?"""', '""', code)
-    code = re.sub(r'"(?:\\.|[^"\\])*"', '""', code)
-    return code
+    """剔除注释与字符串，保留换行（行号才不会整体偏移）。
+
+    必须做成单趟状态机：原先用 `re.sub(r"/\\*.*?\\*/", ...)`，
+    遇到字符串里的 `"*/*"`（如 MIME 通配符）就会从那个 `/*` 一路吃到
+    很远的 `*/`，把整份文件吞掉大半 —— BrowserScreen.kt 曾因此从 2080 行
+    缩到 503 行，里面明明存在的调用点被判成"从未调用"。
+    """
+    out = []
+    i, n = 0, len(code)
+    while i < n:
+        if code.startswith("//", i):
+            j = code.find("\n", i)
+            j = n if j < 0 else j
+            out.append(" " * (j - i)); i = j
+        elif code.startswith("/*", i):
+            # Kotlin 的块注释可以嵌套，按深度配对
+            depth, j = 0, i
+            while j < n:
+                if code.startswith("/*", j):
+                    depth += 1; j += 2
+                elif code.startswith("*/", j):
+                    depth -= 1; j += 2
+                    if depth == 0:
+                        break
+                else:
+                    j += 1
+            out.append("".join(c if c == "\n" else " " for c in code[i:j])); i = j
+        elif code.startswith('"""', i):
+            j = code.find('"""', i + 3)
+            j = n if j < 0 else j + 3
+            out.append("".join(c if c == "\n" else " " for c in code[i:j])); i = j
+        elif code[i] in "\"'":
+            q, j = code[i], i + 1
+            while j < n and code[j] != q:
+                j += 2 if code[j] == "\\" else 1
+            j = min(j + 1, n)
+            out.append("".join(c if c == "\n" else " " for c in code[i:j])); i = j
+        else:
+            out.append(code[i]); i += 1
+    return "".join(out)
 
 
 def collect(root):
@@ -95,9 +130,12 @@ for path, src in main_files.items():
             continue
         if name in WHITELIST:
             continue
-        # 跳过 private
+        # 跳过 private 与 override
         line_start = src.rfind("\n", 0, m.start()) + 1
-        if "private" in src[line_start:m.start()]:
+        head = src[line_start:m.start()]
+        if "private" in head or "override" in head:
+            # override 是接口/框架回调（如 OkHttp 的 CookieJar.loadForRequest），
+            # 调用点在库内部，源码里当然搜不到。
             continue
         defs.setdefault(name, []).append((rel, src[:m.start()].count("\n") + 1))
 

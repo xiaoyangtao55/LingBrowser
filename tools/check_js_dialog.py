@@ -69,6 +69,30 @@ def read(path):
     return strip_code(open(path, encoding="utf-8").read())
 
 
+def fun_body(src, signature):
+    """按花括号配对截取函数体。
+
+    不能用「从签名往后取 N 个字符」：onCreateWindow 现在要建临时 WebView、
+    挂窗口、等导航回调，实现长度早就超过 2000 字符，固定窗口会漏看后半段，
+    把确实调用了 newTab() 的实现误判成没调用。
+    """
+    m = re.search(signature, src)
+    if not m:
+        return None
+    i = src.find("{", m.end())
+    if i < 0:
+        return None
+    depth = 0
+    for j in range(i, len(src)):
+        if src[j] == "{":
+            depth += 1
+        elif src[j] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[i:j + 1]
+    return None
+
+
 def main():
     problems = []
 
@@ -101,9 +125,8 @@ def main():
         if not re.search(rf"override\s+fun\s+{method}\s*\(", tm_code):
             problems.append(f"WebChromeClient 未重写 {method}()（会回退系统默认 Dialog）")
             continue
-        # 取该方法体（从 fun 到下一个同级 override fun / }），检查是否调用了 this@WebTabManager.onJsX
-        m = re.search(rf"override\s+fun\s+{method}\s*\(", tm_code)
-        body = tm_code[m.start(): m.start() + 1200]
+        # 取该方法体（从 fun 到配对的 }），检查是否调用了 this@WebTabManager.onJsX
+        body = fun_body(tm_code, rf"override\s+fun\s+{method}\s*\(") or ""
         delegate = method  # 方法名和委托名一致
         if f"this@WebTabManager.{delegate}" not in body:
             problems.append(
@@ -163,8 +186,7 @@ def main():
     if not re.search(r"override\s+fun\s+onCreateWindow\s*\(", tm_code):
         problems.append("WebTabManager 未重写 onCreateWindow()（window.open 无法开新标签）")
     else:
-        m = re.search(r"override\s+fun\s+onCreateWindow\s*\(", tm_code)
-        body = tm_code[m.start(): m.start() + 2000]
+        body = fun_body(tm_code, r"override\s+fun\s+onCreateWindow\s*\(") or ""
         if "newTab(" not in body:
             problems.append("onCreateWindow() 未调用 newTab()（window.open 没开成新标签）")
         if "transport.webView" not in body:

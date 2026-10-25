@@ -23,7 +23,7 @@ KOTLIN = os.path.join(
     ROOT, "app", "src", "main", "java", "com", "ling", "browser",
     "ui", "theme", "LingIcons.kt",
 )
-SRC = r"C:\Users\QiYan\Downloads\material_icon"
+SRC = os.environ.get("LING_ICON_SRC") or r"C:\Users\QiYan\Downloads\material_icon"
 SYNTH = os.path.join(SRC, "_synthesized")
 
 problems = []
@@ -103,6 +103,14 @@ def main():
 
     print("图标与源文件一致性校验")
     print()
+
+    # 源图标不在仓库里（是下载的 Material Symbols 原始 xml），
+    # CI / 沙箱里通常没有。此时跳过而不是报一堆"源文件不存在"：
+    # 生成物本身由 LingIconsTest 做结构回归。
+    if not os.path.isdir(SRC):
+        print(f"  跳过：源文件目录不存在（{SRC}）")
+        print("  如需逐点比对，请用 LING_ICON_SRC 指向 material_icon 目录后重跑。")
+        return
 
     n_ok = 0
     for name, fname in MAPPING:

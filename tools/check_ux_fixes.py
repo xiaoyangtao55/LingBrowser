@@ -451,8 +451,10 @@ else:
     bad("搜索回调没有接线 —— 网页提交后没人处理")
 
 if re.search(
-    r"tabManager\.onSearchRequested = \{ query ->[\s\S]{0,220}?"
-    r"UrlUtils\.toUrl\(query, settings\.value\.searchEngine\)",
+    r"tabManager\.onSearchRequested = \{ query ->[\s\S]{0,220}?searchTarget\(query\)",
+    vm,
+) and re.search(
+    r"fun searchTarget\([\s\S]{0,200}?UrlUtils\.toUrl\(",
     vm,
 ):
     ok("判定网址/搜索词复用 UrlUtils（与地址栏同一套，不在网页里重写）")
