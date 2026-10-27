@@ -67,14 +67,6 @@ class LingWebViewClient(
     /** 返回 true 表示已由外部接管（例如外部应用打开），WebView 不应继续加载。 */
     private val onExternalScheme: (Uri) -> Boolean,
     /**
-     * 主页搜索框提交（`ling://search?q=…`）。
-     *
-     * 与 [onExternalScheme] 分开：这是**内部入口**，交给系统会弹"没有应用可打开"，
-     * 交给 WebView 就是 `ERR_UNKNOWN_URL_SCHEME` 白屏 —— 只能由我们自己吃掉。
-     * 这里只把查询串交出去，判定"网址还是搜索词"由 UI 层用同一套 UrlUtils 做。
-     */
-    private val onInternalSearch: (String) -> Unit = {},
-    /**
      * 点开 `.user.js` 安装链接时的回调。
      *
      * 原始 JS 当网页渲染没有意义，这里直接取消导航，交给 UI 层弹安装确认。
@@ -186,9 +178,9 @@ class LingWebViewClient(
      * 两个不能碰的边界：
      *  1. **主文档永不拦截**（见 [AdBlocker.shouldBlock] 的说明），
      *     否则广告落地页会整页白屏。
-     *  2. **内置页不拦**：主页 ling://home、阅读视图 ling://reader 是
-     *     loadDataWithBaseURL 渲染的自包含内容，本就没有广告子请求，
-     *     但为了绝对安全，非 http(s) 一律走 AdBlocker 内部的 scheme 判断放行。
+     *  2. **内置页不拦**：主页是原生 Compose 渲染（WebView 里只有 about:blank 占位），
+     *     阅读视图 ling://reader 是 loadDataWithBaseURL 渲染的自包含内容，本就没有
+     *     广告子请求，但为了绝对安全，非 http(s) 一律走 AdBlocker 内部的 scheme 判断放行。
      */
     override fun shouldInterceptRequest(
         view: WebView?,
@@ -432,14 +424,6 @@ class LingWebViewClient(
     }
 
     private fun handleUri(view: WebView?, uri: Uri): Boolean {
-        // ⚠️ 主页搜索框必须**先**拦：它也是 ling://，而 ling 在
-        // UrlScheme.NAVIGABLE 里算"可加载"，不先拦就会被 WebView 揽走
-        // → ERR_UNKNOWN_URL_SCHEME 白屏。
-        HomePage.searchQueryOf(uri.toString())?.let { query ->
-            onInternalSearch(query)
-            return true
-        }
-
         // 用户脚本安装链接：取消导航（不把原始 JS 当网页显示），交给 UI 层确认安装。
         if (isUserScriptUrl(uri.toString())) {
             onUserScriptLink(uri.toString())

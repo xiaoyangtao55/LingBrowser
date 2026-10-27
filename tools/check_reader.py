@@ -767,33 +767,20 @@ def body_of(src, pattern, span=1200):
 
 
 # (1) 切主题时要重绘阅读视图，否则停在旧配色
-ensure = body_of(mgr, r"fun ensureHomeRendered\(\)")
+ensure = body_of(mgr, r"fun applyInternalColors\(")
 if "ReaderPage.isReaderUrl" in ensure:
     ok("切主题时阅读视图跟着重新配色（否则要退出重进才更新）")
 else:
-    bad("ensureHomeRendered 只重绘主页 —— 阅读模式在切换夜间模式后配色不会变")
+    bad("applyInternalColors 没有处理阅读视图 —— 切换夜间模式后配色不会变")
 
-# (1b) 已渲染的主页要原地刷新（改 CSS 变量），不能重导航 ——
-# 重导航（loadDataWithBaseURL）会压入新历史条目，导致"切深色后按返回回到浅色主页"。
-#
-# 现在这条路径收敛到了 loadHomeOrRefresh（"点主页按钮"那条统一路径）：
-# ensureHomeRendered 只负责把「所有停在主页/阅读视图的标签」找出来、转交给它，
-# 不再自己手写一份原地刷新（早先那份漏了 WebView 背景对齐，导致改背景模式
-# 要手动按一下主页按钮才生效）。因此判据分两步：
-#   a) ensureHomeRendered 真的调用了 loadHomeOrRefresh；
-#   b) loadHomeOrRefresh 里确实做的是原地刷新（evaluateJavascript(homeThemeJs()），
-#      而不是 loadDataWithBaseURL 重导航。
-# 只查 "homeThemeJs()" 会撞上函数定义（homeThemeJs():），定义在、调用没了也照样误报通过。
-if "loadHomeOrRefresh(" in ensure:
-    ok("主题切换把主页交给统一的原地刷新路径（loadHomeOrRefresh）")
+# (1b) 主页已改为原生 Compose 渲染（见 ui/screens/HomeScreen.kt），
+# WebView 里不再有可刷新的 HTML，也就没有"重导航压历史"这条路径了。
+# 只需确认主页走的是占位文档而不是 loadDataWithBaseURL。
+load_home = body_of(mgr, r"private fun loadHome\(id: String\)")
+if "loadUrl(HOME_PLACEHOLDER_URL)" in load_home:
+    ok("主页用 about:blank 占位（Compose 渲染前景，返回键仍能回主页）")
 else:
-    bad("ensureHomeRendered 未走 loadHomeOrRefresh —— 可能又手写了不一致的分支")
-
-refresh = body_of(mgr, r"private fun loadHomeOrRefresh\(")
-if "evaluateJavascript(homeThemeJs()" in refresh:
-    ok("主页原地刷新（不压历史，返回键行为不变）")
-else:
-    bad("主题切换仍走重导航 —— 切深色后按返回会回到浅色主页")
+    bad("主页未走占位文档 —— 可能又退回 loadDataWithBaseURL 的假文档方案")
 
 # (2) 阅读视图不能被强制夜间模式的反色 CSS 二次处理
 # 判据是 injectDarkMode 位于 `if (!isInternal)` 块内 ——
@@ -803,10 +790,11 @@ if re.search(r"if \(!isInternal\) \{(?:[^{}]|\n)*?wv\.injectDarkMode", mgr):
 else:
     bad("内部页面被注入反色 CSS —— 深色阅读视图会被反成亮底白字")
 
-# 判据用统一入口 InternalPage.isInternal(url, …)：它同时覆盖"内部页 baseUrl"
-# 与 reload 后回写的 data: 形式（只看 baseUrl 会把刷新过的主页当成普通网页）。
-if re.search(r"val isInternal = InternalPage\.isInternal\(url", mgr):
-    ok("用统一的 isInternal 判定内部页面（主页 + 阅读视图，含 reload 的 data: 形式）")
+# 判据用统一入口 InternalPage.isInternal(url, …)：它同时覆盖"阅读视图 baseUrl"
+# 与 reload 后回写的 data: 形式（只看 baseUrl 会把刷新过的阅读视图当成普通网页）。
+# 主页的 about:blank 占位由 isHomePlaceholder 另行并入（两者取或）。
+if re.search(r"val isInternal = (?:isPlaceholder \|\| )?(?:isHomePlaceholder\(id, url\) \|\| )?InternalPage\.isInternal\(url", mgr):
+    ok("用统一的 isInternal 判定内部页面（主页占位 + 阅读视图，含 reload 的 data: 形式）")
 else:
     bad("未统一判定内部页面，容易出现只处理主页、漏掉阅读视图的情况")
 
@@ -979,17 +967,17 @@ else:
     bad("未说明合成地址是否写入历史 —— ling://reader 记进去点不开")
 
 # (5) 主题确实传到了阅读视图
-if re.search(r"private fun readerHtml[\s\S]{0,900}?dark = homeColors\.dark", mgr):
-    ok("阅读视图的明暗由 homeColors.dark 驱动（跟随夜间模式与动态取色）")
+if re.search(r"private fun readerHtml[\s\S]{0,900}?dark = internalColors\.dark", mgr):
+    ok("阅读视图的明暗由 internalColors.dark 驱动（跟随夜间模式与动态取色）")
 else:
     bad("阅读视图未接入主题明暗")
 
-# 判据认两种写法：内联在 applyHomeTheme 的实参上，或先算成 uiDark 再用
+# 判据认两种写法：内联在 applyInternalColors 的实参上，或先算成 uiDark 再用
 # （后者同时喂给"网页重算暗化"的 LaunchedEffect）。不能放宽成"文件里出现过
 # luminance" —— 那样 dark 从别处来、或算完不用，也照样通过。
 if re.search(r"val uiDark = colorScheme\.background\.luminance\(\) < 0\.5f", screen) and \
         re.search(r"dark = uiDark", screen):
-    ok("dark 由实际背景亮度推导（先算成 uiDark，同时驱动主页配色与网页重算）")
+    ok("dark 由实际背景亮度推导（先算成 uiDark，同时驱动阅读视图配色与网页重算）")
 elif re.search(r"dark = colorScheme\.background\.luminance\(\) < 0\.5f", screen):
     ok("dark 由实际背景亮度推导，而不是只读设置项")
 else:
@@ -1337,33 +1325,42 @@ else:
 # applySettings 会遍历所有 WebView（每个实例当前停在哪一页只有它自己知道），
 # 只在 onPageFinished 里判 isInternal 挡不住这条路 —— 深色主页会被 invert
 # 反成亮底，正好与预期相反。
-if "val enabled = darken && !InternalPage.isInternal(url)" in lwv:
-    ok("injectDarkMode 在入口处拦掉内部页（applySettings 那条路也挡住了）")
+# 主页占位 about:blank 没有地址身份，必须靠 WebTabManager 打的
+# isHomePlaceholderDocument 标记一起拦：否则 `html{background:#111}` 被 invert
+# 翻成近白色，主页背景层被糊成一片白。
+if (
+    "!isHomePlaceholderDocument" in lwv
+    and "!InternalPage.isInternal(url)" in lwv
+    and "val enabled = darken" in lwv
+):
+    ok("injectDarkMode 在入口处拦掉内部页与主页占位（applySettings 那条路也挡住了）")
 else:
-    bad("内部页仍会被兜底反色 CSS 命中 —— 深色主页会被反成亮底")
+    bad("内部页/主页占位仍会被兜底反色 CSS 命中 —— 深色主页会被反成亮底")
 
-# (7) 已经在主页上再点「主页」不能重新导航：loadDataWithBaseURL 每次调用都会
-# 压入一个历史条目，重复回主页会让返回键攒下一串一模一样的主页历史
-# （亮着、按一下"没反应"、要连按好几次才能退出主页）。
+# (7) 已经在主页上再点「主页」不能重新导航：重复导航会让返回键攒下一串
+# 一模一样的主页历史（亮着、按一下"没反应"、要连按好几次才能退出主页）。
+# 判据看 WebView 的**实时地址**：落在占位上就早退；从主页打开网页后
+# 同一标签仍在 homePlaceholderTabs 里，但这时点「主页」必须真的回去。
 if re.search(
-    r"fun loadUrl\(id: String, url: String\)[\s\S]{0,450}?loadHomeOrRefresh\(id, wv\)",
+    r"fun loadUrl\(id: String, url: String\)[\s\S]{0,600}?loadHome\(id\)",
     mgr,
 ) and re.search(
-    r"fun loadHomeOrRefresh\(id: String, wv: LingWebView\)[\s\S]{0,600}?isHomeRendered\(id, wv\)",
+    r"fun loadHome\(id: String\)[\s\S]{0,900}?isHomePlaceholder\(id, wv\.url\)[\s\S]{0,200}?return",
     mgr,
 ):
-    ok("已在主页时点「主页」走原地刷新，不重复压历史条目")
+    ok("已在主页时点「主页」不重复压历史条目（离开主页后再点仍会真的回去）")
 else:
     bad("重复回主页仍会重新导航 —— 返回键会攒下一串同样的主页历史")
 
-# (8) 内部页的配色是"烘"进 HTML 字符串里的：文档一旦被重建（刷新按钮重放同一份
+# (8) 阅读视图的配色是"烘"进 HTML 字符串里的：文档一旦被重建（刷新按钮重放同一份
 # data URL、渲染进程被系统回收后重建、历史回退到旧条目），页面就会停在烘死时的
 # 旧配色。必须在 onPageFinished 里按当前配色补一次原地刷新。
+# 主页已改为 Compose 渲染，没有"补色"这回事，因此这里只针对阅读视图。
 fin_block = body_of(mgr, r"onPageFinished = \{ url, title ->", span=3100)
-if "if (isHome) homeThemeJs() else readerThemeJs()" in fin_block:
-    ok("内部页在文档就绪后按当前配色重新着色（刷新/进程重建不会掉回旧配色）")
+if "if (isInternal && !isHome)" in fin_block and "readerThemeJs()" in fin_block:
+    ok("阅读视图在文档就绪后按当前配色重新着色（刷新/进程重建不会掉回旧配色）")
 else:
-    bad("内部页文档重建后不会重新着色 —— 刷新主页会退回旧配色")
+    bad("内部页文档重建后不会重新着色 —— 刷新阅读视图会退回旧配色")
 
 # (9) 实时地址写回状态前必须归一化：内部页的 wv.url 是 baseUrl，原样写回会让
 # 同一个页面出现两种 url 值，还会把解析不了的假 https 地址写进会话快照。
@@ -1413,7 +1410,7 @@ else:
     bad("Cookie 策略有多个设置点 —— 全局策略会随调用顺序漂移")
 
 if (
-    re.search(r"fun switchTo\(id: String\)[\s\S]{0,600}?syncCookiePolicy\(id\)", mgr)
+    re.search(r"fun switchTo\(id: String\)[\s\S]{0,1400}?syncCookiePolicy\(id\)", mgr)
     and "if (id == _activeId.value) syncCookiePolicy(id)" in mgr
 ):
     ok("切标签 / 创建实例时都把 Cookie 策略对齐到激活标签")

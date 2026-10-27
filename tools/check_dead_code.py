@@ -1,8 +1,8 @@
 """检查「定义了但从未被调用」的公开函数（死代码）。
 
 背景：这个项目里同一个坑踩了两次 ——
-  1. `HomePage.prefersDarkCss()` 定义了却从未被 HTML 调用，
-     导致主页的 dark 参数完全不起作用；
+  1. `HomePage.prefersDarkCss()`（主页已改为 Compose 渲染前）定义了却从未被
+     HTML 调用，导致主页的 dark 参数完全不起作用；
   2. `LingWebView.injectDarkMode()` 定义了却从未被调用，
      导致强制网页夜间模式的 CSS 兜底从未生效。
 
@@ -106,7 +106,6 @@ WATCH_PREFIXES = (
 # 明确豁免：由框架回调、外部入口或测试驱动
 WHITELIST = {
     "applySettings",     # 由 WebTabManager 调用（同名多处，匹配复杂）
-    "applyHomeTheme",    # 由 BrowserScreen 调用
     "attachHost", "detachHost",  # 由 BrowserScreen 的 DisposableEffect
     "loadUrl", "loadHome",       # 同上，调用点分散
 }

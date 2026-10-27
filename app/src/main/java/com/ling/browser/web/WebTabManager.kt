@@ -129,6 +129,14 @@ class WebTabManager(private val context: Context) {
     /** tabId -> WebView。仅在内存中存活，不参与状态序列化。 */
     private val webViews = LinkedHashMap<String, LingWebView>()
 
+    /**
+     * 哪些标签的 WebView 里那个 `about:blank` 是"主页占位"。
+     *
+     * 只在主线程读写（[loadHome]、加载回调、[closeTab]），与 [webViews] 同线程。
+     * 见 [isHomePlaceholder] 的说明。
+     */
+    private val homePlaceholderTabs = mutableSetOf<String>()
+
     /** 主线程消息队列：用于把"销毁临时 WebView"这类动作推迟到回调之外。 */
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -324,14 +332,6 @@ class WebTabManager(private val context: Context) {
      * （见 [com.ling.browser.ui.BrowserViewModel]），web 层不导入 data 层。
      */
     var onUserScriptMessage: ((tabId: String, message: String) -> Unit)? = null
-
-    /**
-     * 主页搜索框提交的回调（查询串，可能是一句搜索词也可能是个网址）。
-     *
-     * 判定"网址还是搜索词"要 UrlUtils + 用户选的搜索引擎，那是 UI 层的事；
-     * 这里只负责把网页提交上来的字符串转出去。
-     */
-    var onSearchRequested: ((query: String) -> Unit)? = null
 
     /**
      * 网页 `<input type="file">` 点击后的文件选择回调（由 UI 层接管）。
@@ -848,7 +848,10 @@ class WebTabManager(private val context: Context) {
         }
         // select=false 用于 GM_openInTab 的后台打开：建标签、开始加载，但不切过去。
         if (select) switchTo(tab.id)
-        loadUrl(tab.id, target)
+        // 主页已由 switchTo → loadHome 装好占位，不能再走一次 loadUrl：
+        // 两次紧邻的 about:blank 请求会在地址回写前互相覆盖，白白多一次导航。
+        // 后台打开（select=false）没有经过 switchTo，仍交给 loadUrl 建实例并装占位。
+        if (!select || !HomePage.isHomeUrl(target)) loadUrl(tab.id, target)
         scriptUrl?.let { onUserScriptLink?.invoke(it) }
         return tab
     }
@@ -913,6 +916,7 @@ class WebTabManager(private val context: Context) {
         scriptHandlers.remove(id)
         injectedScripts.remove(id)
         scriptMenus.remove(id)
+        homePlaceholderTabs.remove(id)
         publishMenus()
         // 该标签的待裁决 Safe Browsing 与控制台记录同样随标签一起清掉。
         cancelSafeBrowsingFor(id)
@@ -989,12 +993,19 @@ class WebTabManager(private val context: Context) {
     /** 切换激活标签。 */
     fun switchTo(id: String) {
         if (_activeId.value == id && webViews[id] != null) return
+        val recreated = webViews[id] == null
         _activeId.value = id
         val wv = obtainWebView(id)
         host?.let { h ->
             h.removeAllViews()
             (wv.parent as? FrameLayout)?.removeView(wv)
             h.addView(wv)
+        }
+        // LRU 回收后重建的实例没有可恢复的文档。主页标签重新装一次占位
+        // （空的 WebView 是白底，会盖住 HomeBackgroundLayer，也没有返回帧）；
+        // 普通网页的懒加载不在本次改动范围内。
+        if (recreated && HomePage.isHomeUrl(_tabs.value.firstOrNull { it.id == id }?.url)) {
+            loadHome(id)
         }
         syncNavState(id)
         // CookieManager 是**进程级**单例：切标签后必须把全局策略对齐到新的激活标签，
@@ -1049,10 +1060,9 @@ class WebTabManager(private val context: Context) {
             return
         }
         val wv = obtainWebView(id)
-        // 内置主页由原生渲染，绝不交给 WebView 解析协议 ——
-        // 早期版本直接把 about:home 喂给 WebView，结果触发 onReceivedError 白屏。
+        // 内置主页由 Compose 渲染，WebView 只留一个空白占位（见 [loadHome]）。
         if (HomePage.isHomeUrl(url)) {
-            loadHomeOrRefresh(id, wv)
+            loadHome(id)
             return
         }
         // 自定义协议（zhihu://、weixin:// 等）不能交给 WebView：
@@ -1070,13 +1080,15 @@ class WebTabManager(private val context: Context) {
         // ERR_UNKNOWN_URL_SCHEME 错误页 —— 上个标签停在阅读模式时，重启就会看到它。
         // 快照现在改存原文地址了（见 snapshots()），这里再兜一道：回主页。
         if (ReaderPage.isReaderUrl(url)) {
-            loadHome(id, wv)
+            loadHome(id)
             return
         }
         // 普通网页恢复 WebView 自身的不透明底（白色，与默认一致）：
-        // 主页那层透明底是主页专用的，若带到普通网页上，
+        // 主页那层透明底是主页专用的（见 [loadHome]），若带到普通网页上，
         // 页面自身的透明区域会露出下面的 Compose 背景，观感不对。
+        // 同时摘掉"主页占位文档"标记，夜间兜底 CSS 重新对它生效。
         wv.setOpaqueBackground(true)
+        wv.isHomePlaceholderDocument = false
         updateTab(id) {
             it.copy(
                 url = url,
@@ -1214,7 +1226,9 @@ class WebTabManager(private val context: Context) {
             )
         }
         // 阅读视图有自己烘好的主题底色，恢复 WebView 不透明底即可（与旧版一致）。
+        // 同时摘掉"主页占位文档"标记（见 LingWebView.isHomePlaceholderDocument）。
         wv.setOpaqueBackground(true)
+        wv.isHomePlaceholderDocument = false
         wv.loadDataWithBaseURL(
             ReaderPage.BASE_URL,
             readerHtml(result),
@@ -1233,12 +1247,12 @@ class WebTabManager(private val context: Context) {
         site = result.site,
         url = result.url,
         content = result.html,
-        background = homeColors.background,
-        onBackground = homeColors.onBackground,
-        primary = homeColors.primary,
-        primaryContainer = homeColors.primaryContainer,
-        onPrimaryContainer = homeColors.onPrimaryContainer,
-        dark = homeColors.dark,
+        background = internalColors.background,
+        onBackground = internalColors.onBackground,
+        primary = internalColors.primary,
+        primaryContainer = internalColors.primaryContainer,
+        onPrimaryContainer = internalColors.onPrimaryContainer,
+        dark = internalColors.dark,
         fontPx = fontSize.px,
     )
 
@@ -1283,7 +1297,7 @@ class WebTabManager(private val context: Context) {
             } else {
                 // 没有可回退的历史：退回主页，避免把用户困在一个
                 // 已经"退出"了却还显示着的阅读页面上。
-                loadHome(id, obtainWebView(id))
+                loadHome(id)
             }
         }
     }
@@ -1301,68 +1315,36 @@ class WebTabManager(private val context: Context) {
     fun readerOriginalUrl(id: String = _activeId.value): String? = readerContent[id]?.url
 
     /**
-     * 进入主页：**已经在主页上就原地刷新**，否则才完整渲染。
-     *
-     * 为什么不能一律 [loadHome]：`loadDataWithBaseURL` 每次调用都会往 WebView
-     * 历史里压入一个新条目（见 [HomePage.themeUpdateJs] 的说明）。而「主页」是
-     * 底部工具栏上的常驻按钮，用户很容易连点 —— 那样会攒下一串一模一样的历史条目：
-     * 返回键是亮的，按一下却回到同一个主页（看着像"没反应"），要连按好几次才能退出主页。
-     * 原地刷新只改 CSS 变量，不产生导航，行为与主题切换时完全一致。
-     */
-    private fun loadHomeOrRefresh(id: String, wv: LingWebView) {
-        if (isHomeRendered(id, wv)) {
-            // 原地刷新：主页的背景由原生层供色、HTML 与 WebView 自身都透明
-            // （见 [HomePage.TRANSPARENT_BG]），这里只需把主题变量刷成当前配色。
-            wv.setOpaqueBackground(false)
-            wv.evaluateJavascript(homeThemeJs(), null)
-            updateTab(id) {
-                it.copy(
-                    // 顺手把可能被带偏的状态补回来（见 [InternalPage.logicalUrl]）
-                    url = HomePage.URL,
-                    title = "主页",
-                    errorText = null,
-                    isLoading = false,
-                    progress = 100,
-                    // 主页是历史起点：停在主页时返回键始终不可用（见本函数说明）。
-                    canGoBack = false,
-                    canGoForward = wv.canGoForward(),
-                )
-            }
-            return
-        }
-        loadHome(id, wv)
-    }
-
-    /**
      * 当前标签的逻辑地址（[TabState.url]）。
      *
      * 判定"WebView 现在这一页是哪种内部页"时要靠它：WebView 对内部页 reload
-     * 后回写的 `data:` 地址本身分不出是主页还是阅读视图（见 [InternalPage]）。
+     * 后回写的 `data:` 地址本身分不出主页还是阅读视图（见 [InternalPage]）。
      */
     private fun logicalUrlOf(id: String): String? =
         _tabs.value.firstOrNull { it.id == id }?.url
 
     /**
-     * WebView 是否**已经真的渲染出主页**。
+     * 这个标签里的 `about:blank` 是不是"主页占位"。
      *
-     * 判据收敛到 [InternalPage.isHomeDocument]，它替我们处理两件容易出错的事：
-     *   - **要求地址非空**：[HomePage.isHomeUrl] 按地址栏语义把 null / 空串也算作
-     *     主页，而刚建出来、还没加载任何页面的 WebView `url` 正是 null ——
-     *     拿它当"是不是已经在主页上"的判据，冷启动会跳过真正的渲染，主页停在空白页；
-     *   - **认得出 reload 后的 `data:` 形式**：地址栏刷新 / 渲染进程重建后 WebView
-     *     回写的是一长串 `data:text/html;base64,…`，只按 baseUrl 匹配会误判成
-     *     "不在主页"，于是走 `wv.reload()` 重放同一份 data URL，状态被那一长串
-     *     地址污染、原生背景层停画，页面发白。
+     * about:blank 本身没有身份：`window.open` 的占位文档、页面自己跳到 blank
+     * 都会出现它。只有装过主页占位的标签，才把 blank 解释成主页 —— 否则从
+     * 第一个网页按返回时，状态会被写成 about:blank，主页不显示、地址栏还留着旧网址。
      */
-    private fun isHomeRendered(id: String, wv: LingWebView): Boolean =
-        InternalPage.isHomeDocument(wv.url, logicalUrlOf(id))
+    private fun isHomePlaceholder(id: String, url: String?): Boolean =
+        url?.trim() == HOME_PLACEHOLDER_URL && homePlaceholderTabs.contains(id)
 
-    /** 渲染内置主页。 */
-    private fun loadHome(id: String, wv: LingWebView) {
-        // ⚠️ 这里必须写逻辑地址 HomePage.URL，不能写 HomePage.BASE_URL。
-        // BASE_URL 只用于 loadDataWithBaseURL 的基地址；两者混用会让同一个页面
-        // 在不同代码路径下产生两种 url 值，破坏 StateFlow 的结构化去重，
-        // 进而可能让 refreshHome 反复重绘。
+    /**
+     * 进入主页：状态切成主页，WebView 里只留一个空白占位文档。
+     *
+     * 主页由 Compose 渲染（见 `ui/screens/HomeScreen.kt`），WebView 不再承载它。
+     * 但仍然装一个 about:blank：
+     *  - 让历史里有"主页"这一帧 —— 从第一个网页按返回能回到主页，与旧行为一致；
+     *  - **换掉上一页的文档**，停掉它的媒体播放与定时器。Compose 层只是盖住
+     *    WebView，不换文档的话网页的声音会继续响。
+     *
+     * 只在第一次进入主页时装：反复点"主页"按钮不该往历史里堆空白条目。
+     */
+    private fun loadHome(id: String) {
         updateTab(id) {
             it.copy(
                 url = HomePage.URL,
@@ -1370,35 +1352,37 @@ class WebTabManager(private val context: Context) {
                 errorText = null,
                 isLoading = false,
                 progress = 100,
+                // 主页是历史起点：停在主页时返回键始终不可用。
                 canGoBack = false,
                 canGoForward = false,
             )
         }
-        // 主页**始终**透明（WebView 与 HTML 都是）：背景一律由原生背景层画在
-        // WebView 之下（纯色档画主题色、自定义图片档再叠照片）。
-        // 这样从"WebView 建出来"到"HTML 首帧"那段异步窗口里，屏上是原生层的
-        // 主题色，而不是 WebView 默认的白底 —— 冷启动的那段白闪正是从这里来的。
+        val wv = webViews[id] ?: return
+        // 先打上"这是主页占位"的标记（无条件打）：about:blank 没有地址身份，
+        // 夜间兜底 CSS 只能靠它拦（见 LingWebView.injectDarkMode）。
+        // 放在早退之前：万一标记在某个时刻被清掉，这次回主页也要补回来。
+        wv.isHomePlaceholderDocument = true
+        // 已经在主页占位上（反复点「主页」）：什么都不做，别往历史里再压一条。
+        // 判据必须看 WebView 的实时地址，而不是 homePlaceholderTabs 里有没有 id：
+        // 从主页打开网页后同一个标签仍留在集合里，但这时再点「主页」必须真的回去。
+        if (isHomePlaceholder(id, wv.url)) return
+        homePlaceholderTabs.add(id)
+        wv.stopLoading()
+        // WebView 自身的底改透明：主页前景是 Compose，背景由原生背景层在
+        // WebView 之下供色（见 HomeBackgroundLayer），白底会把背景整个盖住。
+        // 普通网页在 [loadUrl] 里会重新设回不透明白底，因此这里每次回到主页都要重设。
         wv.setOpaqueBackground(false)
-        wv.loadDataWithBaseURL(
-            HomePage.BASE_URL,
-            HomePage.html(
-                onBackground = homeColors.onBackground,
-                primaryContainer = homeColors.primaryContainer,
-                onPrimaryContainer = homeColors.onPrimaryContainer,
-                dark = homeColors.dark,
-                clock = clockText(),
-            ),
-            "text/html",
-            "utf-8",
-            null,
-        )
+        wv.loadUrl(HOME_PLACEHOLDER_URL)
     }
 
     /**
-     * 主页配色。原生侧算好颜色再注入 CSS，这样主页能跟随 Material You 动态取色，
-     * 而不必在 HTML 里重复一套主题逻辑。
+     * 内部页（目前只剩阅读视图）的配色。
+     *
+     * 主页已改为原生 Compose 渲染，直接用 `MaterialTheme`；这里保留一份
+     * 十六进制值，是因为阅读视图仍是 `loadDataWithBaseURL` 的 HTML 文档，
+     * 主题色只能"原生算好 → 注入 CSS 变量"。
      */
-    data class HomeColors(
+    data class InternalColors(
         val background: String = "#FFFBFE",
         val onBackground: String = "#1C1B1F",
         val primary: String = "#1B6C4B",
@@ -1409,98 +1393,42 @@ class WebTabManager(private val context: Context) {
     )
 
     /**
-     * 由 UI 层在主题变化时写入。
+     * 由 UI 层在主题变化时写入，见 [applyInternalColors]。
      *
-     * ⚠️ 这个字段必须在**创建 WebView 之前**就已是正确值，因为 [loadHome]
-     * 渲染时直接读它。冷启动时 [newTab] 会先建好 WebView，若此时还是默认
-     * 浅色配色，主页就会一直用浅色 —— 这正是"主页不跟随夜间模式"的成因。
+     * ⚠️ 必须在**创建阅读视图文档之前**已是正确值：冷启动时若还是默认浅色，
+     * 首屏阅读视图就会用错配色。
      */
-    var homeColors: HomeColors = HomeColors()
+    var internalColors: InternalColors = InternalColors()
+        private set
 
     /**
-     * 给当前所有显示主页的标签页补渲染一次，**没有 WebView 的就先建出来**。
+     * 同步内部页配色，并给正在显示的阅读视图补一次色。
      *
-     * 这里没有单独的 refreshHome()：早先版本的实现是
-     * `webViews[tab.id]?.let { loadHome(...) }`，对"显示主页但 WebView
-     * 尚未创建"的标签页会静默跳过 —— 而这恰恰是冷启动时的常态，
-     * 主页于是停在默认浅色配色上，表现为"没有跟随夜间模式"。
-     * 现在统一走 obtainWebView，直接消灭那条会静默失效的路径。
+     * 阅读视图的颜色烘在 HTML 里，文档重建（reload / 渲染进程回收 / 历史重放）
+     * 都会停在烘死时的配色；原地改 CSS 变量既不动滚动位置，也不压历史。
      */
-    fun ensureHomeRendered() {
-        _tabs.value.filter { HomePage.isHomeUrl(it.url) }.forEach { tab ->
-            // 统一走 [loadHomeOrRefresh]（也就是「点主页按钮」那条路径），
-            // 不要再在这里手写一份"原地刷新"：
-            //   - 它会自己判断是否已经真的渲染出主页，冷启动 / 被 LRU 回收时
-            //     走完整渲染（此时直接 evaluateJavascript 会打在 about:blank 上白注入）；
-            //   - 它同时对齐 WebView 自身背景与标签状态。
-            // 早先这里另写了一份分支，漏了 WebView 背景那一行，导致两条路径行为
-            // 不一致 —— 改背景模式后主页仍是不透明白底，表现为"设了没生效、
-            // 得手动按一下主页按钮"。
-            loadHomeOrRefresh(tab.id, obtainWebView(tab.id))
-        }
-        // 阅读视图同样是原生渲染的自包含页面，也必须跟着重新配色 ——
-        // 否则在阅读模式里切换夜间模式时，页面会停在旧配色。
-        // 同样走原地刷新（只改 CSS 变量，不重排版、不压历史）。
+    fun applyInternalColors(colors: InternalColors) {
+        internalColors = colors
         _tabs.value.filter { ReaderPage.isReaderUrl(it.url) }.forEach { tab ->
-            val wv = webViews[tab.id]
-            // 判据同 isReaderDocument：阅读视图被 reload 后 wv.url 是 data: 形式，
+            val wv = webViews[tab.id] ?: return@forEach
+            // 判据同 isReaderDocument：reload 后 wv.url 是 data: 形式，
             // 只看 baseUrl 会漏判，切夜间模式时配色停在不更新。
-            if (wv != null && InternalPage.isReaderDocument(wv.url, tab.url)) {
+            if (InternalPage.isReaderDocument(wv.url, tab.url)) {
                 wv.evaluateJavascript(readerThemeJs(), null)
             }
         }
     }
 
-    /**
-     * 主页 HTML 该用的背景色。
-     *
-     * 恒为 [HomePage.TRANSPARENT_BG]：主页的背景由原生背景层供色，见
-     * [HomePage.TRANSPARENT_BG] 的说明。抽成一个取值点，保证"完整渲染"（[loadHome]）
-     * 与"原地刷新"（[homeThemeJs]）用的是同一个背景。
-     */
-    private fun homeBackgroundColor(): String = HomePage.TRANSPARENT_BG
-
-    /** 主页原地刷新的 JS：只改主题变量，见 [HomePage.themeUpdateJs]。 */
-    private fun homeThemeJs(): String = HomePage.themeUpdateJs(
-        background = homeBackgroundColor(),
-        onBackground = homeColors.onBackground,
-        primary = homeColors.primary,
-        onPrimary = homeColors.onPrimary,
-        primaryContainer = homeColors.primaryContainer,
-        onPrimaryContainer = homeColors.onPrimaryContainer,
-        dark = homeColors.dark,
+    /** 阅读视图原地刷新的 JS，见 [ReaderPage.themeUpdateJs]。 */
+    private fun readerThemeJs(): String = ReaderPage.themeUpdateJs(
+        background = internalColors.background,
+        onBackground = internalColors.onBackground,
+        primary = internalColors.primary,
+        onPrimary = internalColors.onPrimary,
+        primaryContainer = internalColors.primaryContainer,
+        onPrimaryContainer = internalColors.onPrimaryContainer,
+        dark = internalColors.dark,
     )
-
-    /** 阅读视图原地刷新的 JS：与主页共用同一份脚本，见 [HomePage.themeUpdateJs]。 */
-    private fun readerThemeJs(): String = HomePage.themeUpdateJs(
-        background = homeColors.background,
-        onBackground = homeColors.onBackground,
-        primary = homeColors.primary,
-        onPrimary = homeColors.onPrimary,
-        primaryContainer = homeColors.primaryContainer,
-        onPrimaryContainer = homeColors.onPrimaryContainer,
-        dark = homeColors.dark,
-    )
-
-    /** 当前时间文本（`HH:mm`），供主页时钟使用。 */
-    private fun clockText(): String =
-        java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
-            .format(java.util.Date())
-
-    /**
-     * 刷新显示中主页的时钟。
-     *
-     * 由 UI 层每分钟调用一次（见 BrowserScreen 的定时器）。主页是**零脚本** HTML，
-     * 时间不能自己走，只能由原生侧把文本注入回去 —— 只改那一个文本节点，
-     * 不碰 DOM 结构、不触发导航、不压历史。
-     */
-    fun updateHomeClock() {
-        val js = HomePage.clockJs(clockText())
-        _tabs.value.filter { HomePage.isHomeUrl(it.url) }.forEach { tab ->
-            val wv = webViews[tab.id] ?: return@forEach
-            if (isHomeRendered(tab.id, wv)) wv.evaluateJavascript(js, null)
-        }
-    }
 
     /**
      * 在指定标签页的页面主世界执行一段 JS。
@@ -1514,16 +1442,10 @@ class WebTabManager(private val context: Context) {
     }
 
     fun reload(id: String = _activeId.value) {
-        val wv = obtainWebView(id)
-        // 主页是原生拼接的 HTML：配色是 [loadHome] 时烘进 `:root` 的内联变量。
-        // 若直接 reload，会重新解析那份**旧** HTML，把配色拉回备份时的值
-        // （切了夜间模式后再点刷新，主页会退回旧配色）。
-        // 对主页改用重新渲染，保证配色与当前状态一致；普通网页照常 reload。
-        if (isHomeRendered(id, wv)) {
-            loadHomeOrRefresh(id, wv)
-        } else {
-            wv.reload()
-        }
+        // 主页由 Compose 渲染，没有可刷新的文档：刷新按钮停在主页上时不做事。
+        val tab = _tabs.value.firstOrNull { it.id == id }
+        if (HomePage.isHomeUrl(tab?.url)) return
+        obtainWebView(id).reload()
     }
 
     /**
@@ -2041,11 +1963,10 @@ class WebTabManager(private val context: Context) {
                 }
 
                 override fun onReceivedTitle(view: WebView?, title: String?) {
-                    // 主页标题固定为「主页」：WebView 会报 <title>翎</title>，
-                    // 那个是页面标题，不适合出现在标签列表里。
-                    // 用 isHomeDocument：主页 reload 后 view.url 是 data: 形式，
-                    // 只看 baseUrl 会漏判，主页被页面标题「翎」顶掉。
-                    val isHomePage = InternalPage.isHomeDocument(view?.url, logicalUrlOf(id))
+                    // 主页标题固定为「主页」：占位文档是 about:blank，标题会被清空，
+                    // 这里不覆盖状态里的语义标题。阅读视图的标题已是文章标题，放行。
+                    val isHomePage = isHomePlaceholder(id, view?.url) ||
+                        InternalPage.isHomeDocument(view?.url, logicalUrlOf(id))
                     title?.takeIf { !isHomePage }?.let { t ->
                         updateTab(id) { it.copy(title = t) }
                     }
@@ -2302,13 +2223,12 @@ class WebTabManager(private val context: Context) {
                     clearUserScriptMenus(id)
                     // 控制台错误属于旧文档，新页从零开始记。
                     clearConsoleErrors(id)
-                    // 内置主页与阅读视图都是用 loadDataWithBaseURL 加载的，
-                    // WebView 回调回来的是 baseUrl（HomePage.BASE_URL /
-                    // ReaderPage.BASE_URL）而不是逻辑地址（ling://home /
-                    // ling://reader）。这里必须挡住这次回写，否则：
-                    //   1. TabState.url 被改写成 baseUrl，主页与阅读视图的
-                    //      识别（以及 ensureHomeRendered 的过滤）会全部失效；
-                    //   2. canGoBack/canGoForward 被重置，返回键会闪一下。
+                    // 内部页在 WebView 里的地址都不是逻辑地址：
+                    //  - 主页是一个 about:blank 占位（见 [loadHome]）；
+                    //  - 阅读视图是 loadDataWithBaseURL，回调报回来的是
+                    //    ReaderPage.BASE_URL（reload 后是 `data:` 形式）。
+                    // 这里必须挡住这次回写，否则 TabState.url 会被改成
+                    // about:blank / baseUrl，主页识别、地址栏与返回键全部失效。
                     //
                     // 自定义协议（zhihu:// 等）同样不写回：它已经被
                     // shouldOverrideUrlLoading 交给系统应用，页面并没有真的
@@ -2316,15 +2236,23 @@ class WebTabManager(private val context: Context) {
                     // 打不开的地址，退出阅读模式时还会被回填给 WebView，
                     // 直接触发 ERR_UNKNOWN_URL_SCHEME。
                     //
-                    // ⚠️ 判据必须用 [InternalPage.isInternal]，不能只看 baseUrl：
-                    // reload（刷新 / 渲染进程重建）后回调报回来的是一长串
-                    // `data:text/html;base64,…`（见 [InternalPage.isDataReloadForm]），
-                    // 只看 baseUrl 会把它当成普通网页写进 TabState.url —— 地址栏
-                    // 显示那一长串 base64，主页也不再被认作主页（背景层停画、发白）。
-                    // 传入当前标签的逻辑地址，以便区分是主页还是阅读视图的 data 形式。
+                    // ⚠️ 阅读视图的判据必须用 [InternalPage.isInternal]，不能只看
+                    // baseUrl：reload（刷新 / 渲染进程重建）后回调报回来的是一长串
+                    // `data:text/html;base64,…`（见 [InternalPage.isDataReloadForm]）。
+                    // 传入当前标签的逻辑地址，才能区分它是阅读视图的 data 形式。
                     val currentUrl = logicalUrlOf(id)
-                    val isInternal = InternalPage.isInternal(url, currentUrl)
-                    val isHome = InternalPage.isHomeDocument(url, currentUrl)
+                    val isPlaceholder = isHomePlaceholder(id, url)
+                    // 落到主页占位时（首次进入或从网页按返回），WebView 自身可能
+                    // 还留着 [loadUrl] 设回去的不透明白底，必须重新透明，
+                    // 否则原生背景层被盖住。
+                    // 标记同时更新：about:blank 没有地址身份，夜间兜底 CSS 靠它拦
+                    // （见 LingWebView.injectDarkMode）。
+                    webViews[id]?.let { live ->
+                        live.isHomePlaceholderDocument = isPlaceholder
+                        if (isPlaceholder) live.setOpaqueBackground(false)
+                    }
+                    val isInternal = isPlaceholder || InternalPage.isInternal(url, currentUrl)
+                    val isHome = isPlaceholder || InternalPage.isHomeDocument(url, currentUrl)
                     val keep = isInternal || !isNavigable(url)
                     updateTab(id) { tab ->
                         // 三种情况分开处理，不能简单"keep 就保留旧 url"：
@@ -2347,23 +2275,29 @@ class WebTabManager(private val context: Context) {
                             isLoading = !isInternal,
                             errorText = null,
                             // 主页是历史起点：任何一次回调都不能把返回键点亮。
-                            // loadDataWithBaseURL 每次调用都会往历史栈压条目，
-                            // 之后 onPageStarted/Finished 读到 wv.canGoBack() 是 true，
-                            // 会覆盖掉 loadHome/loadHomeOrRefresh 写下的 false ——
-                            // 这里显式再挡一次，保证"停在主页 ⟺ 不可返回"始终成立。
+                            // about:blank 占位文档本身在历史里，若照抄
+                            // wv.canGoBack() 会让「停在主页却有返回键」出现。
                             canGoBack = if (isHome) false else canGoBack(),
                             canGoForward = canGoForward(),
                         )
                     }
                 },
                 onPageFinished = { url, title ->
-                    // 阅读视图与主页同理：它在状态里的 url 是逻辑地址 ling://reader，
-                    // 不能让回调把它改写成 ReaderPage.BASE_URL。
-                    // 自定义协议同样不写回（原因见 onPageStarted）。
-                    // reload 后的 data: 形式同样按逻辑地址归一（见 onPageStarted 说明）。
+                    // 内部页的地址归一化同 onPageStarted：主页是 about:blank 占位，
+                    // 阅读视图是 baseUrl / reload 后的 data: 形式，都不能原样写回。
                     val currentUrl = logicalUrlOf(id)
-                    val isInternal = InternalPage.isInternal(url, currentUrl)
-                    val isHome = InternalPage.isHomeDocument(url, currentUrl)
+                    val isPlaceholder = isHomePlaceholder(id, url)
+                    // 落到主页占位时（首次进入或从网页按返回），WebView 自身可能
+                    // 还留着 [loadUrl] 设回去的不透明白底，必须重新透明，
+                    // 否则原生背景层被盖住。
+                    // 标记同时更新：about:blank 没有地址身份，夜间兜底 CSS 靠它拦
+                    // （见 LingWebView.injectDarkMode）。
+                    webViews[id]?.let { live ->
+                        live.isHomePlaceholderDocument = isPlaceholder
+                        if (isPlaceholder) live.setOpaqueBackground(false)
+                    }
+                    val isInternal = isPlaceholder || InternalPage.isInternal(url, currentUrl)
+                    val isHome = isPlaceholder || InternalPage.isHomeDocument(url, currentUrl)
                     val keep = isInternal || !isNavigable(url)
                     updateTab(id) {
                         it.copy(
@@ -2382,23 +2316,13 @@ class WebTabManager(private val context: Context) {
                             canGoForward = canGoForward(),
                         )
                     }
-                    // 内部页（主页 / 阅读视图）反过来：文档就绪后要按**当前**配色
-                    // 重新着色一次。它们的颜色是"烘"进 HTML 字符串里的，任何一次
-                    // 文档重建只要没经过 applyHomeTheme，页面就停在烘死时的旧配色 ——
-                    // 地址栏刷新（reload 重放同一份 data URL）、渲染进程被系统回收后
-                    // 重建、历史前进/后退到旧条目都会走到这里。
-                    // 原地刷新只改 :root 上的 CSS 变量，不触发导航、不压历史。
-                    if (isInternal) {
-                        // 主页的 WebView 底必须保持透明：背景由原生层供色
-                        // （见 HomeBackgroundLayer）。若上一页是普通网页，WebView 底
-                        // 已被 loadUrl 设回不透明白色，这里必须重置，否则原生背景层
-                        // 会被白底盖住 —— 表现为"从网页退回主页后背景发白"。
-                        // 阅读视图自带不透明底色（renderReader 设的），保持原样即可。
-                        if (isHome) wv.setOpaqueBackground(false)
-                        wv.evaluateJavascript(
-                            if (isHome) homeThemeJs() else readerThemeJs(),
-                            null,
-                        )
+                    // 阅读视图的颜色是"烘"进 HTML 字符串里的，任何一次文档重建
+                    // （reload 重放 data URL、渲染进程被回收后重建、历史前进/后退
+                    // 到旧条目）都会停在烘死时的旧配色。原地改 :root 的 CSS 变量
+                    // 既不动滚动位置，也不压历史。
+                    // 主页已改为 Compose 渲染，不存在"补色"这回事。
+                    if (isInternal && !isHome) {
+                        wv.evaluateJavascript(readerThemeJs(), null)
                     }
 
                     // 强制夜间模式的 CSS 兜底必须在页面加载**完成后**注入，
@@ -2431,7 +2355,9 @@ class WebTabManager(private val context: Context) {
                 onProgress = { p -> updateTab(id) { it.copy(progress = p) } },
                 onPageVisible = { url ->
                     // 首帧已提交：document-end 的注入点。内部页不注入。
-                    if (!InternalPage.isInternal(url, logicalUrlOf(id))) {
+                    if (!isHomePlaceholder(id, url) &&
+                        !InternalPage.isInternal(url, logicalUrlOf(id))
+                    ) {
                         injectUserScripts(id, wv, url, ScriptRunAt.END)
                     }
                 },
@@ -2488,8 +2414,6 @@ class WebTabManager(private val context: Context) {
                     handleSafeBrowsingHit(id, url, mainFrame, threatType, callback)
                 },
                 onExternalScheme = { uri -> onExternalUri?.invoke(uri) ?: false },
-                // 主页搜索框：只把查询串转出去，判定交给 UI 层（UrlUtils + 搜索引擎）
-                onInternalSearch = { query -> onSearchRequested?.invoke(query) },
                 // `.user.js` 以附件形式下发时不会走 shouldOverrideUrlLoading，
                 // 而是落到下载监听里：这里同样交给安装确认，而不是当普通文件下载。
                 onUserScriptLink = { url -> this@WebTabManager.onUserScriptLink?.invoke(url) },
@@ -2577,6 +2501,9 @@ class WebTabManager(private val context: Context) {
         while (webViews.size > MAX_WEBVIEWS) {
             val victim = webViews.keys.firstOrNull { it != _activeId.value } ?: return
             webViews.remove(victim)?.let { wv ->
+                // 实例销毁后主页占位身份一并失效：重建出来的 WebView 是空白的，
+                // 若集合里还留着这个 id，它自己导航到 about:blank 就会被误认成主页。
+                homePlaceholderTabs.remove(victim)
                 (wv.parent as? FrameLayout)?.removeView(wv)
                 wv.destroy()
             }
@@ -2591,28 +2518,36 @@ class WebTabManager(private val context: Context) {
 
     private fun syncNavState(id: String) {
         val wv = webViews[id] ?: return
-        // ⚠️ 主页/阅读视图的 `wv.url` 是 loadDataWithBaseURL 的 **baseUrl**（reload 后
-        // 还会变成一长串 `data:text/html;base64,…`），不是写进 TabState 的逻辑地址。
+        // ⚠️ 主页的 `wv.url` 是占位文档 `about:blank`（见 [loadHome]），阅读视图的
+        // `wv.url` 是 loadDataWithBaseURL 的 **baseUrl**（reload 后还会变成一长串
+        // `data:text/html;base64,…`），都不是写进 TabState 的逻辑地址。
         // 原样写回会让同一个页面在状态里出现两种 url 值，会话快照里还会存下
-        // https://home.ling.invalid/ 这种永远解析不了的假地址 ——
-        // 所有"把实时地址写回状态"的地方都先过 InternalPage 归一化，并把**当前标签
-        // 的逻辑地址**作为线索传进去：reload 后的 data: 形式要靠它才分得清是主页
-        // 还是阅读视图（也就才能写回正确的逻辑地址，而不是丢掉线索原样写回 base64）。
+        // https://reader.ling.invalid/ 这种永远解析不了的假地址 ——
+        // 所有"把实时地址写回状态"的地方都先归一化，并把**当前标签的逻辑地址**
+        // 作为线索传进去：reload 后的 data: 形式要靠它才分得清是阅读视图
+        // （也就才能写回正确的逻辑地址，而不是丢掉线索原样写回 base64）。
         val live = wv.url?.trim().orEmpty()
         updateTab(id) { tab ->
+            val placeholder = isHomePlaceholder(id, live)
+            val isInternal = placeholder || InternalPage.isInternal(live, tab.url)
             tab.copy(
-                url = InternalPage.logicalUrl(live, tab.url) ?: tab.url,
+                url = if (placeholder) HomePage.URL
+                else InternalPage.logicalUrl(live, tab.url) ?: tab.url,
                 // 内部页的标题是**语义标题**（主页固定「主页」、阅读视图是文章标题）。
-                // 这里若照抄 wv.title，主页会被页面自己的 <title>翎</title> 覆盖掉，
-                // 在标签列表里变成"翎" —— 与 onReceivedTitle 的处理保持一致。
-                title = if (InternalPage.isInternal(live, tab.url)) {
+                // 这里若照抄 wv.title，主页会被占位文档的空标题覆盖掉 ——
+                // 与 onReceivedTitle 的处理保持一致。
+                title = if (isInternal) {
                     tab.title
                 } else {
                     wv.title?.takeIf { t -> t.isNotBlank() } ?: tab.title
                 },
                 // 主页是历史起点：切回主页标签时返回键同样必须不可用（与
                 // loadHome / 页面回调三处保持一致）。
-                canGoBack = if (InternalPage.isHomeDocument(live, tab.url)) false else wv.canGoBack(),
+                canGoBack = if (placeholder || InternalPage.isHomeDocument(live, tab.url)) {
+                    false
+                } else {
+                    wv.canGoBack()
+                },
                 canGoForward = wv.canGoForward(),
             )
         }
@@ -2657,6 +2592,15 @@ class WebTabManager(private val context: Context) {
     companion object {
         /** 同时存活的 WebView 实例上限。Via 这类轻量浏览器也维持类似的少量实例。 */
         private const val MAX_WEBVIEWS = 6
+
+        /**
+         * 主页占位文档的地址。
+         *
+         * 主页本身由 Compose 渲染，WebView 里只需一个空白文档：
+         * 它既是"主页"在历史里的那一帧（从第一个网页能按返回回到主页），
+         * 也负责在进入主页时丢弃上一页的文档（停掉媒体与定时器）。
+         */
+        private const val HOME_PLACEHOLDER_URL = "about:blank"
 
         /** 注入到页面的 GM 桥对象名（`window.LingGM`），与 [scriptWrapper] 里的垫片对应。 */
         private const val USER_SCRIPT_BRIDGE = "LingGM"

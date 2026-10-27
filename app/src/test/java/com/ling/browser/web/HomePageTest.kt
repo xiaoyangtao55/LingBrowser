@@ -1,29 +1,26 @@
 package com.ling.browser.web
 
-import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 内置主页的单元测试。
+ * 内置主页的地址判定。
  *
- * 这段逻辑修的是一个真实缺陷：早期版本把 `about:home` 直接交给 WebView，
+ * 主页内容已改为原生 Compose 渲染（见 `ui/screens/HomeScreen.kt`），
+ * 这里只剩「哪些地址算主页」这一条纯字符串规则。
+ *
+ * 这条规则曾被一个真实缺陷逼出来：早期版本把 `about:home` 直接交给 WebView，
  * 而 WebView 只认识 `about:blank`，于是 `onReceivedError` 被触发、主页白屏。
- * 现在主页由原生渲染，这里把「哪些 URL 算主页」的规则固化下来。
- *
- * 另外，主页内容已极简到**只有时钟 + 搜索框**（无 logo / 品牌标题 / 快捷入口），
- * 本文件也把这条约束固化下来 —— 免得日后又悄悄加回一堆元素。
  */
 class HomePageTest {
 
     @Test
     fun `主页地址被正确识别`() {
         assertTrue(HomePage.isHomeUrl(HomePage.URL))
-        assertTrue(HomePage.isHomeUrl("about:home"))
-        assertTrue(HomePage.isHomeUrl(""))
-        assertTrue(HomePage.isHomeUrl("   "))
+        assertTrue("兼容旧快照里的 about:home", HomePage.isHomeUrl("about:home"))
+        assertTrue("地址栏停在主页时是空的", HomePage.isHomeUrl(""))
+        assertTrue("纯空白也算空", HomePage.isHomeUrl("   "))
         assertTrue(HomePage.isHomeUrl(null))
     }
 
@@ -32,7 +29,7 @@ class HomePageTest {
         assertFalse(HomePage.isHomeUrl("https://example.com"))
         assertFalse(HomePage.isHomeUrl("http://ling://home"))
         assertFalse(HomePage.isHomeUrl("https://www.baidu.com"))
-        assertFalse(HomePage.isHomeUrl("about:blank"))
+        assertFalse("about:blank 是 WebView 的空白文档，不是主页", HomePage.isHomeUrl("about:blank"))
         assertFalse("大小写不同不算主页", HomePage.isHomeUrl("LING://HOME"))
         assertFalse("前缀相似但不是主页", HomePage.isHomeUrl("ling://homepage"))
     }
@@ -48,257 +45,8 @@ class HomePageTest {
     }
 
     @Test
-    fun `baseUrl 是 WebView 能识别的合法地址`() {
-        // loadDataWithBaseURL 的 baseUrl 会参与相对路径解析与同源判定，
-        // 传自定义 scheme 属于未定义行为，因此必须用标准 https。
-        assertTrue(
-            "baseUrl 必须是 https，实际: ${HomePage.BASE_URL}",
-            HomePage.BASE_URL.startsWith("https://"),
-        )
-        assertTrue("baseUrl 应以 / 结尾以便解析相对路径", HomePage.BASE_URL.endsWith("/"))
-    }
-
-    @Test
-    fun `baseUrl 用保留 TLD 保证不可解析`() {
-        // .invalid 是 RFC 2606 保留域，永远不解析；
-        // .local 是 mDNS 保留域，在某些网络下可能真的被解析，故不用。
-        assertTrue(
-            "baseUrl 应使用 .invalid 保留域，实际: ${HomePage.BASE_URL}",
-            HomePage.BASE_URL.contains(".invalid"),
-        )
-        assertFalse("不应使用 .local（mDNS 可能解析）", HomePage.BASE_URL.contains(".local/"))
-    }
-
-    @Test
-    fun `baseUrl 也被识别为主页`() {
-        // 关键：WebView 回调回来的 URL 是 baseUrl（不是 ling://home）。
-        // 若这里不判定为主页，地址栏会把内部地址暴露给用户，
-        // 且 TabState.url 会被回调覆写掉。
-        assertTrue(HomePage.isHomeUrl(HomePage.BASE_URL))
-    }
-
-    @Test
-    fun `逻辑地址与基地址是两个不同的值`() {
-        // 两者混用会让同一页面产生两种 url，破坏 StateFlow 的结构化去重。
-        assertFalse(
-            "URL 与 BASE_URL 必须分开",
-            HomePage.URL == HomePage.BASE_URL,
-        )
-        assertTrue("逻辑地址仍是 ling://", HomePage.URL.startsWith("ling://"))
-    }
-
-    // ------------------------------------------------------------ HTML 结构
-
-    /** 用一组固定配色生成主页 HTML，供结构类断言复用。 */
-    private fun sampleHtml(
-        dark: Boolean = false,
-        clock: String = "",
-    ) = HomePage.html(
-        onBackground = "#1C1B1F",
-        primaryContainer = "#A8F2CB",
-        onPrimaryContainer = "#00210F",
-        dark = dark,
-        clock = clock,
-    )
-
-    @Test
-    fun `生成的 HTML 是完整文档`() {
-        val html = sampleHtml()
-        assertTrue(html.startsWith("<!DOCTYPE html>"))
-        assertTrue(html.contains("</html>"))
-        assertTrue(html.contains("charset=\"utf-8\""))
-        assertTrue("应声明 viewport", html.contains("viewport"))
-    }
-
-    @Test
-    fun `主页只保留时钟与搜索框`() {
-        // 极简重构的核心约束：主页只该有「时间 + 搜索框」两样东西。
-        // 这条用例就是防止日后又把 logo / 品牌标题 / 快捷入口加回来。
-        val html = sampleHtml()
-        assertTrue("应有时钟节点", html.contains("id=\"${HomePage.CLOCK_ID}\""))
-        assertTrue("应有搜索框", html.contains("class=\"search\""))
-        assertFalse("不应再有品牌标题", html.contains("<h1"))
-        assertFalse("不应再有品牌图标", html.contains("class=\"mark\""))
-        assertFalse("不应再有快捷入口区块", html.contains("class=\"links\""))
-    }
-
-    @Test
-    fun `时钟文本被注入到主页`() {
-        val html = sampleHtml(clock = "09:41")
-        assertTrue("初始时间应写进时钟节点", html.contains(">09:41<"))
-    }
-
-    @Test
-    fun `主页背景恒定透明`() {
-        // 背景一律由原生背景层（HomeBackgroundLayer）在 WebView 之下供色，
-        // 纯色档与自定义图片档走同一条路径：页面若自绘背景，就会和 WebView
-        // 那段异步首帧的颜色对不上，屏幕上闪一下（见 HomePage.TRANSPARENT_BG）。
-        val html = sampleHtml()
-        assertTrue("--bg 应为 transparent", html.contains("--bg: ${HomePage.TRANSPARENT_BG}"))
-        assertFalse("不应再把实色当页面背景", html.contains("--bg: #"))
-    }
-
-    @Test
-    fun `配色被注入到 CSS 变量`() {
-        val html = HomePage.html(
-            onBackground = "#ABCDEF",
-            primaryContainer = "#A8F2CB",
-            onPrimaryContainer = "#00210F",
-            dark = true,
-        )
-        assertTrue("前景色应注入", html.contains("--fg: #ABCDEF"))
-        assertTrue("容器色应注入", html.contains("--pc: #A8F2CB"))
-        assertTrue("容器文字色应注入", html.contains("--on-pc: #00210F"))
-    }
-
-    @Test
-    fun `每个 CSS 变量都被真正使用`() {
-        // 定义了却没人用，说明主题色没生效（曾经 --primary 就是这样漏掉的）
-        val html = sampleHtml()
-        val defined = Regex("(--[\\w-]+)\\s*:").findAll(html).map { it.groupValues[1] }.toSet()
-        val used = Regex("var\\((--[\\w-]+)").findAll(html).map { it.groupValues[1] }.toSet()
-        assertEquals("有变量定义了但没被使用", emptySet<String>(), defined - used)
-        assertEquals("使用了未定义的变量", emptySet<String>(), used - defined)
-    }
-
-    @Test
-    fun `SVG 不在表现属性里使用 CSS 变量`() {
-        // stroke="var(--x)" 作为表现属性是非法的，浏览器不会解析，
-        // 图标会变成透明 —— 必须通过 CSS 规则设置。
-        sampleHtml().let { html ->
-            Regex("<(?:svg|path|circle|rect|line|polyline|g)\\b[^>]*>")
-                .findAll(html)
-                .forEach { m ->
-                    assertFalse(
-                        "SVG 表现属性里不能出现 var()：${m.value.take(70)}",
-                        m.value.contains("var(--"),
-                    )
-                }
-        }
-    }
-
-    @Test
-    fun `主页不引用任何外部资源`() {
-        // 离线可用是硬要求：不能出现 http(s) 形式的资源引用
-        val html = sampleHtml()
-        assertFalse("不应有 <link> 外链", html.contains("<link"))
-        assertFalse("不应有 <script src>", html.contains("<script src"))
-        assertFalse("不应有远程图片", html.contains("<img"))
-        assertFalse("不应内嵌 <script>（主页是零脚本 HTML）", html.contains("<script"))
-    }
-
-    @Test
-    fun `深色模式写入 color-scheme`() {
-        // 回归用例：早期版本把这段逻辑写成 prefersDarkCss() 函数却从未调用，
-        // 于是 dark 参数完全不起作用，深色模式下滚动条仍是白的。
-        // 现在直接内联到 :root，这里断言它真的出现在了 HTML 里。
-        assertTrue(
-            "深色模式应写入 color-scheme: dark",
-            sampleHtml(dark = true).contains("color-scheme: dark"),
-        )
-        val light = sampleHtml(dark = false)
-        assertTrue("浅色模式应写入 color-scheme: light", light.contains("color-scheme: light"))
-        assertFalse("浅色不应出现 dark 声明", light.contains("color-scheme: dark"))
-    }
-
-    @Test
-    fun `深色配色确实注入到 CSS 变量`() {
-        // 保证"跟随夜间模式"不只是 color-scheme：正文与搜索框颜色也要跟着换，
-        // 否则页面仍是浅色文字，只是滚动条变深了而已。
-        // 背景不在这里断言 —— 主页背景恒透明，由原生背景层跟着主题换色。
-        val html = HomePage.html(
-            onBackground = "#E1E3DF",
-            primaryContainer = "#005231", onPrimaryContainer = "#A8F2CB",
-            dark = true,
-        )
-        assertTrue("文字色应注入 --fg", html.contains("--fg: #E1E3DF"))
-        assertTrue("搜索框底色应注入 --pc", html.contains("--pc: #005231"))
-    }
-
-    @Test
-    fun `body 不固定高度以免内容溢出时顶部被裁掉`() {
-        val html = sampleHtml()
-        // height:100% + flex 居中：内容比视口高时（横屏/分屏/小屏 + 大号时钟）
-        // 溢出的那部分会被顶到滚动区**上方**，滚不上去 —— 时钟与搜索框被裁掉。
-        assertTrue("body 应使用 min-height: 100%", html.contains("min-height: 100%"))
-        assertFalse(
-            "body 不应固定 height:100%",
-            Regex("""body\s*\{[^}]*?(?<!min-)height:\s*100%""").containsMatchIn(html),
-        )
-    }
-
-    // ---- 原地刷新（themeUpdateJs / clockJs）----
-
-    @Test
-    fun `themeUpdateJs 写入主题变量与 color-scheme`() {
-        val js = HomePage.themeUpdateJs(
-            background = "#111412", onBackground = "#E1E3DF",
-            primary = "#7EDBAE", onPrimary = "#00391F",
-            primaryContainer = "#005231", onPrimaryContainer = "#A8F2CB",
-            dark = true,
-        )
-        assertTrue("应设置 --bg", js.contains("--bg', '#111412'"))
-        assertTrue("应设置 --fg", js.contains("--fg', '#E1E3DF'"))
-        assertTrue("应设置 colorScheme", js.contains("colorScheme = 'dark'"))
-
-        val light = HomePage.themeUpdateJs(
-            background = "#FFF", onBackground = "#000", primary = "#1B6C4B",
-            onPrimary = "#FFF", primaryContainer = "#A8F2CB",
-            onPrimaryContainer = "#00210F", dark = false,
-        )
-        assertTrue("浅色 colorScheme", light.contains("colorScheme = 'light'"))
-    }
-
-    @Test
-    fun `themeUpdateJs 不再为快捷入口改 DOM 结构`() {
-        // 主页已无快捷入口，主题脚本只该改 CSS 变量，
-        // 不能再出现 innerHTML 之类的结构改动（那会误伤阅读视图正文）。
-        val js = HomePage.themeUpdateJs(
-            background = "#FFF", onBackground = "#000", primary = "#1B6C4B",
-            onPrimary = "#FFF", primaryContainer = "#A8F2CB",
-            onPrimaryContainer = "#00210F", dark = false,
-        )
-        assertFalse("不应改动 DOM 结构", js.contains("innerHTML"))
-    }
-
-    @Test
-    fun `clockJs 原地更新时钟文本`() {
-        // 主页是零脚本 HTML，时间只能由原生每分钟注入回这个文本节点。
-        val js = HomePage.clockJs("09:41")
-        assertTrue("应通过 id 定位时钟节点", js.contains("getElementById('${HomePage.CLOCK_ID}')"))
-        assertTrue("应写入新的时间文本", js.contains("09:41"))
-        assertTrue("只改文本节点，不碰结构", js.contains("textContent"))
-    }
-
-    // ---- 主页搜索框 ----
-
-    @Test
-    fun `搜索框提交的地址能解析出查询串`() {
-        assertEquals("abc", HomePage.searchQueryOf("ling://search?q=abc"))
-        // 与常量保持一致（HTML 里的 form action 由它生成，见 check_home_html.py 的漂移检查）
-        assertEquals("abc", HomePage.searchQueryOf("${HomePage.SEARCH_URL}?q=abc"))
-    }
-
-    @Test
-    fun `搜索串里的表单编码只解码一次`() {
-        // 表单编码：中文是 %XX、空格是 +。不解码会被二次编码 ——
-        // 搜"中文"会变成搜 "%E4%B8%AD%E6%96%87"，一个结果都没有。
-        assertEquals("中文", HomePage.searchQueryOf("ling://search?q=%E4%B8%AD%E6%96%87"))
-        assertEquals("a b", HomePage.searchQueryOf("ling://search?q=a+b"))
-    }
-
-    @Test
-    fun `只取 q 参数，忽略其它参数`() {
-        assertEquals("x", HomePage.searchQueryOf("ling://search?q=x&lang=zh"))
-    }
-
-    @Test
-    fun `空查询与不是搜索地址都返回 null`() {
-        assertNull("没有值", HomePage.searchQueryOf("ling://search?q="))
-        assertNull("纯空白也算空", HomePage.searchQueryOf("ling://search?q=%20"))
-        assertNull("没有 q 参数", HomePage.searchQueryOf("ling://search?lang=zh"))
-        assertNull("主页地址不是搜索", HomePage.searchQueryOf(HomePage.URL))
-        assertNull("普通网址不是搜索", HomePage.searchQueryOf("https://example.com/?q=x"))
-        assertNull(null)
+    fun `主页地址与阅读视图地址不同`() {
+        // 两者若相同，主页会被当成阅读视图，退出逻辑会错乱
+        assertFalse(HomePage.URL == ReaderPage.URL)
     }
 }

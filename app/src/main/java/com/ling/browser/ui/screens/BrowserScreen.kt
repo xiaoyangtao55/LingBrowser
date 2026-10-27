@@ -115,7 +115,6 @@ import com.ling.browser.web.JsDialogRequest
 import com.ling.browser.web.SafeBrowsingPrompt
 import com.ling.browser.web.WebAuthRequest
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -129,7 +128,7 @@ import kotlinx.coroutines.withContext
  *  - 地址栏右侧常驻「刷新/停止」——最高频操作，放在触手可及处；
  *  - 底部工具栏只留 5 个动作，低频项收进「更多」；「更多」与「标签页」
  *    都以 BottomSheet（[ModalBottomSheet]）形式自底部升起；
- *  - 内置主页由 WebView 直接渲染（见 [com.ling.browser.web.HomePage]），不再是覆盖层，
+ *  - 内置主页由 Compose 渲染（见 [HomeScreen]），WebView 里留一个 about:blank 占位，
  *    因此主页也能正常参与前进/后退历史。
  */
 @OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
@@ -164,8 +163,8 @@ fun BrowserScreen(
     val activeTab = tabs.firstOrNull { it.id == activeId }
 
     // 主页原生背景层是否**绘制**：只要当前标签停在内置主页就画。
-    // 纯色档画主题背景色、自定义图片档在它之上叠照片与遮罩 —— 主页 HTML 与
-    // WebView 自身背景都是透明的，主页的背景颜色全部由这一层给。
+    // 纯色档画主题背景色、自定义图片档在它之上叠照片与遮罩 —— 主页期间
+    // WebView 自身背景是透明的，主页的背景颜色全部由这一层给。
     // 切到普通网页后必须停止绘制，否则网页自身的透明区域会露出下面这层色。
     // （组件本身仍无条件调用，见下面 Box 里的说明。）
     val activeUrl = activeTab?.url
@@ -595,19 +594,14 @@ fun BrowserScreen(
         viewModel.refreshBookmarkState()
     }
 
-    // 把 Material You 配色同步给内置主页，并重绘正在显示的主页。
-    // 这样切换深浅色后，主页会立即跟着变。
+    // 把 Material You 配色同步给阅读视图。
+    // 主页已改为 Compose 渲染（见 HomeScreen），颜色直接读 MaterialTheme，
+    // 不再需要这一路同步；阅读视图仍是 HTML，主题色只能"原生算好 → 注入 CSS 变量"。
     val colorScheme = MaterialTheme.colorScheme
-    // 界面当前的明暗：既喂给主页配色，也当作"网页要不要重算暗化"的触发器。
+    // 界面当前的明暗：当作"网页要不要重算暗化"的触发器。
     val uiDark = colorScheme.background.luminance() < 0.5f
-    // settings.homeBackground / homeBackgroundImageUri 也作为 key：背景模式
-    // （纯色 ↔ 自定义图片）变化时，原生背景层虽然会跟着 settings 重组，
-    // 但 WebView 自身的透明度需要由 applyHomeTheme → ensureHomeRendered 重新保障
-    // （见 BrowserViewModel.applyHomeTheme 的说明）。这一步不经过配色变化，
-    // 必须显式触发，否则切换后主页仍停在不透明白底、原生背景层被盖住，
-    // 表现为"改了背景模式要手动刷新才生效"。
-    LaunchedEffect(colorScheme, settings.homeBackground, settings.homeBackgroundImageUri) {
-        viewModel.applyHomeTheme(
+    LaunchedEffect(colorScheme) {
+        viewModel.applyInternalColors(
             background = colorScheme.background,
             onBackground = colorScheme.onBackground,
             primary = colorScheme.primary,
@@ -618,20 +612,9 @@ fun BrowserScreen(
         )
     }
 
-    // 主页时钟：主页是**零脚本** HTML（见 tools/check_home_html.py 对 <script> 的禁令），
-    // 时间不会自己走，只能由原生侧每分钟把当前 HH:mm 注入回那个文本节点。
-    // 对齐到**下一个整分**再刷新，而不是固定 sleep 60s：后者会让显示的时间
-    // 比真实时间慢将近一整分钟（效果上等于时钟一直慢一拍）。
-    LaunchedEffect(Unit) {
-        while (true) {
-            delay(CLOCK_PERIOD_MS - System.currentTimeMillis() % CLOCK_PERIOD_MS)
-            viewModel.updateHomeClock()
-        }
-    }
-
     // 「跟随系统」时，运行中切换系统明暗**不经过设置流**（settings.collect 不触发），
     // 但界面会跟着系统变 —— 网页侧的暗化必须在这里补算一次，否则会出现
-    // "界面已经变深、网页还是亮的"。主页/阅读视图由上面的配色同步覆盖。
+    // "界面已经变深、网页还是亮的"。阅读视图由上面的配色同步覆盖。
     LaunchedEffect(uiDark) {
         viewModel.refreshWebDarkMode()
     }
@@ -710,7 +693,7 @@ fun BrowserScreen(
         ) {
             // 原生背景层：画在 WebView **之下**，主页的背景颜色全由它给
             // —— 纯色档画主题背景色，自定义图片档在它之上叠照片与顶部遮罩。
-            // 主页 HTML 与 WebView 自身背景都是透明的（见 WebTabManager.loadHome），
+            // 主页期间 WebView 自身背景是透明的（见 WebTabManager.loadHome），
             // 因此能透出这一层。
             //
             // ⚠️ 必须**无条件**调用、用 visible 参数控制是否绘制，不能写成
@@ -726,8 +709,8 @@ fun BrowserScreen(
             )
 
             // WebView 宿主始终挂载：错误页以覆盖层的形式盖在上面。
-            // 主页现在由 WebView 自己渲染（见 HomePage），不再是覆盖层 ——
-            // 这样主页也能正常参与前进/后退历史。
+            // 主页前景（HomeScreen）也是覆盖层 —— WebView 里只有 about:blank 占位，
+            // 但那个占位正是主页那一帧历史记录，返回键因此仍能回到主页。
             //
             // 标签页面板是**半透明叠加层**（见 TabsScreen），背后的 WebView
             // 必须继续渲染，否则面板后面就是空白。
@@ -735,6 +718,16 @@ fun BrowserScreen(
                 factory = { host },
                 modifier = Modifier.fillMaxSize(),
             )
+
+            // 主页前景：时钟 + 搜索框。WebView 里只是 about:blank 占位
+            // （见 WebTabManager.loadHome），真正的界面在这里。
+            // 只在**内置主页**时挂载（自定义主页是普通网页，照常显示 WebView）。
+            if (homeBackgroundVisible) {
+                HomeScreen(
+                    onSearch = viewModel::submitAddress,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
 
             activeTab?.errorText?.let { err ->
                 ErrorScreen(
@@ -1606,14 +1599,6 @@ fun BrowserScreen(
         }
     }
 }
-
-/**
- * 主页时钟的刷新周期（毫秒）。
- *
- * 一分钟一次：主页时钟只显示 `HH:mm`，粒度就是分钟，再密没有意义、
- * 反而白白唤醒 WebView 执行一次 JS。
- */
-private const val CLOCK_PERIOD_MS = 60_000L
 
 /**
  * 授权框里的来源标签。

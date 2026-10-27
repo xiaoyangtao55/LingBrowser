@@ -1,7 +1,11 @@
 package com.ling.browser.web
 
 /**
- * 「内部页」——由 `loadDataWithBaseURL` 原生渲染的自包含页面：内置主页与阅读视图。
+ * 「内部页」——属于 App 自己、不参与网页那一套逻辑的页面：内置主页与阅读视图。
+ *
+ * 主页由 Compose 渲染，WebView 里只有一个 `about:blank` 占位（见
+ * `WebTabManager.homePlaceholderTabs`）；阅读视图则是 `loadDataWithBaseURL`
+ * 渲染的自包含页面。
  *
  * 这个判定决定了「要不要对当前文档做网页层面的处理」，散在各处时任何一处漏判
  * 都是**静默失效**（颜色被反色、地址栏残留旧网址、把合成地址写进历史）。
@@ -9,13 +13,13 @@ package com.ling.browser.web
  * [isInternal] / [isHomeDocument] / [isReaderDocument] / [logicalUrl] 都从它派生 ——
  * 地址形态与线索匹配只写一次，新增内部页时只动 [typeOf]。
  *
- * 还有一层必须一起处理的现实：WebView 对 `loadDataWithBaseURL` 渲染的页面在
+ * 还有一层必须一起处理的现实：WebView 对 `loadDataWithBaseURL` 渲染的阅读视图在
  * **reload**（地址栏刷新、渲染进程被系统回收后重建、历史前进/后退重放）时，
  * 回调与 `getUrl()` 报回来的不再是 baseUrl，而是
  * `data:text/html;charset=utf-8;base64,…`（见 [isDataReloadForm]）。这时地址串本身
  * 分不出主页还是阅读视图，必须借用当前标签的逻辑地址 [logicalUrl] 当线索。
- * 只看地址串的话，刷新一次主页就"不再是内部页"了 —— 症状是原生背景层停画、
- * 叠加夜间兜底反色 CSS 被注入，整页变成一片白。
+ * 只看地址串的话，刷新一次阅读视图就"不再是内部页"了 —— 症状是叠加夜间兜底
+ * 反色 CSS 被注入，深色正文被反成一片白。
  *
  * "是不是主页"在本 App 里有三种语义，用途不同、别混用：
  *  - **地址栏语义**（[HomePage.isHomeUrl]）：null / 空串也算主页 —— 地址栏停在主页上

@@ -421,45 +421,36 @@ if "val showBrowser: StateFlow<Int>" in vm and \
 else:
     bad("外部链接进来时界面可能停在二级页 —— 网页开了，屏幕上却还是设置页")
 
-# ---------- 8. 主页搜索框 ----------
-print("\n8. 主页搜索框（网页提交 → 原生判定 → 导航）")
-home_page = read(f"{SRC}/web/HomePage.kt")
-client = read(f"{SRC}/web/LingWebViewClient.kt")
+# ---------- 8. 主页（原生 Compose） ----------
+print("\n8. 主页（Compose 时钟 + 搜索框）")
+home_screen = read(f"{SRC}/ui/screens/HomeScreen.kt")
 
-# 拦截必须**先于**协议判定：ling:// 在 NAVIGABLE 里算"可加载"，
-# 先走 shouldTakeOver 会返回 false → 交给 WebView → ERR_UNKNOWN_URL_SCHEME
-# （用 find 而不是 index：符号整个不见了也要报错，而不是抛异常中断脚本）
-search_at = client.find("HomePage.searchQueryOf")
-takeover_at = client.find("UrlScheme.shouldTakeOver")
-if 0 <= search_at < takeover_at and \
-        re.search(r"private fun handleUri[\s\S]{0,500}?HomePage\.searchQueryOf", client) and \
-        re.search(r"HomePage\.searchQueryOf[\s\S]{0,220}?return true", client):
-    ok("主页搜索框在协议判定之前被拦下（不会被 WebView 揽走）")
+# 主页必须由 Compose 渲染，且提交复用地址栏那套「网址还是搜索词」判定：
+# HomeScreen 只把输入交出去，BrowserScreen 接到 viewModel::submitAddress。
+if re.search(r"fun HomeScreen\([\s\S]{0,400}?onSearch: \(String\) -> Unit", home_screen) and \
+        re.search(r"HomeScreen\([\s\S]{0,200}?onSearch = viewModel::submitAddress", browser_screen):
+    ok("主页搜索框提交接到 submitAddress（与地址栏同一套判定）")
 else:
-    bad("ling://search 会漏给 WebView（或没拦）—— 点搜索是白屏")
+    bad("主页搜索框没有接到 submitAddress —— 提交后没人处理，或又写了一份判定")
 
-if re.search(r"fun searchQueryOf\(url: String\?\): String\?", home_page) and \
-        "URLDecoder.decode" in home_page:
-    ok("查询串解析在 Kotlin 侧（纯字符串、可单测），并按表单编码解码一次")
-else:
-    bad("缺少 searchQueryOf 或没有解码 —— 中文搜索会被二次编码")
-
-if re.search(r"var onSearchRequested: \(\(query: String\) -> Unit\)\?", mgr) and \
-        re.search(r"onInternalSearch = \{ query -> onSearchRequested\?\.invoke\(query\) \}", mgr):
-    ok("WebTabManager 把搜索回调接上了 WebViewClient")
-else:
-    bad("搜索回调没有接线 —— 网页提交后没人处理")
-
-if re.search(
-    r"tabManager\.onSearchRequested = \{ query ->[\s\S]{0,220}?searchTarget\(query\)",
-    vm,
-) and re.search(
-    r"fun searchTarget\([\s\S]{0,200}?UrlUtils\.toUrl\(",
-    vm,
-):
-    ok("判定网址/搜索词复用 UrlUtils（与地址栏同一套，不在网页里重写）")
+if re.search(r"tabManager\.submitAddress|fun submitAddress\([\s\S]{0,400}?searchTarget\(query\)", vm) and \
+        re.search(r"fun searchTarget\([\s\S]{0,200}?UrlUtils\.toUrl\(", vm):
+    ok("判定网址/搜索词复用 UrlUtils（不在页面里重写）")
 else:
     bad("搜索词判定没有复用 UrlUtils —— 又多了一份实现")
+
+# 时钟由 Compose 自己走：对齐到下一个整分，不能固定 sleep 60s（那样会一直慢一拍）。
+if "CLOCK_PERIOD_MS - System.currentTimeMillis() % CLOCK_PERIOD_MS" in home_screen:
+    ok("主页时钟对齐到下一个整分刷新（不会稳定慢一拍）")
+else:
+    bad("主页时钟没有对齐整分 —— 显示时间会明显不准")
+
+# 主页只在**内置主页**时挂载：自定义主页是普通网页，显示 WebView 即可。
+if "if (homeBackgroundVisible) {" in browser_screen and \
+        re.search(r"if \(homeBackgroundVisible\) \{[\s\S]{0,200}?HomeScreen\(", browser_screen):
+    ok("主页前景只在内置主页时挂载（自定义主页不受影响）")
+else:
+    bad("主页前景挂载条件不对 —— 自定义主页上会盖一层时钟与搜索框")
 
 # ---------- 9. 内部页的"对外地址"（收藏 / 会话快照） ----------
 print("\n9. 收藏与会话快照里的内部页地址")
@@ -493,7 +484,7 @@ if re.search(r"toSnapshot\(i, readerOriginalUrl\(tab\.id\)\)", mgr) and \
 else:
     bad("快照仍存合成的 ling://reader —— 重启恢复只会得到错误页")
 
-if re.search(r"if \(ReaderPage\.isReaderUrl\(url\)\) \{\s*\n\s*loadHome\(id, wv\)", mgr):
+if re.search(r"if \(ReaderPage\.isReaderUrl\(url\)\) \{\s*\n\s*loadHome\(id(?:, wv)?\)", mgr):
     ok("loadUrl 兜底：合成地址回主页，而不是交给 WebView 报错")
 else:
     bad("loadUrl 会把合成的 ling://reader 交给 WebView —— ERR_UNKNOWN_URL_SCHEME")

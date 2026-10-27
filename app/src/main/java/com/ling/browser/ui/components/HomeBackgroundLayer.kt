@@ -31,20 +31,16 @@ import kotlinx.coroutines.withContext
 /**
  * 内置主页的原生背景层。
  *
- * 移植自 OnyxBrowser 起始页的"背景层 + 前景层"分层思路，但落点不同：
- * Onyx 的起始页整页都是原生 Compose，前景（图标/搜索框/书签）是另一层；
- * 「翎」的主页是 WebView 渲染的 HTML，因此这里只提供**背景层**，画在 WebView
- * **之下**，并让主页 HTML 与 WebView 自身背景都透明（见
- * [com.ling.browser.web.HomePage.TRANSPARENT_BG]）来透出它。
+ * 主页前景（时钟 + 搜索框）由 [com.ling.browser.ui.screens.HomeScreen] 用 Compose 渲染，
+ * 背景则统一由本层供色：画在 WebView **之下**，主页期间 WebView 自身也是透明底
+ * （见 `WebTabManager.loadHome`），因此能透出这一层。
  *
  * 两档都由本层供色：
  *  - [HomeBackground.SOLID]：只画主题背景色；
  *  - [HomeBackground.CUSTOM]：在主题色打底之上叠用户选的照片，再加顶部遮罩。
  *
- * 为什么纯色档也走本层、而不是让主页 HTML 自绘背景：WebView 从"建出来"到
- * "HTML 首帧"之间有一段**异步**窗口，这段窗口期只能显示 WebView 自身的底。
- * 让主页一律透明、由本层供色（它跟着 Compose 的 colorScheme 走，与首帧同源），
- * 屏幕上就不会再出现"白底 → 主题色"的过渡帧。
+ * 为什么纯色档也走本层、而不是让主页前景自绘背景：本层跟着 Compose 的
+ * colorScheme 走，与首帧同源，屏幕上不会出现"白底 → 主题色"的过渡帧。
  *
  * 顶部遮罩：顶部最暗、到屏幕中线渐隐 —— 保证状态栏/地址栏文字在浅色背景
  * （亮照片）上也清晰可读，与 Onyx 起始页一致。只在有照片时画：纯色底上

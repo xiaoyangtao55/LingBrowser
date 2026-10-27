@@ -27,9 +27,8 @@ object ReaderPage {
     /**
      * 交给 `loadDataWithBaseURL` 的基地址。
      *
-     * 与 [HomePage.BASE_URL] 同理：必须是一个**确定合法**的地址，
-     * 自定义 scheme 会让相对路径解析与同源判定进入未定义行为。
-     * 用 `.invalid`（RFC 2606）保证永远不可解析。
+     * 必须是一个**确定合法**的地址，自定义 scheme 会让相对路径解析与同源判定
+     * 进入未定义行为。用 `.invalid`（RFC 2606）保证永远不可解析。
      */
     const val BASE_URL = "https://reader.ling.invalid/"
 
@@ -51,8 +50,7 @@ object ReaderPage {
      * 原地调整正文字号的 JS：只改 `:root` 上的 `--font-size`，不重导航。
      *
      * 为什么需要它：阅读视图也是 `loadDataWithBaseURL` 渲染的，**每次调用都会往
-     * WebView 历史里压入一个条目**（与主页同理，见 [HomePage.themeUpdateJs]）。
-     * 早先调字号走的是"用缓存正文重渲染"，于是：
+     * WebView 历史里压入一个条目**。早先调字号走的是"用缓存正文重渲染"，于是：
      *   - 反复调字号会让返回键在"同一篇文章的不同字号"之间来回；
      *   - 重渲染把**滚动位置拉回顶部** —— 读到一半调字号，位置全丢。
      * 排版本来就以 `--font-size` 为唯一来源（见 [html]），直接改这个变量即可：
@@ -65,6 +63,41 @@ object ReaderPage {
   r.style.setProperty('--font-size', '${fontPx}px');
 })();
     """.trimIndent()
+
+    /**
+     * 原地刷新阅读视图配色的 JS：只改 `:root` 上的 CSS 变量，不触发导航、不压历史。
+     *
+     * 阅读视图的颜色是"烘"进 HTML 字符串里的（见 [html]），而文档可能被重建
+     * （reload 重放 data URL、渲染进程回收后重建、历史前进/后退到旧条目）。
+     * 重渲染会让滚动位置回到顶部，所以配色变化与重建后的补色都走这一份脚本。
+     *
+     * 主页已改为原生 Compose 渲染，不再需要这份脚本；仍保留 `--primary` /
+     * `--on-primary` 是因为阅读视图的标题与链接在用。
+     */
+    internal fun themeUpdateJs(
+        background: String,
+        onBackground: String,
+        primary: String,
+        onPrimary: String,
+        primaryContainer: String,
+        onPrimaryContainer: String,
+        dark: Boolean,
+    ): String {
+        val scheme = if (dark) "dark" else "light"
+        return """
+(function () {
+  var r = document.documentElement;
+  if (!r) return;
+  r.style.setProperty('--bg', '$background');
+  r.style.setProperty('--fg', '$onBackground');
+  r.style.setProperty('--primary', '$primary');
+  r.style.setProperty('--on-primary', '$onPrimary');
+  r.style.setProperty('--pc', '$primaryContainer');
+  r.style.setProperty('--on-pc', '$onPrimaryContainer');
+  r.style.colorScheme = '$scheme';
+})();
+        """.trimIndent()
+    }
 
     /** HTML 转义。正文来自第三方网页，必须转义后再拼进模板。 */
     private fun escape(raw: String): String = raw

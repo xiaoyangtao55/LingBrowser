@@ -28,7 +28,7 @@
 | 从其它应用打开 | 别的 App「用翎打开链接」→ 直接打开该网页（当前标签在主页就复用它，否则新开标签）；**分享纯文本**则当作搜索词 |
 | 长按菜单 | 长按链接 → 新标签页打开 / 复制链接地址；长按图片 → 打开 / 新标签页打开 / 保存 / 复制图片地址；长按正文仍是系统的文字选择 |
 | 前进/后退/刷新/停止 | 刷新常驻在地址栏右侧；底部工具栏保留前进/后退/主页/标签页/更多 |
-| **内置主页** | `ling://home` 由原生渲染，**离线可用**；跟随 Material You 动态取色；**只有一个时钟 + 一个搜索框**（网址/搜索词自动判定，与地址栏同一套逻辑）；页面背景透明，由原生背景层（纯色 / 自定义图片）在 WebView 之下供色 —— 消除冷启动白帧 |
+| **内置主页** | `ling://home` 由 **Compose 原生渲染**（WebView 里只有 `about:blank` 占位，返回键仍能回到主页），**离线可用**；跟随 Material You 动态取色；**只有一个时钟 + 一个搜索框**（网址/搜索词自动判定，与地址栏同一套逻辑）；背景由原生背景层（纯色 / 自定义图片）供色 —— 消除冷启动白帧 |
 
 ### 页面适配
 | 功能 | 说明 |
@@ -75,12 +75,12 @@ LingBrowser/
 │       │   │   └── web/
 │       │   │       ├── WebTabManager.kt      # 标签页 + WebView 实例池
 │       │   │       ├── LingWebView.kt        # WebView 子类（设置/UA/夜间）
-│       │   │       ├── InternalPage.kt       # 内部页判定 + baseUrl 归一化
-│       │   │       └── HomePage.kt           # 内置主页 HTML（离线自包含）
+│       │   │       ├── InternalPage.kt       # 内部页判定 + 地址归一化
+│       │   │       └── HomePage.kt           # 内置主页地址常量与判定
 │       │   └── res/                          # 图标、主题、字符串
 │       └── test/java/com/ling/browser/
 │           ├── util/UrlUtilsTest.kt          # 地址栏解析
-│           ├── web/HomePageTest.kt           # 内置主页
+│           ├── web/HomePageTest.kt           # 主页地址判定
 │           ├── web/InternalPageTest.kt       # 内部页判定与地址归一化
 │           ├── data/prefs/LingSettingsTest.kt# 设置项默认值与枚举
 │           └── ui/theme/LingIconsTest.kt     # 图标几何回归
@@ -90,7 +90,6 @@ LingBrowser/
 └── tools/                         # 不依赖编译的静态自检脚本
     ├── static_check.py
     ├── check_calls.py
-    ├── check_home_html.py
     ├── import_material_icons.py   # 官方图标 -> Compose 矢量代码
     ├── emit_ling_icons.py         # 组装 LingIcons.kt
     ├── ascii_icons.py             # 图标渲染成 ASCII，肉眼校验造型
@@ -686,17 +685,19 @@ WebView 自己报的、更贴近真实渲染进度。
 
 #### 与既有功能撞车的四个静默失效点
 
-阅读视图是**第二个原生渲染的内部页面**（第一个是主页）。主页当初踩过的坑，
-阅读视图一个不落全都会再踩一遍 —— 而且**错了一样不报错、不崩，只是"看着没生效"**：
+阅读视图是**原生渲染的内部页面**（主页已改为 Compose，WebView 里只剩
+`about:blank` 占位）。主页当初踩过的坑，阅读视图一个不落全都会再踩一遍 ——
+而且**错了一样不报错、不崩，只是"看着没生效"**：
 
 | 失效点 | 不处理的后果 |
 |---|---|
-| 切主题时不重绘 | `ensureHomeRendered()` 原本只过滤 `ling://home`，在阅读模式里切换夜间模式，配色**停在旧值**，要退出重进才更新 |
-| 强制夜间模式的反色 CSS | `injectDarkMode` 只在 `isHome` 时跳过。阅读视图本来就是深色，再套一层 `invert+hue-rotate` 会**反成亮底白字**，正好与预期相反 |
+| 切主题时不重绘 | 阅读视图配色烘在 HTML 里，切夜间模式后不原地刷新，配色**停在旧值**，要退出重进才更新 |
+| 强制夜间模式的反色 CSS | `injectDarkMode` 只在 `isInternal` 时跳过。阅读视图本来就是深色，再套一层 `invert+hue-rotate` 会**反成亮底白字**，正好与预期相反；主页的 `about:blank` 占位没有地址可认，同一个坑会以"背景变白"的形式出现（`html{background:#111}` 被 invert 成近白色，把原生背景层糊掉） |
 | 回调改写逻辑地址 | `onPageStarted`/`onPageFinished` 会把 `ling://reader` 改写成 `ReaderPage.BASE_URL`，破坏返回栈与阅读态识别 |
 | 合成地址进历史 | `ling://reader` 记进历史会留下**点不开**的条目 |
 
-修法是引入统一的 `isInternal = 主页 || 阅读视图` 判定，四处共用。
+修法是统一判定：阅读视图走 `InternalPage`（`isInternal` / `logicalUrl`），
+主页占位走 `WebTabManager.isHomePlaceholder`，各层共用同一口径。
 顺带明确：**历史只记真实网址** —— 原文地址在进入阅读模式前就已记过，跳过不会漏记。
 
 > 这四条是分两次才补全的。第一遍只想到"切主题要重绘"，写检查脚本时
@@ -937,23 +938,47 @@ val appBarContainerColor = animateColorAsState(
 > 顺带一提：底部工具栏没有这个问题 —— 它用的是 `Surface` 直接取色，
 > 而 `Surface` 不做颜色动画，天然是瞬变的。
 
-### 4. 主页由 WebView 渲染，不用 Compose 覆盖层
-早期实现把主页做成 Compose 覆盖层（`HomeScreen`），有两个问题：主页不进入
-前进/后退历史；且切页时 `AndroidView` 会被销毁重建，打断正在加载的页面。
+### 4. 主页由 Compose 渲染，WebView 里只留 `about:blank` 占位
+主页经历了两代实现：最早是 Compose 覆盖层，因为"主页不进历史、切页时
+`AndroidView` 被销毁重建会打断加载"而改成 WebView 用 `loadDataWithBaseURL`
+渲染自包含 HTML。现在改回 Compose（`ui/screens/HomeScreen.kt`），但把
+**前景**和**历史**拆开，避开了第一代的两个坑：
 
-现在改为由 WebView 直接渲染：`loadUrl` 拦截主页地址 → `loadDataWithBaseURL`
-注入一段自包含的 HTML。主页因此自然参与历史，`AndroidView` 也始终挂载。
+- **前景**：时钟 + 搜索框全部是 Compose，直接吃 Material You 动态色，配色不再
+  "烘"进 HTML，文档重建（reload、渲染进程被回收、历史回退）也不会掉回旧配色；
+  搜索框直接调 `submitAddress`，不必再绕"表单提交 → 拦截 `ling://search` →
+  解码"这一圈。
+- **历史**：WebView 里放一个 `about:blank` 占位文档，主页因此仍是历史里的一帧。
+- **挂载**：`HomeScreen` 是叠加在 `AndroidView` **之上**的一层，`AndroidView`
+  始终挂载，切页不会再打断正在加载的页面。
 
-**两个必须注意的坑**：
+**为什么非要在 WebView 里留占位，而不能只盖一层**：
 
-1. **逻辑地址与 baseUrl 必须分开**。地址栏判断用 `HomePage.URL`（`ling://home`），
-   而交给 `loadDataWithBaseURL` 的 baseUrl 用 `HomePage.BASE_URL`
-   （`https://home.ling.local/`）—— baseUrl 的 scheme 会参与相对路径解析与
-   同源判定，传 WebView 不认识的自定义 scheme 属于未定义行为。主页 HTML 完全
-   自包含（无外链、无相对路径），所以 baseUrl 只起占位作用。
-2. **不能用 `about:home`**。WebView 只认识 `about:blank`，早期版本把
-   `about:home` 直接喂给它，结果触发 `onReceivedError` 白屏 —— 这正是
-   "默认主页打不开"的根因。`isHomeUrl()` 仍兼容该旧值。
+1. **返回键**：从主页打开的网页，按返回要能回到主页。历史帧由 WebView 维护，
+   历史里不放假文档就回不去；
+2. **换掉上一页文档**：只盖不换文档，上一页的媒体播放与定时器仍在跑 ——
+   离开视频页回主页，声音会继续响。
+
+**怎么认出「这是主页的占位」**：`about:blank` 不是主页专属 —— `window.open`
+的占位、页面自己跳 `about:blank` 都会得到同样地址。因此
+`WebTabManager.homePlaceholderTabs` 记下"哪个标签的主页占位是我们装的"，
+`isHomePlaceholder(id, url)` 同时要求**地址是 `about:blank`** 且**该标签在集合里**。
+`loadHome` 只在 WebView **已经落在占位上**时早退（`isHomePlaceholder(id, wv.url)`）：
+反复点「主页」不会往历史里堆重复条目，而从主页打开网页后再点「主页」仍会真正回去。
+WebView 实例被 LRU 回收后切回主页标签，`switchTo` 会重新装一次占位
+（回收时同时把该标签从 `homePlaceholderTabs` 里摘掉，避免身份残留在新实例上）。
+
+**WebView 自身的底必须透明**：背景由原生 `HomeBackgroundLayer`（纯色 / 自定义
+图片）在 WebView **之下**供色，主页期间 WebView 若保留默认白底会把背景整个盖住。
+因此 `loadHome` 里调 `setOpaqueBackground(false)`，普通网页在 `loadUrl` 里再设回
+不透明白底。
+
+> `about:home` 仍然不能用：WebView 只认识 `about:blank`，早期版本把
+> `about:home` 直接喂给它，触发了 `onReceivedError` 白屏 —— 这正是
+> "默认主页打不开"的根因。`isHomeUrl()` 仍兼容该旧值。
+
+> 用户**自定义主页**时是普通网页，走正常 `loadUrl`，不挂 `HomeScreen`
+> （见 `BrowserScreen` 里 `homeBackgroundVisible` 那个条件）。
 
 ### 5. SVG 主题色必须走 CSS，不能写在表现属性里
 `stroke="var(--on-pc)"` 作为 SVG **表现属性**是无效的 —— 浏览器不会解析其中的
@@ -974,29 +999,29 @@ Compose 中多个 `BackHandler` 同时启用时，**后注册的优先**
 `LingApp` 在栈里只有浏览页时传 `true`，否则传 `false`。
 两个处理器永远不会同时启用，与组合顺序无关。
 
-### 8. 内部页面的 URL 必须与 baseUrl 解耦
-`loadDataWithBaseURL` 加载的页面，WebView 回调（`onPageStarted` /
-`onPageFinished` / `onReceivedTitle`）报回来的是 **baseUrl**，而不是我们
-写进 `TabState` 的逻辑地址。若不拦住，会导致：
+### 8. 内部页的地址以「逻辑地址」为准，不跟着 WebView 回调走
+阅读视图是 `loadDataWithBaseURL` 加载的，WebView 回调（`onPageStarted` /
+`onPageFinished` / `onReceivedTitle`）报回来的是 **baseUrl** 或
+`data:text/html;base64,…`；主页则是 `about:blank` 占位。若不拦住，会导致：
 
-- `TabState.url` 被改写成 baseUrl，`refreshHome()` 的过滤漏掉该页；
+- `TabState.url` 被改写成 baseUrl / data URL / `about:blank`；
 - `canGoBack` / `canGoForward` 被重置成 WebView 的实时值，返回键闪烁；
-- 标签标题被页面的 `<title>翎</title>` 覆盖，丢掉「主页」这个语义标题。
+- 标签标题被页面的 `<title>` 覆盖，丢掉「主页」这个语义标题。
 
-处理方式是在回调里用 `HomePage.isHomeUrl(url)` 判断，命中则保留原有状态，
-并且**不写入历史记录**（内部页面不该出现在历史里）。
+处理方式是在回调里统一过 `InternalPage`：命中则保留原有状态，并且**不写入
+历史记录**（内部页面不该出现在历史里）。
 
 > 但"命中就保留原 url"还有一个坑：**回到主页时**（历史前进/后退触发），
 > 原 url 是上一个网页的网址，保留它会让旧网址残留在地址栏。因此回调里的
-> url 回写改成三路 `when`：主页显式回写 `HomePage.URL`，阅读视图/自定义协议
-> 保留逻辑地址，普通页面写回真实 url。
+> url 回写改成三路 `when`：主页占位显式回写 `HomePage.URL`，阅读视图/自定义
+> 协议保留逻辑地址，普通页面写回真实 url。
 
 ### 9. 「定义了但没人调用」的函数最危险
 项目里同一个坑踩了两次，症状都是**功能静默失效**：
 
 | 死掉的函数 | 后果 |
 |---|---|
-| `HomePage.prefersDarkCss()` | 主页 `dark` 参数完全不起作用，不跟随夜间模式 |
+| `HomePage.prefersDarkCss()`（旧实现，已随主页改 Compose 删除） | 主页 `dark` 参数完全不起作用，不跟随夜间模式 |
 | `LingWebView.injectDarkMode()` | 强制网页夜间的 CSS 兜底从未生效，漏网页面仍是白底 |
 
 两者的共同特征是：**单元测试直接调用了它们**，所以测试全绿，
@@ -1011,70 +1036,69 @@ Compose 中多个 `BackHandler` 同时启用时，**后注册的优先**
 > （`cursor.toBookmark()`）形式调用，纯文本匹配抓不到，强行检查会产出
 > 几十条误报。**没人看的检查等于没有检查**，宁可漏报不可误报。
 
-### 10. 主页配色必须早于 WebView 创建就绪
-冷启动时 `newTab` 会先建好主页 WebView，随后 `applyHomeTheme` 才写入
-配色。早先的 `refreshHome()` 写法是：
+### 10. 主页配色不再需要"抢在 WebView 创建前就绪"
+上一代实现里，主页配色是写进 HTML 的：冷启动时 `newTab` 会先建好主页 WebView、
+`applyHomeTheme` 才写入配色，于是要用 `ensureHomeRendered()` 包一层
+`obtainWebView`；否则"WebView 尚未创建"时 `?.let` 会静默跳过，主页停在默认浅色。
 
-```kotlin
-webViews[tab.id]?.let { loadHome(tab.id, it) }   // WebView 不存在就静默跳过
-```
+主页改由 Compose 渲染后，这条时序问题**整体消失**：配色就是当前
+`MaterialTheme.colorScheme`，Compose 自己会重组，不存在"文档先渲染、颜色后到"。
+`applyHomeTheme` / `ensureHomeRendered` 一并删除，配色入口只剩
+`applyInternalColors` —— 它现在**只服务阅读视图**（阅读视图的配色仍烘在 HTML 里）。
 
-`?.let` 在"显示主页但 WebView 尚未创建"时**什么都不做** —— 而这恰恰是
-冷启动时的常态，于是主页停在默认浅色上。现在统一走
-`ensureHomeRendered()`，内部用 `obtainWebView` 把 WebView 建出来再渲染，
-直接消灭这条会静默失效的路径。
+### 11. 阅读视图的主题切换要原地刷新，不能重导航
+阅读视图是 `loadDataWithBaseURL` 渲染的，**每次调用都会往 WebView 历史里压入
+一个新条目**。早期主题变化时直接重渲染，结果：切深色后按返回键，会弹回
+**切换前那个浅色阅读页**（历史里残留的旧条目）。
 
-### 11. 主题切换要原地刷新，不能重导航
-主页/阅读视图都是 `loadDataWithBaseURL` 渲染的，**每次调用都会往 WebView
-历史里压入一个新条目**。早期 `ensureHomeRendered()` 在主题变化时直接
-`loadHome()` 重渲染，结果：切深色后按返回键，会弹回**切换前那个浅色主页**
-（历史里残留的旧条目）。
+改成"原地刷新"：已渲染的阅读视图，用 `evaluateJavascript` 直接改 `:root` 上的
+CSS 变量（`--bg`/`--fg`/…/`color-scheme`，见 `ReaderPage.themeUpdateJs`）。
+不触发导航、不压历史，深浅色切换即时生效且返回键行为不变。
 
-改成"原地刷新"：已渲染的主页/阅读视图，用 `evaluateJavascript` 直接改
-`:root` 上的 CSS 变量（`--bg`/`--fg`/…/`color-scheme`）。不触发导航、不压历史，
-深浅色切换即时生效且返回键行为不变。
+一个边界要守住：**只有"已渲染"才原地刷新** —— 用 `ReaderPage.isReaderUrl(wv.url)`
+判断 WebView 是否真的落在了阅读视图的 baseUrl（跳转途中还是上一个页面的地址，
+注入会打错文档），否则仍走完整渲染。
 
-一个边界要守住：**只有"已渲染"才原地刷新** —— 用 `HomePage.isHomeUrl(wv.url)`
-判断 WebView 是否真的落在了 `BASE_URL`（冷启动首帧前还是 `about:blank`，
-注入会打在空文档上白注入一次），否则仍走完整渲染。判据收敛成
-`isHomeRendered(wv)`：**额外要求地址非空** —— `isHomeUrl` 按地址栏语义把
-`null` 也算主页，而刚建出来的 WebView `url` 正是 `null`，混用会让冷启动
-"以为已经在主页上"而跳过渲染（主页空白）。
+> 主页已经没有这个问题：它是 Compose 渲染，配色跟着 `MaterialTheme` 走，
+> 不需要任何"原地改 CSS 变量"的动作。
 
 ---
 
 ### 12. 内部页被"网页那一套逻辑"误伤的三条路
 
-主页与阅读视图的配色是**原生算好、写进 HTML / CSS 变量**的，本不该参与网页侧的
-夜间模式、标题与 URL 处理。但它们和普通网页共用同一个 WebView、同一批回调，
+阅读视图的配色是**原生算好、写进 HTML / CSS 变量**的，本不该参与网页侧的
+夜间模式、标题与 URL 处理。但它和普通网页共用同一个 WebView、同一批回调，
 下面三条路都会绕过"这是内部页"这个前提，症状都是**静默失效**
-（用户看到的是"主页又坏了"，而单测全绿）：
+（用户看到的是"主页/文章又坏了"，而单测全绿）：
 
 | # | 路径 | 症状 | 修法 |
 |---|---|---|---|
 | 1 | `applySettings` 用 `resolvedDark()`（只看夜间模式）而不是 `shouldDarkenPages()`（还要 `&& forceDarkWebPages`） | 关掉「网页跟随夜间模式暗化」后，**任何一次设置变化**都会把网页重新暗化一遍 —— 开关看上去"关了没用" | 判据改成 `shouldDarkenPages()`（与 `LingWebView.applySettings` 的 `@param` 约定一致） |
-| 2 | `LingWebView.applySettings` 无条件 `injectDarkMode()`，而"内部页不注入"的保护只写在 `onPageFinished` 里 | `applySettings` 会遍历**所有** WebView：主页文档一旦已加载，兜底 `invert(1) hue-rotate(180deg)` 就注进主页 —— 深色 `--bg:#111412` 被反成亮底 `#EEEBED`，"主页不跟随夜间模式"的旧症状换条路复现 | 判据下沉到唯一入口：`val enabled = darken && !InternalPage.isInternal(url)` |
-| 3 | 内部页配色"烘"在 HTML 字符串里，重新着色只由 `applyHomeTheme` 触发 | 任何**不经过 UI** 的文档重建都会掉回旧配色：地址栏刷新（reload 重放同一份 data URL）、渲染进程被系统回收后重建、历史回退到旧条目 | `onPageFinished` 里补一个 `if (isInternal)` 分支做原地刷新 |
+| 2 | `LingWebView.applySettings` 无条件 `injectDarkMode()`，而"内部页不注入"的保护只写在 `onPageFinished` 里 | `applySettings` 会遍历**所有** WebView：阅读视图文档一旦已加载，兜底 `invert(1) hue-rotate(180deg)` 就注进去 —— 深色 `--bg:#111412` 被反成亮底 `#EEEBED`；主页的 `about:blank` 占位同理，它的 `html{background:#111!important}` 被 invert 翻成 **近白色**，把纯色 / 自定义图片背景层糊成一片白（切换夜间模式时才出现，因为注入只发生在这条路上） | 判据下沉到唯一入口：`val enabled = darken && !isHomePlaceholderDocument && !InternalPage.isInternal(url)`；about:blank 没有地址身份，由 `WebTabManager` 在装占位 / 离开占位时维护该标记 |
+| 3 | 阅读视图配色"烘"在 HTML 字符串里，重新着色只由 `applyInternalColors` 触发 | 任何**不经过 UI** 的文档重建都会掉回旧配色：地址栏刷新（reload 重放同一份 data URL）、渲染进程被系统回收后重建、历史回退到旧条目 | `onPageFinished` 里补一个 `if (isInternal)` 分支做原地刷新 |
 
 同一类"状态被带偏"还有两处：
 
-- **重复回主页会攒历史**：`loadDataWithBaseURL` 每次调用都压一个历史条目，
-  而「主页」是常驻按钮。现在 `loadUrl` 走 `loadHomeOrRefresh`：已经在主页就只
-  原地刷新，返回键不会再"亮着却按了没反应"、要连按好几次才能退出主页。
-- **`syncNavState` 把 baseUrl 写进 `TabState`**：切换标签后主页标签的 `url`
-  会变成 `https://home.ling.invalid/`，标题被页面自己的 `<title>翎</title>`
-  盖成「翎」。现在统一过 `InternalPage.logicalUrl()` 归一化，内部页标题保持不变。
+- **重复回主页会攒历史**：「主页」是常驻按钮，`loadHome` 每次调用都会 `loadUrl`，
+  而 `loadUrl` 会压一个历史条目。现在 `loadHome` 先判
+  `isHomePlaceholder(id, wv.url)`，已经停在占位上就直接返回；`reload` 也直接
+  短路回主页，不在主页上重放占位文档。
+- **`syncNavState` 把实时地址写进 `TabState`**：切换标签后主页标签的 `url` 会变成
+  `about:blank`（或上一页地址），标题也会被占位文档的空白标题盖掉。现在先判
+  `isHomePlaceholder` 写回 `HomePage.URL`，其余统一过 `InternalPage.logicalUrl()`
+  归一化，内部页标题保持不变。
 
 判定收敛在 `InternalPage` 一处 —— 唯一入口 `typeOf` 处理全部地址形态，
 `isInternal` / `isHomeDocument` / `isReaderDocument` / `logicalUrl` 都由它派生，
-日后新增内部页只改它；
-`check_reader.py` 新增 5 条判据盯住上面这些**调用点**（要构造 WebView，单测覆盖不到），
-`check_home_html.py` 新增布局判据，`HomePageTest` / `InternalPageTest` 覆盖纯逻辑。
+日后新增内部页只改它。主页占位的身份另由 `WebTabManager.homePlaceholderTabs`
+判定（要 WebView 上下文，单测覆盖不到），并在 WebView 实例上留下
+`isHomePlaceholderDocument` 标记供 `injectDarkMode` 使用（`about:blank`
+没有地址可认，只能靠标记）：`check_reader.py` 盯住上面这些
+**调用点**，`HomePageTest` / `InternalPageTest` 覆盖纯逻辑。
 
-**顺带修掉的布局问题**：主页 `body` 原来固定 `height:100%` + flex 居中，内容比
-视口高时（横屏 / 分屏 / 小屏 + 大号时钟）溢出的部分会被顶到滚动区**上方**，
-滚不上去 —— 时钟和搜索框直接看不见。现在改成 `html{height:100%}` +
-`body{min-height:100%}`：装得下才居中，装不下就从头排、正常滚动。
+**主页改 Compose 后自然消失的两处**：`loadDataWithBaseURL` 每次调用压历史、
+主页 HTML `body` 固定高度导致小幅溢出被裁切 —— Compose 自己测量布局，不再有
+这两个问题。阅读视图仍走 `loadDataWithBaseURL`，约束不变。
 
 ---
 
@@ -1195,40 +1219,37 @@ run: https://github.com/xiaoyangtao55/LingBrowser/actions/runs/38042019419
 
 ---
 
-### 16. 主页搜索框：网页只负责"把输入交回来"
+### 16. 主页搜索框：输入直接交给原生
 
-主页顶部加了一个搜索框。它是**普通表单**，提交到内部地址 `ling://search?q=…`
-（`HomePage.SEARCH_URL`），由原生侧接管：
+主页搜索框是 Compose 的 `BasicTextField`（`HomeScreen` 里），`ImeAction.Go`
+触发提交，一路接到 `BrowserViewModel.submitAddress`：
 
 ```
-表单提交 → shouldOverrideUrlLoading → handleUri
-        → HomePage.searchQueryOf() 取出并**解码**查询串
-        → WebTabManager.onSearchRequested → ViewModel
-        → UrlUtils.toUrl(query, 搜索引擎) → navigate()
+BasicTextField(onGo) → HomeScreen.onSearch(query)
+                     → BrowserScreen 的 viewModel::submitAddress
+                     → UrlUtils.toUrl(query, 搜索引擎) → navigate()
 ```
 
 三个刻意的选择：
 
 | 选择 | 为什么 |
 |---|---|
-| 不用真正的搜索地址做 action | 输入可能是**网址**也可能是**搜索词**，判定逻辑（`UrlUtils.toUrl`）在原生侧且只该有一份 —— 用固定内部地址把输入交回去，网页里一行判定都不写 |
-| 不用 JS 提交 | 主页是**零脚本**的自包含 HTML（`check_home_html.py` 禁止 `<script>`），普通表单提交同样会走 `shouldOverrideUrlLoading` |
-| 拦截必须**先于**协议判定 | `ling` 在 `UrlScheme.NAVIGABLE` 里算"可加载"，先走 `shouldTakeOver` 会返回 false → 交给 WebView → `ERR_UNKNOWN_URL_SCHEME` 白屏 |
+| 输入不出 Compose，一条直达链路 | 输入可能是**网址**也可能是**搜索词**，判定逻辑（`UrlUtils.toUrl`）在原生侧且只该有一份 |
+| 不再用内部地址 `ling://search` 中转 | 上一代主页是 HTML 表单，必须靠"提交到内部地址 → 拦截 → 解码"把文字交回原生；主页改成 Compose 后这层中转整体删除 |
+| 提交后清空输入并收起键盘 | 主页是"每次回来都干净"的起点；不收键盘会在页面跳转后仍挡住内容 |
 
-两个必须解码/对齐的细节：
-
-- **解码一次**：表单编码是 `application/x-www-form-urlencoded`（中文 `%XX`、空格 `+`），
-  不解码就交给 `UrlUtils.searchUrl` 会被**二次编码** —— 搜"中文"变成搜
-  `%E4%B8%AD%E6%96%87`，一个结果都没有。解析用 `java.net.URLDecoder`（纯 JVM，可单测）。
-- **地址不能两边各写一份**：`check_home_html.py` 把实例化后的 `<form action>` 与
-  Kotlin 的 `SEARCH_URL` 常量逐字比对，不一致就报错（这类漂移的现象是"点了没反应"，极难查）。
+历史上这条链路是「HTML 表单提交到 `ling://search?q=…` → `shouldOverrideUrlLoading`
+→ `handleUri` → `HomePage.searchQueryOf()` 解码 → `onSearchRequested`」。主页改
+Compose 后，`SEARCH_URL` / `searchQueryOf` / `onSearchRequested` / CLIENT 里的
+拦截分支**全部删除** —— 少一层跨进程字符串编码，也顺手消灭了"表单编码要解码一次、
+否则中文被二次编码"那个坑。
 
 页面上那条"在地址栏输入网址或搜索内容"的底部提示随之删掉了 —— 有了搜索框它就是废话。
 
 ### 17. 内部页的"对外地址"：收藏与会话快照
 
-内部页的逻辑地址（`ling://home` / `ling://reader`）是**对内**的：主页由原生渲染、
-阅读视图靠"正文缓存 + 重新渲染"得到。凡是需要把地址**交出去**的地方，都得先换算一遍，
+内部页的逻辑地址（`ling://home` / `ling://reader`）是**对内**的：主页是 Compose
+渲染、阅读视图靠"正文缓存 + 重新渲染"得到。凡是需要把地址**交出去**的地方，都得先换算一遍，
 否则会得到两个报障：
 
 | 场景 | 之前的症状 | 现在 |
@@ -1279,8 +1300,6 @@ Android 13+ 的**主题化图标** —— 系统读 `ic_launcher_monochrome` 单
 |---|---|
 | `tools/static_check.py` | 括号配平、未使用 import、自定义 composable 调用点的必填参数、残留旧 API |
 | `tools/check_calls.py` | 交叉核对所有函数调用点的具名参数与声明是否一致（改签名后最易漏改） |
-| `tools/check_home_html.py` | 从 `HomePage.kt` 抽出 HTML 模板实例化，检查标签配平、CSS 变量配对、SVG 里误用 `var()`、外部资源引用 |
-| `tools/verify_home_assertions.py` | 对着 `HomePage.kt` 复算 `isHomeUrl` 的全部断言，确认测试与实现一致 |
 | `tools/check_dead_code.py` | 找出「定义了但没人调用」的动作型函数（见 §四.9，此坑踩过两次） |
 | `tools/check_download_bytes.py` | 比对 `formatBytes` 在 UI 层与测试层的两份实现，防止测试测的是旧逻辑 |
 | `tools/check_download_progress.py` | 校验下载进度的节流与速度采样（字节/时间不能用同一个变量、采样窗口要有下限，见 §四.12） |
@@ -1303,8 +1322,6 @@ Android 13+ 的**主题化图标** —— 系统读 `ic_launcher_monochrome` 单
 ```bash
 python tools/static_check.py
 python tools/check_calls.py
-python tools/check_home_html.py
-python tools/verify_home_assertions.py
 python tools/check_dead_code.py
 python tools/check_download_bytes.py
 python tools/check_download_progress.py
@@ -1325,14 +1342,14 @@ python tools/ascii_icons.py Download Layers          # 渲染指定图标
 | 项目 | 结果 |
 |---|---|
 | `:app:assembleDebug` | ✅ 通过（换用新图标资源包后重新验证） |
-| `:app:testDebugUnitTest` | ✅ **276 个用例全部通过**（`UrlUtilsTest` 20 / `FaviconFetcherTest` 12 / `ReaderPageTest` 22 / `ReaderResultTest` 15 / `UrlSchemeTest` 18 / `AdBlockerTest` 16 / `SniffResultTest` 12 / `HomePageTest` 25 / `InternalPageTest` 11 / `TabOrderTest` 15 / `BookmarkFolderTest` 14 / `BookmarkBackupTest` 17 / `LingSettingsTest` 16 / `LingIconsTest` 11 / `DownloadTest` 14 / `ResumePlanTest` 7 / `PendingDownloadTest` 5 / `SessionSnapshotTest` 9 / `TabInitialTest` 6 / `TabAddressBarTest` 6 / `LingWebViewClientTest` 2 / `SecurityStateTest` 3） |
+| `:app:testDebugUnitTest` | ✅ **370 个用例全部通过**（`UrlUtilsTest` 20 / `FaviconFetcherTest` 12 / `ReaderPageTest` 22 / `ReaderResultTest` 15 / `UrlSchemeTest` 18 / `AdBlockerTest` 16 / `SniffResultTest` 12 / `HomePageTest` 4 / `InternalPageTest` 11 / `TabOrderTest` 15 / `BookmarkFolderTest` 14 / `BookmarkBackupTest` 17 / `HistoryExportTest` 9 / `LingSettingsTest` 17 / `LingIconsTest` 11 / `TopBarColorEquivalenceTest` 3 / `DownloadTest` 14 / `DownloadDestinationTest` 6 / `DownloadFileNameTest` 17 / `ChunkPlanTest` 8 / `ResumePlanTest` 7 / `PendingDownloadTest` 5 / `DownloadSectionsTest` 4 / `SessionSnapshotTest` 9 / `TabInitialTest` 6 / `TabAddressBarTest` 6 / `LingWebViewClientTest` 2 / `SecurityStateTest` 3 / `BlockRulesTest` 16 / `UserScriptTest` 43 / `HitTargetTest` 8） |
 | `:app:assembleRelease`（R8 压缩） | ✅ 通过，产物 1.4 MB（图标改版前） |
 | APK 签名校验 | ✅ v1 + v2 方案均通过 |
 | 真机安装（Xiaomi MI 8 / Android 14） | ✅ `adb install` 成功 |
 | 真机启动 | ✅ 无崩溃，`Displayed MainActivity: +884ms` |
 | WebView 进程 | ✅ sandboxed_process 正常拉起 |
 | View 层级 | ✅ Compose 树与 WebView 宿主 `FrameLayout` 布局正确 |
-| 静态自检（17 个脚本通过） | ✅ 全部通过（`check_icon_fidelity` 因缺官方图标源文件未跑） |
+| 静态自检 | ✅ 全部通过（`check_icon_fidelity` 因缺官方图标源文件未做逐点比对） |
 
 > **阅读模式**：逻辑层与接线已全部通过单测与静态检查，但**中文站点的实际
 > 提取效果尚未在真机验证** —— 提取质量依赖具体站点的 DOM 结构，
@@ -1342,22 +1359,21 @@ python tools/ascii_icons.py Download Layers          # 渲染指定图标
 > 并通过 `check_icon_fidelity.py` 与源文件逐点核对，
 > 真机观感已确认。
 
-> ⚠️ **§四.12「内部页静默失效」这一轮改动尚未编译、尚未真机验证**：
-> 改动的环境里没有 Android SDK（`ANDROID_HOME` 为空、无 gradle），
-> 只能跑不依赖编译的静态自检 —— 18 个脚本全部通过
-> （`check_icon_fidelity` 因缺官方图标源文件未跑）。
-> 合入前需要：`./gradlew :app:testDebugUnitTest` + 下面的真机回归。
-> （上表 259 用例 / `HomePageTest` 25 为本次实际跑出的结果；此前的 231 是更早
-> 一轮的记录。）
+> ⚠️ **§四.4「主页改 Compose 渲染」这一轮已通过编译、370 个单测、Lint
+> 与全部静态检查，尚未真机验证**。下面 1~6 项原先是在 HTML 主页上验证的，
+> 主页改版后需逐项复验：
 >
-> **§四.12**（主页/阅读视图的静默失效）的 6 项**已在真机验证通过**：
+> 1. ⬜ 主页 → 更多 → 切夜间模式：时钟/搜索框与背景配色正常；
+> 2. ⬜ 关掉「网页跟随夜间模式暗化」：网页立刻变亮，改其它设置也不再变暗；
+> 3. ⬜ 在主页连点「主页」多次：返回键不再攒下一串同样的主页历史；
+> 4. ⬜ 从主页打开网页 → 按返回：回到主页，背景（纯色 / 图片）仍正常透出
+>    （WebView 的白底没有盖住背景层）；
+> 5. ⬜ 切标签页：主页标签标题仍是「主页」，地址栏不出现 `about:blank`；
+> 6. ⬜ 横屏 / 分屏：时钟与搜索框完整可见。
 >
-> 1. ✅ 主页 → 更多 → 切夜间模式：配色正常，无反色 / 亮底；
-> 2. ✅ 关掉「网页跟随夜间模式暗化」：网页立刻变亮，改其它设置也不再变暗；
-> 3. ✅ 在主页连点「主页」多次：返回键不再攒下一串同样的主页历史；
-> 4. ✅ 切到深色 → 点地址栏刷新：主页配色保持深色；
-> 5. ✅ 切标签页：主页标签标题仍是「主页」，地址栏不出现 `home.ling.invalid`；
-> 6. ✅ 横屏 / 分屏：主页内容不被裁切、可正常滚动（验证时主页还是"logo + 「翎」"，主页改版后待复验）。
+> 另有两条随本次改版新增、需一并确认：**自定义主页**时显示的是网页本身
+> （不挂 `HomeScreen`）；标签数超过 6 个、主页标签的 WebView 被 LRU 回收后
+> 切回来，主页仍正常显示（背景不会变白）。
 >
 > **§四.13**（无痕历史 / Cookie 策略 / 系统明暗重算 / 阅读字号）**待真机验证**：
 >
@@ -1379,8 +1395,9 @@ python tools/ascii_icons.py Download Layers          # 渲染指定图标
 >
 > **§四.16 / §四.17**（主页搜索框 / 内部页对外地址）**待真机验证**：
 >
-> 16. ⬜ 主页搜索框：输入「必应」回车 → 走搜索；输入 `example.com` 回车 → **直接打开该网址**
->     （不是去搜它）；输入中文回车 → 结果是中文的搜索结果（不是 `%E4%B8%AD…` 那种乱码串）；
+> 16. ⬜ 主页搜索框（Compose `BasicTextField`）：输入「必应」回车 → 走搜索；输入 `example.com`
+>     回车 → **直接打开该网址**（不是去搜它）；输入中文回车 → 结果是中文的搜索结果；
+>     提交后输入被清空且键盘收起；从网页按返回回到主页，搜索框是空的；
 > 17. ⬜ 阅读模式里点收藏 → 书签列表里是**原文地址**，点开能到那篇文章；再点一次取消收藏，
 >     菜单回到「添加书签」；
 > 18. ⬜ 停在阅读模式时重启 App → 恢复的是**那篇文章的网页**（不是错误页，也不是主页）。

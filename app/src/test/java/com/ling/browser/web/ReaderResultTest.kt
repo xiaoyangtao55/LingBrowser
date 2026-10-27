@@ -166,7 +166,6 @@ class ReaderResultTest {
     fun `阅读视图地址与主页地址不同`() {
         // 两者若相同，主页会被当成阅读视图，退出逻辑会错乱
         assertFalse(ReaderPage.URL == HomePage.URL)
-        assertFalse(ReaderPage.BASE_URL == HomePage.BASE_URL)
         assertFalse(ReaderPage.isReaderUrl(HomePage.URL))
         assertFalse(HomePage.isHomeUrl(ReaderPage.URL))
     }

@@ -129,7 +129,8 @@ class LingWebView @JvmOverloads constructor(
      * @param darkTheme 是否把网页内容暗化。由调用方在运行时算出
      *   `forceDarkWebPages && 夜间模式已解析为深色`，传进来的是**最终结果**
      *   而非中间开关 —— 这样"夜间模式关掉时网页立刻变亮"能在这里统一处理。
-     *   内部页（主页/阅读视图）由 [injectDarkMode] 自己拦掉，调用方不必区分。
+     *   内部页（阅读视图）由 [injectDarkMode] 自己拦掉，调用方不必区分；
+     *   主页是 Compose 渲染，WebView 里只有空白占位，注入也无可见影响。
      */
     @Suppress("DEPRECATION")
     fun applySettings(settings: LingSettings, incognito: Boolean, darkTheme: Boolean) {
@@ -232,9 +233,9 @@ class LingWebView @JvmOverloads constructor(
     /**
      * 设置 WebView **自身**的背景是否不透明。
      *
-     * 为什么需要：主页在「自定义图片」模式下把 HTML 背景改成透明、
-     * 由原生层在 WebView 之下来画背景，但 WebView 本身默认有一层不透明白底 ——
-     * 只让 HTML 透明是不够的，白底仍会把下面的图片整个盖住。
+     * 为什么需要：主页由 Compose 渲染，WebView 里只有一个 about:blank 占位；
+     * 背景要交给 WebView 之下的原生背景层（`HomeBackgroundLayer`）来画，
+     * 而 WebView 默认有一层不透明白底 —— 它会把下面的背景整个盖住。
      *
      * [opaque] 为 true 时用白色，与 WebView 的默认底色一致，因此切回普通网页/阅读视图
      * 时行为与旧版完全相同；为 false 时透明，让原生背景层透出。
@@ -244,6 +245,19 @@ class LingWebView @JvmOverloads constructor(
             if (opaque) android.graphics.Color.WHITE else android.graphics.Color.TRANSPARENT,
         )
     }
+
+    /**
+     * 当前文档是不是主页那个 `about:blank` 占位（由 `WebTabManager` 维护）。
+     *
+     * about:blank 本身没有身份：`window.open` 的占位文档、页面自己跳到 blank
+     * 都会出现它，所以**不能**按地址判断，只能由装过主页占位的那一方打标记。
+     *
+     * 用途只有一个：[injectDarkMode] 的拦截 —— 占位文档没有地址可认，一旦被
+     * 兜底反色 CSS 命中，`html{background:#111!important}` 会被 `invert(1)`
+     * 翻成近白色，正好把主页背景层糊成一片白。
+     */
+    var isHomePlaceholderDocument: Boolean = false
+        internal set
 
     /**
      * 注入 / 移除强制夜间模式的 CSS。
@@ -258,9 +272,10 @@ class LingWebView @JvmOverloads constructor(
      * 兜底做法是整体 invert + hue-rotate(180deg)（色相转一圈回到原位，
      * 因此彩色不会变成反色负片），再对 img/video/canvas 反色一次还原。
      *
-     * **内部页（内置主页 / 阅读视图）在这里被统一拦掉**，调用方不需要各自判断：
-     * 它们的配色由 CSS 变量精确控制，套一层 invert 只会把主题整个反过来 ——
-     * 深色主页（`--bg:#111412`）会被反成亮底（`#EEEBED`），正好与预期相反。
+     * **阅读视图在这里被统一拦掉**，调用方不需要各自判断：
+     * 它的配色由 CSS 变量精确控制，套一层 invert 只会把主题整个反过来 ——
+     * 深色阅读视图（`--bg:#111412`）会被反成亮底（`#EEEBED`），正好与预期相反。
+     * （主页是 Compose 渲染，WebView 里只有空白占位，即使注入也没有可见影响。）
      * 判据必须落在 WebView 自己身上：`applySettings` 会遍历**所有** WebView，
      * 每个实例当前停在哪一页只有它自己知道，在调用点判一定会漏。
      *
@@ -270,8 +285,13 @@ class LingWebView @JvmOverloads constructor(
      * 内部页同理走移除分支：万一历史版本已经注入过，这里会顺手清掉。
      */
     fun injectDarkMode(darken: Boolean) {
-        // 内部页永远是"不要兜底暗化"，与调用方传什么无关
-        val enabled = darken && !InternalPage.isInternal(url)
+        // 内部页永远是"不要兜底暗化"，与调用方传什么无关。
+        // 主页的 about:blank 占位没有地址可认（见 [isHomePlaceholderDocument]），
+        // 只能靠 WebTabManager 打的标记拦住：否则 `html{background:#111}` 被
+        // invert 翻成近白色，主页背景层会被糊成一片白。
+        val enabled = darken &&
+            !isHomePlaceholderDocument &&
+            !InternalPage.isInternal(url)
         evaluateJavascript(if (enabled) DARK_CSS_JS else REMOVE_DARK_CSS_JS, null)
     }
 

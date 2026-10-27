@@ -19,7 +19,6 @@ ROOT = os.path.join(
 )
 
 # 重构后不应再出现的符号（出现即说明有地方漏改）
-# 注意：允许出现在 HomePage.kt 里的兼容常量与测试里
 FORBIDDEN = {
     "action=\"about:home\"": "旧主页地址",
 }

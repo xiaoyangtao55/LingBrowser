@@ -281,11 +281,6 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
         tabManager.onVisited = { url, title, incognito ->
             viewModelScope.launch { container.history.record(title, url, incognito) }
         }
-        // 主页搜索框提交：判定"网址还是搜索词"用地址栏同一套逻辑（UrlUtils），
-        // 在当前标签打开 —— 网页那边只负责把输入交回来，不做任何判定。
-        tabManager.onSearchRequested = { query ->
-            navigate(searchTarget(query))
-        }
         // 长按链接/图片：只把命中结果交给 UI，菜单项由界面按目标类型拼
         tabManager.onLongPress = { target ->
             _hitTarget.value = target
@@ -2489,21 +2484,17 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { block() }
     }
 
-    // ------------------------------------------------------------ 内置主页
+    // ------------------------------------------------------ 内置页配色（阅读视图）
 
     /**
-     * 把当前主题配色同步给内置主页。
+     * 把当前主题配色同步给阅读视图。
      *
-     * 主页是 WebView 渲染的 HTML，拿不到 Compose 的 ColorScheme，
-     * 因此这里把颜色转成 CSS 十六进制串传过去。
-     *
-     * ⚠️ 不能在「配色没变」时提前 return：背景模式（纯色 ↔ 自定义图片）
-     * 变化时配色不变，但 WebView 自身的透明度需要由 [WebTabManager.ensureHomeRendered]
-     * 重新保障（普通网页会把 WebView 底设回不透明白色，见 WebTabManager.loadUrl）。
-     * 若只靠配色变化驱动，切换背景模式后主页会停在不透明白底、原生背景层被盖住，
-     * 表现为"改了背景模式要手动刷新才生效"。
+     * 阅读视图仍是 `loadDataWithBaseURL` 渲染的 HTML，拿不到 Compose 的
+     * ColorScheme，因此这里把颜色转成 CSS 十六进制串传过去。
+     * 主页已改为原生 Compose 渲染（见 `ui/screens/HomeScreen.kt`），直接读
+     * MaterialTheme，不再经过这里。
      */
-    fun applyHomeTheme(
+    fun applyInternalColors(
         background: Color,
         onBackground: Color,
         primary: Color,
@@ -2512,33 +2503,18 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
         onPrimaryContainer: Color,
         dark: Boolean,
     ) {
-        val colors = WebTabManager.HomeColors(
-            background = background.toCssHex(),
-            onBackground = onBackground.toCssHex(),
-            primary = primary.toCssHex(),
-            onPrimary = onPrimary.toCssHex(),
-            primaryContainer = primaryContainer.toCssHex(),
-            onPrimaryContainer = onPrimaryContainer.toCssHex(),
-            dark = dark,
+        tabManager.applyInternalColors(
+            WebTabManager.InternalColors(
+                background = background.toCssHex(),
+                onBackground = onBackground.toCssHex(),
+                primary = primary.toCssHex(),
+                onPrimary = onPrimary.toCssHex(),
+                primaryContainer = primaryContainer.toCssHex(),
+                onPrimaryContainer = onPrimaryContainer.toCssHex(),
+                dark = dark,
+            ),
         )
-        // homeColors 只在真正变化时才写：StateFlow 结构化去重依赖字段值变化，
-        // 无谓赋值会让下游 collect 多跑一轮。但 ensureHomeRendered 必须每次都调
-        // —— 背景模式切换不改变配色，却要靠它把 WebView 底重新设回透明。
-        if (colors != tabManager.homeColors) {
-            tabManager.homeColors = colors
-        }
-        // 用 ensureHomeRendered 而不是 refreshHome：冷启动时主页 WebView
-        // 可能还没建出来，refreshHome 会静默跳过，导致主页停在默认浅色。
-        tabManager.ensureHomeRendered()
     }
-
-    /**
-     * 刷新内置主页上的时钟（`HH:mm`）。
-     *
-     * 由 UI 层的定时器每分钟调用一次（见 BrowserScreen）：主页是零脚本 HTML，
-     * 时间不能自己走，只能由原生侧把文本注入进去。
-     */
-    fun updateHomeClock() = tabManager.updateHomeClock()
 
     /**
      * 重新计算「网页是否暗化」并应用到所有 WebView。

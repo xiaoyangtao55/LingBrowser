@@ -13,15 +13,17 @@ import org.junit.Test
  *  1. [InternalPage.isInternal] 若把 null / 空串也算作内部页，冷启动时
  *     `WebView.url` 还是 null，会被误判成"已经在主页上"而跳过渲染 → 主页空白；
  *  2. [InternalPage.logicalUrl] 缺失时，WebView 回调报回来的 baseUrl
- *     （`https://home.ling.invalid/`）会被原样写进 TabState，同一个页面在
+ *     （`https://reader.ling.invalid/`）会被原样写进 TabState，同一个页面在
  *     状态里出现两种 url 值，会话快照里还存下一个解析不了的假 https 地址。
+ *
+ * 主页已改为原生 Compose 渲染、WebView 里只留 `about:blank` 占位
+ * （见 `WebTabManager.isHomePlaceholder`），因此这里不再有「主页 baseUrl」。
  */
 class InternalPageTest {
 
     @Test
     fun `主页与阅读视图都算内部页`() {
         assertTrue("主页逻辑地址", InternalPage.isInternal(HomePage.URL))
-        assertTrue("主页 baseUrl（WebView 报回来的就是它）", InternalPage.isInternal(HomePage.BASE_URL))
         assertTrue("阅读视图逻辑地址", InternalPage.isInternal(ReaderPage.URL))
         assertTrue("阅读视图 baseUrl", InternalPage.isInternal(ReaderPage.BASE_URL))
     }
@@ -48,7 +50,6 @@ class InternalPageTest {
     @Test
     fun `唯一入口 typeOf 分出主页与阅读视图`() {
         assertEquals(InternalPage.Type.HOME, InternalPage.typeOf(HomePage.URL))
-        assertEquals("baseUrl 同样", InternalPage.Type.HOME, InternalPage.typeOf(HomePage.BASE_URL))
         assertEquals("遗留的 about:home 一并认", InternalPage.Type.HOME, InternalPage.typeOf("about:home"))
         assertEquals(InternalPage.Type.READER, InternalPage.typeOf(ReaderPage.URL))
         assertEquals(InternalPage.Type.READER, InternalPage.typeOf(ReaderPage.BASE_URL))
@@ -58,16 +59,13 @@ class InternalPageTest {
     }
 
     @Test
-    fun `reload 后的 data 形式靠逻辑地址线索区分主页与阅读视图`() {
+    fun `reload 后的 data 形式靠逻辑地址线索区分`() {
         val data = InternalPage.DATA_HTML_PREFIX + ";charset=utf-8;base64,PGh0bWw+"
         // 单看地址串分不出是哪种内部页 —— 必须靠 [logicalUrl] 线索，否则刷新一次就"不再是内部页"
         assertNull("没有线索就不猜", InternalPage.typeOf(data))
-        assertEquals("线索是主页", InternalPage.Type.HOME, InternalPage.typeOf(data, HomePage.URL))
         assertEquals("线索是阅读视图", InternalPage.Type.READER, InternalPage.typeOf(data, ReaderPage.URL))
-        assertTrue(InternalPage.isHomeDocument(data, HomePage.URL))
-        assertFalse(InternalPage.isHomeDocument(data, ReaderPage.URL))
         assertTrue(InternalPage.isReaderDocument(data, ReaderPage.URL))
-        assertEquals(HomePage.URL, InternalPage.logicalUrl(data, HomePage.URL))
+        assertEquals(ReaderPage.URL, InternalPage.logicalUrl(data, ReaderPage.URL))
         assertNull("无线索时保留原状态，绝不写回这串 base64", InternalPage.logicalUrl(data))
     }
 
@@ -81,7 +79,6 @@ class InternalPageTest {
 
     @Test
     fun `baseUrl 归一化回逻辑地址`() {
-        assertEquals("主页 baseUrl", HomePage.URL, InternalPage.logicalUrl(HomePage.BASE_URL))
         assertEquals("主页逻辑地址本身", HomePage.URL, InternalPage.logicalUrl(HomePage.URL))
         assertEquals("阅读视图 baseUrl", ReaderPage.URL, InternalPage.logicalUrl(ReaderPage.BASE_URL))
     }
@@ -105,7 +102,6 @@ class InternalPageTest {
     fun `对外地址：主页没有、阅读视图用原文、普通页用自己`() {
         // 收藏 / 分享 / 会话快照都用这个口径
         assertNull("主页没有对外地址", InternalPage.externalUrl(HomePage.URL, null))
-        assertNull("主页的 baseUrl 同样", InternalPage.externalUrl(HomePage.BASE_URL, null))
         assertEquals(
             "阅读视图换成原文地址",
             "https://example.com/post/1",
