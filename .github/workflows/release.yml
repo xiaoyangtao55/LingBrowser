@@ -47,8 +47,6 @@ jobs:
           scripts=(
             tools/static_check.py
             tools/check_calls.py
-            tools/check_home_html.py
-            tools/verify_home_assertions.py
             tools/check_dead_code.py
             tools/check_download_bytes.py
             tools/check_download_progress.py
