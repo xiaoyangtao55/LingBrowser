@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.10.0](https://github.com/xiaoyangtao55/LingBrowser/compare/v1.9.1...v1.10.0) (2026-10-29)
+
+
+### Features
+
+* 内置主页改为 Compose 原生渲染 ([1bdd684](https://github.com/xiaoyangtao55/LingBrowser/commit/1bdd6841e44fb6ca6a18f4aae3f49e5015b2d3f8))
+
 ## [1.9.1](https://github.com/xiaoyangtao55/LingBrowser/compare/v1.9.0...v1.9.1) (2026-10-25)
 
 
