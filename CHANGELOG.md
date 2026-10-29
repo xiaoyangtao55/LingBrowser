@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.11.0](https://github.com/xiaoyangtao55/LingBrowser/compare/v1.10.0...v1.11.0) (2026-10-29)
+
+
+### Features
+
+* **ui:** 界面改为 Material 3 Expressive 风格 ([e77ed25](https://github.com/xiaoyangtao55/LingBrowser/commit/e77ed25a7d7f5b7170b01c38b28a21c00ab1f882))
+
 ## [1.10.0](https://github.com/xiaoyangtao55/LingBrowser/compare/v1.9.1...v1.10.0) (2026-10-29)
 
 
