@@ -1,9 +1,23 @@
 package com.ling.browser.ui.components
 
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarColors
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import com.ling.browser.ui.theme.LingIcons
 
 /**
  * 全局统一的标题栏配色。
@@ -47,3 +61,47 @@ fun lingTopBarColors(): TopAppBarColors = TopAppBarDefaults.topAppBarColors(
     containerColor = Color.Transparent,
     scrolledContainerColor = Color.Transparent,
 )
+
+/**
+ * 页面标题栏：返回 + 左对齐标题 + 可选的右侧动作。
+ *
+ * 全站的次级页面（设置、关于、书签、历史…）共用这一颗，不再各写一遍
+ * `CenterAlignedTopAppBar`：标题与内容左对齐，视线从标题直接往下落到第一行
+ * 内容，不用横向来回跳。
+ *
+ * 系统栏内边距在这里一并吃掉，调用方只负责把它放进 Scaffold 的 topBar。
+ */
+@Composable
+fun LingPageTopBar(
+    title: String,
+    onBack: () -> Unit,
+    modifier: Modifier = Modifier,
+    action: (@Composable () -> Unit)? = null,
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .statusBarsPadding()
+            .padding(start = 4.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        IconButton(onClick = onBack, modifier = Modifier.size(48.dp)) {
+            Icon(
+                imageVector = LingIcons.ArrowBack,
+                contentDescription = "返回",
+                modifier = Modifier.size(24.dp),
+            )
+        }
+        Text(
+            text = title,
+            style = MaterialTheme.typography.headlineSmall,
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier
+                .weight(1f)
+                .padding(start = 8.dp),
+        )
+        action?.invoke()
+    }
+}

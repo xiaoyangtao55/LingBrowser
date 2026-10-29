@@ -2,13 +2,17 @@ package com.ling.browser.ui.components
 
 import com.ling.browser.ui.theme.LingIcons
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -17,6 +21,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
@@ -38,6 +43,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalFocusManager
@@ -128,18 +134,35 @@ fun AddressBar(
         onReleaseFocus()
     }
 
+    // 编辑态把容器提亮一档：M3E 里"正在操作"的表面用更浅的容器色表示，
+    // 用户能感到自己"抬起了"这块区域。颜色用 tween 而不是弹簧 ——
+    // 颜色回弹会在过渡中露出一层发灰的中间色。编辑态同时加一点投影，
+    // 让这颗胶囊在键盘弹出时明确地浮在内容之上。
+    val containerColor by animateColorAsState(
+        targetValue = if (isEditing) {
+            MaterialTheme.colorScheme.surfaceContainerHighest
+        } else {
+            MaterialTheme.colorScheme.surfaceContainerHigh
+        },
+        animationSpec = tween(durationMillis = 220),
+        label = "addressBarContainer",
+    )
+
     Column(modifier = modifier.fillMaxWidth()) {
         Surface(
-            shape = RoundedCornerShape(28.dp),
-            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+            // 全胶囊：M3E 的主搜索框就是一颗药丸，两端是半圆。
+            shape = CircleShape,
+            color = containerColor,
+            tonalElevation = 0.dp,
+            shadowElevation = if (isEditing) 4.dp else 0.dp,
             modifier = Modifier.fillMaxWidth(),
         ) {
-            Column {
+            Box {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(48.dp)
-                        .padding(start = 12.dp, end = 4.dp)
+                        .height(54.dp)
+                        .padding(start = 16.dp, end = 5.dp)
                         // 非编辑态：整条地址栏都可点（不只是文字那一小块），
                         // 点一下进编辑态并全选 URL。
                         // 编辑态不加这个点击 —— 否则点哪儿都会被当成"重新进编辑态"，
@@ -251,17 +274,37 @@ fun AddressBar(
                         }
                     }
 
-                    // 右侧：刷新/停止（常驻）
-                    IconButton(
-                        onClick = onReloadOrStop,
-                        modifier = Modifier.size(36.dp),
+                    // 右侧：刷新/停止（常驻）。
+                    // 装在**圆形实底**按钮里：M3E 的图标按钮默认带可见容器，
+                    // 不再是一个悬空的图标 —— 悬空图标在自定义背景上容易"消失"。
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(CircleShape)
+                            .background(
+                                if (isLoading) {
+                                    MaterialTheme.colorScheme.primaryContainer
+                                } else {
+                                    MaterialTheme.colorScheme.surfaceContainerHighest
+                                },
+                            ),
+                        contentAlignment = Alignment.Center,
                     ) {
-                        Icon(
-                            imageVector = if (isLoading) LingIcons.Close else LingIcons.Refresh,
-                            contentDescription = if (isLoading) "停止" else "刷新",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(18.dp),
-                        )
+                        IconButton(
+                            onClick = onReloadOrStop,
+                            modifier = Modifier.size(40.dp),
+                        ) {
+                            Icon(
+                                imageVector = if (isLoading) LingIcons.Close else LingIcons.Refresh,
+                                contentDescription = if (isLoading) "停止" else "刷新",
+                                tint = if (isLoading) {
+                                    MaterialTheme.colorScheme.onPrimaryContainer
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                },
+                                modifier = Modifier.size(20.dp),
+                            )
+                        }
                     }
 
                     // 右侧：清除（仅编辑态）
@@ -283,35 +326,8 @@ fun AddressBar(
                     }
                 }
 
-                // 加载进度条贴在地址栏下沿
-                AnimatedVisibility(
-                    visible = isLoading,
-                    enter = fadeIn(),
-                    exit = fadeOut(),
-                ) {
-                    // 有确定进度值（>0）时走确定态，否则回退不确定态：
-                    // WebView 刚触发加载时 progress 还是 0，此时还不知道要多久，
-                    // 用不确定态更符合直觉；拿到第一个 >0 的进度后切确定态。
-                    val p = progress
-                    if (p != null && p > 0) {
-                        LinearProgressIndicator(
-                            progress = { p / 100f },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(2.dp),
-                            color = MaterialTheme.colorScheme.primary,
-                            trackColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0f),
-                        )
-                    } else {
-                        LinearProgressIndicator(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(2.dp),
-                            color = MaterialTheme.colorScheme.primary,
-                            trackColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0f),
-                        )
-                    }
-                }
+                // 加载进度条贴在地址栏下沿（叠在胶囊内部，不改变高度）。
+                AddressBarProgress(isLoading = isLoading, progress = progress)
             }
         }
 
@@ -350,6 +366,49 @@ fun AddressBar(
                     }
                 }
             }
+        }
+    }
+}
+
+/**
+ * 地址栏底部的加载进度条。
+ *
+ * 单独抽出来是因为它要 `align(BottomCenter)` 叠在 Box 里，而外层还有
+ * `Column` 的隐式接收者 —— 直接写在 Box 里时 `AnimatedVisibility` 会被解析成
+ * ColumnScope 的扩展，报"implicit receiver 不可用"。放进一个 BoxScope 扩展
+ * 函数，重载解析就只剩顶层那一个。
+ *
+ * 视觉上是一条两端圆的 3dp 细条、左右内缩 22dp：沿着胶囊的圆弧走，
+ * 而不是横贯整条地址栏把圆角切掉。有确定进度（>0）时走确定态，
+ * 否则回退不确定态（WebView 刚触发加载时 progress 还是 0）。
+ */
+@Composable
+private fun BoxScope.AddressBarProgress(isLoading: Boolean, progress: Int?) {
+    AnimatedVisibility(
+        visible = isLoading,
+        enter = fadeIn(),
+        exit = fadeOut(),
+        modifier = Modifier.align(Alignment.BottomCenter),
+    ) {
+        val p = progress
+        val barModifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 22.dp, vertical = 4.dp)
+            .height(3.dp)
+            .clip(CircleShape)
+        if (p != null && p > 0) {
+            LinearProgressIndicator(
+                progress = { p / 100f },
+                modifier = barModifier,
+                color = MaterialTheme.colorScheme.primary,
+                trackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
+            )
+        } else {
+            LinearProgressIndicator(
+                modifier = barModifier,
+                color = MaterialTheme.colorScheme.primary,
+                trackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
+            )
         }
     }
 }

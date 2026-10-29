@@ -290,10 +290,10 @@ private fun PillButton(
     modifier: Modifier = Modifier,
 ) {
     Surface(
-        shape = RoundedCornerShape(24.dp),
+        shape = RoundedCornerShape(28.dp),
         color = container,
         modifier = modifier
-            .clip(RoundedCornerShape(24.dp))
+            .clip(RoundedCornerShape(28.dp))
             .clickable(onClick = onClick),
     ) {
         Row(
@@ -328,18 +328,24 @@ private fun TabRow(
     modifier: Modifier = Modifier,
 ) {
     Surface(
-        shape = RoundedCornerShape(16.dp),
+        // 卡片圆角抬到 24dp：M3E 的卡片比 M3 更圆，标签条读起来像一枚枚软卡片。
+        shape = RoundedCornerShape(24.dp),
         color = when {
             isActive -> MaterialTheme.colorScheme.primaryContainer
             tab.isIncognito -> MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.4f)
-            else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+            else -> MaterialTheme.colorScheme.surfaceContainerHigh
         },
-        // 拖拽中的项加阴影，视觉上"提起来"，与静止项区分开
-        shadowElevation = if (isDragging) 8.dp else 0.dp,
+        // 拖拽中的项加阴影，视觉上"提起来"，与静止项区分开；
+        // 当前标签也给一点投影，让"正在看的那一个"浮在最上面。
+        shadowElevation = when {
+            isDragging -> 8.dp
+            isActive -> 2.dp
+            else -> 0.dp
+        },
         modifier = modifier
             .fillMaxWidth()
             .graphicsLayer { translationY = dragOffsetY }
-            .clip(RoundedCornerShape(16.dp))
+            .clip(RoundedCornerShape(24.dp))
             .clickable(onClick = onSelect),
     ) {
         Row(
@@ -417,8 +423,8 @@ private fun TabRow(
  */
 @Composable
 private fun TabThumbnail(tab: TabState, isActive: Boolean) {
-    val size = 36.dp
-    val shape = RoundedCornerShape(10.dp)
+    val size = 40.dp
+    val shape = RoundedCornerShape(14.dp)
     val favicon = tab.favicon
 
     Box(

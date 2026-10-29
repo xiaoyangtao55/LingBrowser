@@ -1,9 +1,13 @@
 package com.ling.browser.ui.theme
 
 import android.os.Build
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Shapes
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
@@ -11,7 +15,41 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 import com.ling.browser.data.prefs.AccentColor
+
+/**
+ * 「翎」的形状与动效 —— Material 3 Expressive 的两个支点。
+ *
+ * 1. **更大的圆角**。Expressive 的形态语言把「软」推到极限：按钮是全胶囊，
+ *    卡片/面板是 20~36dp 的大圆角，小控件也不再是 4dp 直角。这里把整套
+ *    shape token 统一抬大一档（额外加 8dp 起步），各处组件只要读
+ *    `MaterialTheme.shapes` 就自动跟上，不必逐个改。
+ *
+ * 2. **带回弹的弹簧**。M3E 的动效强调"有生命感"：展开/收起会让弹簧轻微过冲
+ *    （dampingRatio < 1），而不是缓入缓出的线性滑动。颜色则恰恰相反 ——
+ *    颜色插值不应回弹（过渡中会出现一层发灰的中间色），所以颜色一律用
+ *    `animateColorAsState` + 短时长 tween，不套用这里的弹簧。
+ */
+val LingShapes = Shapes(
+    extraSmall = RoundedCornerShape(8.dp),
+    small = RoundedCornerShape(14.dp),
+    medium = RoundedCornerShape(20.dp),
+    large = RoundedCornerShape(28.dp),
+    extraLarge = RoundedCornerShape(36.dp),
+)
+
+/**
+ * 全局动效参数。
+ *
+ * [expressive] 有轻微过冲（0.62），用于按压反馈、面板展开这类"短距离"动作，
+ * 过冲一点点看起来是弹性的；[settle] 近乎临界阻尼，用于尺寸/位置变化，
+ * 距离长时过冲会明显到变成抖动。
+ */
+object LingMotion {
+    val expressive = spring<Float>(dampingRatio = 0.62f, stiffness = Spring.StiffnessMediumLow)
+    val settle = spring<Float>(dampingRatio = 0.92f, stiffness = Spring.StiffnessMediumLow)
+}
 
 /**
  * Material You 3 配色方案。
@@ -23,6 +61,10 @@ import com.ling.browser.data.prefs.AccentColor
  * 预设只改「强调色系」（primary / secondary / tertiary 及其容器），
  * 中性色（background / surface / outline）沿用调校好的绿色方案：
  * 既保证六套配色观感统一，也避免手写六份完整色板带来的对比度错误。
+ *
+ * 中性色额外给出 surfaceContainer 系列 token：M3E 的分层靠「同色不同深度」，
+ * 浮动工具栏、面板、卡片都读这组值。不显式给的话会落到 M3 默认的紫灰，
+ * 与定制的绿灰背景拼在一起会有一层淡淡的紫味。
  */
 private val LingGreen = Color(0xFF1B6C4B)
 private val LingGreenLight = Color(0xFF7EDBAE)
@@ -46,6 +88,18 @@ internal val FallbackLight = lightColorScheme(
     surfaceVariant = Color(0xFFDCE5DC),
     onSurfaceVariant = Color(0xFF404943),
     outline = Color(0xFF707973),
+    outlineVariant = Color(0xFFBFC9C1),
+    surfaceTint = LingGreen,
+    surfaceDim = Color(0xFFD8DBD5),
+    surfaceBright = Color(0xFFF8FAF4),
+    surfaceContainerLowest = Color(0xFFFFFFFF),
+    surfaceContainerLow = Color(0xFFF2F4EF),
+    surfaceContainer = Color(0xFFECEEE9),
+    surfaceContainerHigh = Color(0xFFE6E8E3),
+    surfaceContainerHighest = Color(0xFFE0E3DD),
+    inverseSurface = Color(0xFF2E312F),
+    inverseOnSurface = Color(0xFFEFF1EC),
+    inversePrimary = LingGreenLight,
 )
 
 internal val FallbackDark = darkColorScheme(
@@ -66,6 +120,18 @@ internal val FallbackDark = darkColorScheme(
     surfaceVariant = Color(0xFF404943),
     onSurfaceVariant = Color(0xFFC0C9C1),
     outline = Color(0xFF8A938C),
+    outlineVariant = Color(0xFF404943),
+    surfaceTint = LingGreenLight,
+    surfaceDim = Color(0xFF111412),
+    surfaceBright = Color(0xFF373A37),
+    surfaceContainerLowest = Color(0xFF0C0F0D),
+    surfaceContainerLow = Color(0xFF191C1A),
+    surfaceContainer = Color(0xFF1D201E),
+    surfaceContainerHigh = Color(0xFF282B28),
+    surfaceContainerHighest = Color(0xFF323532),
+    inverseSurface = Color(0xFFE1E3DF),
+    inverseOnSurface = Color(0xFF2E312F),
+    inversePrimary = LingGreen,
 )
 
 /** 在绿色中性色之上换一套强调色。 */
@@ -270,6 +336,7 @@ fun LingTheme(
     MaterialTheme(
         colorScheme = colorScheme,
         typography = LingTypography,
+        shapes = LingShapes,
         content = content,
     )
 }

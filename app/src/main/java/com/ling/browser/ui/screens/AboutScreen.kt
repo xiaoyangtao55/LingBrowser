@@ -15,11 +15,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.material3.CenterAlignedTopAppBar
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -32,8 +28,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.graphics.drawable.toBitmap
-import com.ling.browser.ui.components.lingTopBarColors
-import com.ling.browser.ui.theme.LingIcons
+import com.ling.browser.ui.components.LingPageTopBar
 
 /**
  * 「关于」页：应用图标、版本信息、WebView 内核版本与开源许可。
@@ -42,7 +37,6 @@ import com.ling.browser.ui.theme.LingIcons
  * 而不是本应用打包进去的东西 —— 「翎」不自带内核，网页渲染全交给系统 WebView，
  * 所以版本取决于用户设备。写清楚这一点，用户遇到渲染差异时才有据可查。
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AboutScreen(
     onBack: () -> Unit,
@@ -62,15 +56,7 @@ fun AboutScreen(
     Scaffold(
         modifier = modifier.fillMaxSize(),
         topBar = {
-            CenterAlignedTopAppBar(
-                title = { Text("关于") },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(LingIcons.ArrowBack, contentDescription = "返回")
-                    }
-                },
-                colors = lingTopBarColors(),
-            )
+            LingPageTopBar(title = "关于", onBack = onBack)
         },
     ) { inner ->
         LazyColumn(
@@ -126,6 +112,10 @@ fun AboutScreen(
             kernelRows.forEach { (label, value) ->
                 item { InfoRow(label = label, value = value) }
             }
+
+            // ---- 交流 ----
+            item { AboutSectionHeader("交流") }
+            item { InfoRow(label = "QQ 群", value = "1129557211") }
 
             // ---- 开源许可 ----
             item { AboutSectionHeader("开源许可") }

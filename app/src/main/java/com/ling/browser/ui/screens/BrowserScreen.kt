@@ -1092,7 +1092,7 @@ fun BrowserScreen(
             properties = PopupProperties(focusable = true),
         ) {
             Surface(
-                shape = RoundedCornerShape(12.dp),
+                shape = RoundedCornerShape(20.dp),
                 color = MaterialTheme.colorScheme.surfaceContainerHigh,
                 shadowElevation = 8.dp,
                 modifier = Modifier.widthIn(max = 240.dp),
@@ -1776,8 +1776,8 @@ private data class MoreItem(
 /** 「更多」面板的列数：四列在手机上每格约 80dp，图标 + 两行文字刚好放得下。 */
 private const val MORE_GRID_COLUMNS = 4
 
-/** 格子高度：上边距 12dp + 图标 24dp + 间距 8dp + 最多两行文字，末行留一点余量。 */
-private val MORE_ITEM_HEIGHT = 84.dp
+/** 格子高度：上边距 10dp + 图标容器 44dp + 间距 8dp + 最多两行文字，末行留余量。 */
+private val MORE_ITEM_HEIGHT = 96.dp
 
 /**
  * 「更多」面板的图标网格：每行 [MORE_GRID_COLUMNS] 个，图标在上、文字在下。
@@ -1818,20 +1818,30 @@ private fun MoreGridItem(
     Column(
         modifier = modifier
             .height(MORE_ITEM_HEIGHT)
-            .clip(RoundedCornerShape(14.dp))
+            .clip(RoundedCornerShape(20.dp))
             .clickable(onClick = item.onClick)
             // 顶部对齐 + 固定上边距：不管文字是一行还是两行，图标都落在同一条
             // 水平线上。若用居中排列，两行文字的格子会把图标顶上去，
             // 一行文字的格子又把它压下来，整排图标就参差不齐了。
-            .padding(start = 4.dp, end = 4.dp, top = 12.dp),
+            .padding(start = 4.dp, end = 4.dp, top = 10.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Icon(
-            imageVector = item.icon,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.size(24.dp),
-        )
+        // M3E 的图标一律带容器：一枚浅色圆底把图标从背景上"托"起来，
+        // 比裸图标更贴合 Expressive 的颗粒感，也让一排图标更容易对齐。
+        Box(
+            modifier = Modifier
+                .size(44.dp)
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.surfaceContainerHighest),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = item.icon,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(22.dp),
+            )
+        }
         Spacer(Modifier.height(8.dp))
         Text(
             text = item.label,

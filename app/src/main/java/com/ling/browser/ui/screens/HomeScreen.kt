@@ -5,16 +5,22 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -36,6 +42,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.ling.browser.ui.theme.LingIcons
 import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -93,50 +100,62 @@ fun HomeScreen(
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             HomeClock()
-            // 搜索框宽度上限与旧版 HTML 一致（max-width: 320px），
-            // 小屏上会跟着父布局缩窄。
-            Box(
+            // 搜索框：M3E 的 search bar —— 全胶囊、浅色容器、带投影、
+            // 左侧一个搜索图标。宽度上限略放大到 360dp（旧版 320dp），
+            // 大屏上更舒展，小屏仍跟着父布局缩窄。
+            Surface(
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                tonalElevation = 0.dp,
+                shadowElevation = 4.dp,
                 modifier = Modifier
                     .padding(top = 28.dp)
-                    .widthIn(max = 320.dp)
+                    .widthIn(max = 360.dp)
                     .fillMaxWidth()
-                    .height(48.dp)
-                    .background(
-                        color = MaterialTheme.colorScheme.primaryContainer,
-                        shape = CircleShape,
-                    )
-                    .padding(horizontal = 16.dp),
-                contentAlignment = Alignment.Center,
+                    .height(56.dp),
             ) {
-                BasicTextField(
-                    value = query,
-                    onValueChange = { query = it },
-                    singleLine = true,
-                    textStyle = MaterialTheme.typography.bodyMedium.copy(
-                        color = MaterialTheme.colorScheme.onPrimaryContainer,
-                        textAlign = TextAlign.Center,
-                    ),
-                    cursorBrush = SolidColor(MaterialTheme.colorScheme.onPrimaryContainer),
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
-                    keyboardActions = KeyboardActions(onGo = { submit() }),
-                    modifier = Modifier.fillMaxWidth(),
-                    decorationBox = { inner ->
-                        Box(contentAlignment = Alignment.Center) {
-                            if (query.isEmpty()) {
-                                Text(
-                                    text = "搜索或输入网址",
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = MaterialTheme.colorScheme.onPrimaryContainer
-                                        .copy(alpha = 0.6f),
-                                    maxLines = 1,
-                                    textAlign = TextAlign.Center,
-                                    modifier = Modifier.fillMaxWidth(),
-                                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 20.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        imageVector = LingIcons.Search,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                        modifier = Modifier.size(20.dp),
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    BasicTextField(
+                        value = query,
+                        onValueChange = { query = it },
+                        singleLine = true,
+                        textStyle = MaterialTheme.typography.bodyLarge.copy(
+                            color = MaterialTheme.colorScheme.onSurface,
+                        ),
+                        cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
+                        keyboardActions = KeyboardActions(onGo = { submit() }),
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth(),
+                        decorationBox = { inner ->
+                            Box(contentAlignment = Alignment.CenterStart) {
+                                if (query.isEmpty()) {
+                                    Text(
+                                        text = "搜索或输入网址",
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            .copy(alpha = 0.7f),
+                                        maxLines = 1,
+                                    )
+                                }
+                                inner()
                             }
-                            inner()
-                        }
-                    },
-                )
+                        },
+                    )
+                }
             }
         }
     }
@@ -162,12 +181,14 @@ private fun HomeClock(modifier: Modifier = Modifier) {
     Text(
         text = text,
         style = TextStyle(
-            fontSize = 64.sp,
-            fontWeight = FontWeight.Light,
-            lineHeight = 64.sp,
+            fontSize = 68.sp,
+            // M3E 的大字号不是"细"，而是"有分量"：从 Light 提到 W400，
+            // 同时把字距收紧到 -1sp，大字号才不会显得松垮。
+            fontWeight = FontWeight.W400,
+            lineHeight = 68.sp,
             // 等宽数字：分钟跳动时各位不会左右抖。
             fontFeatureSettings = "tnum",
-            letterSpacing = 2.sp,
+            letterSpacing = (-1).sp,
             color = MaterialTheme.colorScheme.onBackground,
             // 自定义图片背景上文字可能与图片颜色重合，压一层深色投影保证可读；
             // 纯色背景上只呈现轻微立体感。

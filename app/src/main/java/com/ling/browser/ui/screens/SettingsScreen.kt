@@ -6,6 +6,7 @@ import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,10 +22,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -42,8 +43,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.ling.browser.data.prefs.AccentColor
 import com.ling.browser.data.prefs.DownloadLocation
@@ -54,7 +58,7 @@ import com.ling.browser.data.prefs.LingSettings
 import com.ling.browser.data.prefs.NightMode
 import com.ling.browser.data.prefs.ReaderFontSize
 import com.ling.browser.data.prefs.SearchEngine
-import com.ling.browser.ui.components.lingTopBarColors
+import com.ling.browser.ui.components.LingPageTopBar
 import com.ling.browser.ui.theme.LingIcons
 import com.ling.browser.ui.theme.accentSwatchColor
 
@@ -75,8 +79,86 @@ enum class SettingsGroup(val title: String) {
     ABOUT("关于"),
 }
 
+/** 设置总览的分区。三档分组沿用系统设置的阅读习惯，先粗后细。 */
+private enum class SettingsSection(val title: String) {
+    BASIC("基本"),
+    ADVANCED("高级"),
+    OTHER("其他"),
+}
+
+/** 总览页的一行：分组入口 + 它挂在哪个分区下。 */
+private data class SettingsEntry(
+    val section: SettingsSection,
+    val group: SettingsGroup,
+    val icon: ImageVector,
+    val title: String,
+    val subtitle: String,
+)
+
+/** 总览页的全部入口。摘要永远跟着当前设置走，所以每次重组时现算。 */
+private fun settingsEntries(settings: LingSettings): List<SettingsEntry> = listOf(
+    SettingsEntry(
+        section = SettingsSection.BASIC,
+        group = SettingsGroup.SEARCH_HOME,
+        icon = LingIcons.Search,
+        title = SettingsGroup.SEARCH_HOME.title,
+        subtitle = if (settings.customHomepage.isBlank()) {
+            "${settings.searchEngineLabel} · 内置主页"
+        } else {
+            "${settings.searchEngineLabel} · ${settings.customHomepage}"
+        },
+    ),
+    SettingsEntry(
+        section = SettingsSection.BASIC,
+        group = SettingsGroup.APPEARANCE,
+        icon = LingIcons.AutoAwesome,
+        title = SettingsGroup.APPEARANCE.title,
+        subtitle = "${nightModeLabel(settings.nightMode)} · 字号${settings.readerFontSize.label}",
+    ),
+    SettingsEntry(
+        section = SettingsSection.BASIC,
+        group = SettingsGroup.BROWSING,
+        icon = LingIcons.Public,
+        title = SettingsGroup.BROWSING.title,
+        subtitle = "JavaScript、无图模式、广告拦截",
+    ),
+    SettingsEntry(
+        section = SettingsSection.ADVANCED,
+        group = SettingsGroup.DOWNLOAD,
+        icon = LingIcons.Download,
+        title = SettingsGroup.DOWNLOAD.title,
+        subtitle = "${settings.downloaderType.label} · " +
+            "${downloadLocationShortLabel(settings.downloadLocation)}",
+    ),
+    SettingsEntry(
+        section = SettingsSection.ADVANCED,
+        group = SettingsGroup.PRIVACY,
+        icon = LingIcons.PrivacyTip,
+        title = SettingsGroup.PRIVACY.title,
+        subtitle = "选择性清除历史、Cookie、缓存与会话",
+    ),
+    SettingsEntry(
+        section = SettingsSection.ADVANCED,
+        group = SettingsGroup.BACKUP,
+        icon = LingIcons.Bookmark,
+        title = SettingsGroup.BACKUP.title,
+        subtitle = "导出书签与历史记录，或从其它浏览器导入",
+    ),
+    SettingsEntry(
+        section = SettingsSection.OTHER,
+        group = SettingsGroup.ABOUT,
+        icon = LingIcons.Article,
+        title = SettingsGroup.ABOUT.title,
+        subtitle = "版本、WebView 内核与开源许可",
+    ),
+)
+
 /**
  * 设置首页：只列分组，点进去才是该分组的具体设置项。
+ *
+ * 布局照系统设置的「大标题 + 搜索 + 分区卡片」来做：同一分区的入口装进一张
+ * 卡里、行间用内缩的细线分隔，而不是一行一张卡 —— 一列独立卡片会让页面
+ * 显得零碎，分组才有"一叠"的整体感。搜索框只过滤入口，不跳转页面。
  */
 @Composable
 fun SettingsScreen(
@@ -85,75 +167,53 @@ fun SettingsScreen(
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    SettingsPageScaffold(
-        title = "设置",
-        onBack = onBack,
-        modifier = modifier,
-        content = {
-            item {
-                GroupEntryRow(
-                    icon = LingIcons.Search,
-                    title = SettingsGroup.SEARCH_HOME.title,
-                    subtitle = if (settings.customHomepage.isBlank()) {
-                        "${settings.searchEngineLabel} · 内置主页"
-                    } else {
-                        "${settings.searchEngineLabel} · ${settings.customHomepage}"
-                    },
-                    onClick = { onOpenGroup(SettingsGroup.SEARCH_HOME) },
+    var query by remember { mutableStateOf("") }
+    val entries = settingsEntries(settings)
+    val visible = if (query.isBlank()) {
+        entries
+    } else {
+        entries.filter {
+            it.title.contains(query, ignoreCase = true) ||
+                it.subtitle.contains(query, ignoreCase = true)
+        }
+    }
+
+    Scaffold(
+        modifier = modifier.fillMaxSize(),
+        topBar = {
+            Column {
+                LingPageTopBar(
+                    title = "设置",
+                    onBack = onBack,
+                    action = { HelpButton(onClick = { onOpenGroup(SettingsGroup.ABOUT) }) },
                 )
-            }
-            item {
-                GroupEntryRow(
-                    icon = LingIcons.AutoAwesome,
-                    title = SettingsGroup.APPEARANCE.title,
-                    subtitle = "${nightModeLabel(settings.nightMode)} · " +
-                        "字号${settings.readerFontSize.label}",
-                    onClick = { onOpenGroup(SettingsGroup.APPEARANCE) },
-                )
-            }
-            item {
-                GroupEntryRow(
-                    icon = LingIcons.Public,
-                    title = SettingsGroup.BROWSING.title,
-                    subtitle = "JavaScript、无图模式、广告拦截",
-                    onClick = { onOpenGroup(SettingsGroup.BROWSING) },
-                )
-            }
-            item {
-                GroupEntryRow(
-                    icon = LingIcons.Download,
-                    title = SettingsGroup.DOWNLOAD.title,
-                    subtitle = "${settings.downloaderType.label} · " +
-                        "${downloadLocationShortLabel(settings.downloadLocation)}",
-                    onClick = { onOpenGroup(SettingsGroup.DOWNLOAD) },
-                )
-            }
-            item {
-                GroupEntryRow(
-                    icon = LingIcons.PrivacyTip,
-                    title = SettingsGroup.PRIVACY.title,
-                    subtitle = "选择性清除历史、Cookie、缓存与会话",
-                    onClick = { onOpenGroup(SettingsGroup.PRIVACY) },
-                )
-            }
-            item {
-                GroupEntryRow(
-                    icon = LingIcons.Bookmark,
-                    title = SettingsGroup.BACKUP.title,
-                    subtitle = "导出书签与历史记录，或从其它浏览器导入",
-                    onClick = { onOpenGroup(SettingsGroup.BACKUP) },
-                )
-            }
-            item {
-                GroupEntryRow(
-                    icon = LingIcons.Article,
-                    title = SettingsGroup.ABOUT.title,
-                    subtitle = "版本、WebView 内核与开源许可",
-                    onClick = { onOpenGroup(SettingsGroup.ABOUT) },
-                )
+                SettingsSearchField(query = query, onQueryChange = { query = it })
             }
         },
-    )
+    ) { inner ->
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(inner),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 32.dp),
+        ) {
+            if (visible.isEmpty()) {
+                item { SearchEmptyLabel() }
+            } else {
+                SettingsSection.entries.forEach { section ->
+                    val sectionEntries = visible.filter { it.section == section }
+                    if (sectionEntries.isNotEmpty()) {
+                        item(key = "header-${section.name}") {
+                            SectionHeader(section.title)
+                        }
+                        item(key = "card-${section.name}") {
+                            SettingsGroupCard(entries = sectionEntries, onOpen = onOpenGroup)
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /**
@@ -1396,13 +1456,12 @@ fun BackupSettingsScreen(
 }
 
 /**
- * 设置各页共用的外壳：居中标题栏 + 返回 + 可滚动内容区。
+ * 设置各页共用的外壳：大标题栏 + 返回 + 可滚动内容区。
  *
  * `content` 给默认值只是为了让调用点能用尾随 lambda ——
  * check_calls 会把"必填但没在括号里具名传入"的参数判成漏传，
  * 尾随 lambda 抓不到；给个默认值即可绕开。每个调用点仍会实打实提供内容。
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SettingsPageScaffold(
     title: String,
@@ -1413,15 +1472,7 @@ private fun SettingsPageScaffold(
     Scaffold(
         modifier = modifier.fillMaxSize(),
         topBar = {
-            CenterAlignedTopAppBar(
-                title = { Text(title) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(LingIcons.ArrowBack, contentDescription = "返回")
-                    }
-                },
-                colors = lingTopBarColors(),
-            )
+            LingPageTopBar(title = title, onBack = onBack)
         },
     ) { inner ->
         LazyColumn(
@@ -1434,12 +1485,131 @@ private fun SettingsPageScaffold(
     }
 }
 
-/** 设置首页的分组入口：图标 + 标题 + 摘要 + 右箭头，明确"可点进去"。 */
+/** 标题栏右侧的帮助入口：圆圈里一个问号，与系统设置的图标造型一致。 */
 @Composable
-private fun GroupEntryRow(
-    icon: ImageVector,
-    title: String,
-    subtitle: String,
+private fun HelpButton(onClick: () -> Unit) {
+    IconButton(onClick = onClick, modifier = Modifier.size(48.dp)) {
+        Box(
+            modifier = Modifier
+                .size(24.dp)
+                .border(1.5.dp, MaterialTheme.colorScheme.onSurface, CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = "?",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+        }
+    }
+}
+
+/** 总览页的搜索框：只过滤下方入口，不进入独立搜索页。 */
+@Composable
+private fun SettingsSearchField(
+    query: String,
+    onQueryChange: (String) -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp)
+            .height(56.dp)
+            .clip(CircleShape)
+            .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+            .padding(start = 20.dp, end = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = LingIcons.Search,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(22.dp),
+        )
+        Spacer(Modifier.width(14.dp))
+        Box(modifier = Modifier.weight(1f)) {
+            if (query.isEmpty()) {
+                Text(
+                    text = "搜索设置",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            BasicTextField(
+                value = query,
+                onValueChange = onQueryChange,
+                textStyle = MaterialTheme.typography.bodyLarge.copy(
+                    color = MaterialTheme.colorScheme.onSurface,
+                ),
+                singleLine = true,
+                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+        if (query.isNotEmpty()) {
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .clickable { onQueryChange("") },
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = LingIcons.Close,
+                    contentDescription = "清除",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+        }
+    }
+}
+
+/** 分区小标题，如「基本」「高级」。 */
+@Composable
+private fun SectionHeader(title: String) {
+    Text(
+        text = title,
+        style = MaterialTheme.typography.titleSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(start = 4.dp, top = 16.dp, bottom = 8.dp),
+    )
+}
+
+/**
+ * 一个分区的卡片：同一分区的行装在一起，行间用内缩细线分隔。
+ *
+ * 分隔线从文字起点开始（避让图标），这样线只切过"内容"不切过"图形"，
+ * 视觉上更像系统设置里的列表。
+ */
+@Composable
+private fun SettingsGroupCard(
+    entries: List<SettingsEntry>,
+    onOpen: (SettingsGroup) -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(24.dp))
+            .background(MaterialTheme.colorScheme.surfaceContainerLow),
+    ) {
+        entries.forEachIndexed { index, entry ->
+            SettingsEntryRow(entry = entry, onClick = { onOpen(entry.group) })
+            if (index != entries.lastIndex) {
+                HorizontalDivider(
+                    modifier = Modifier.padding(start = 64.dp, end = 16.dp),
+                    thickness = 1.dp,
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
+                )
+            }
+        }
+    }
+}
+
+/** 卡片里的一行：图标 + 标题 + 摘要 + 右箭头。 */
+@Composable
+private fun SettingsEntryRow(
+    entry: SettingsEntry,
     onClick: () -> Unit,
 ) {
     Row(
@@ -1449,21 +1619,16 @@ private fun GroupEntryRow(
             .padding(horizontal = 20.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.size(22.dp),
-        )
-        Spacer(Modifier.width(16.dp))
+        SettingsIcon(icon = entry.icon)
+        Spacer(Modifier.width(20.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(
-                text = title,
+                text = entry.title,
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.onSurface,
             )
             Text(
-                text = subtitle,
+                text = entry.subtitle,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -1476,12 +1641,39 @@ private fun GroupEntryRow(
             modifier = Modifier.size(20.dp),
         )
     }
-    HorizontalDivider(
-        modifier = Modifier.padding(start = 58.dp),
-        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f),
+}
+
+/** 搜索没有命中时的提示。 */
+@Composable
+private fun SearchEmptyLabel() {
+    Text(
+        text = "没有找到相关设置",
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        textAlign = TextAlign.Center,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 40.dp),
     )
 }
 
+/**
+ * 设置行左侧的图标。
+ *
+ * 列表里用裸图标而不是浅色圆底：一屏里每行都有圆底，整列会变成一片片
+ * 同亮度的圆点，反而抢掉标题的注意力；裸图标让文字成为主体。
+ */
+@Composable
+private fun SettingsIcon(icon: ImageVector) {
+    Icon(
+        imageVector = icon,
+        contentDescription = null,
+        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.size(24.dp),
+    )
+}
+
+/** 子页里的普通设置行：图标 + 标题 + 摘要 + 右箭头。 */
 @Composable
 private fun SettingRow(
     icon: ImageVector,
@@ -1492,17 +1684,15 @@ private fun SettingRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .padding(horizontal = 8.dp, vertical = 3.dp)
+            .clip(RoundedCornerShape(20.dp))
+            .background(MaterialTheme.colorScheme.surfaceContainerLow)
             .clickable(onClick = onClick)
-            .padding(horizontal = 20.dp, vertical = 14.dp),
+            .padding(start = 20.dp, end = 16.dp, top = 14.dp, bottom = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.size(22.dp),
-        )
-        Spacer(Modifier.width(16.dp))
+        SettingsIcon(icon = icon)
+        Spacer(Modifier.width(20.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = title,
@@ -1516,10 +1706,7 @@ private fun SettingRow(
             )
         }
     }
-    HorizontalDivider(
-        modifier = Modifier.padding(start = 58.dp),
-        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f),
-    )
+    // 卡片之间靠外边距分隔，不再画分隔线。
 }
 
 @Composable
@@ -1533,16 +1720,14 @@ private fun SwitchRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 20.dp, vertical = 12.dp),
+            .padding(horizontal = 8.dp, vertical = 3.dp)
+            .clip(RoundedCornerShape(20.dp))
+            .background(MaterialTheme.colorScheme.surfaceContainerLow)
+            .padding(start = 20.dp, end = 16.dp, top = 14.dp, bottom = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.size(22.dp),
-        )
-        Spacer(Modifier.width(16.dp))
+        SettingsIcon(icon = icon)
+        Spacer(Modifier.width(20.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = title,
@@ -1558,10 +1743,7 @@ private fun SwitchRow(
         Spacer(Modifier.width(12.dp))
         Switch(checked = checked, onCheckedChange = onCheckedChange)
     }
-    HorizontalDivider(
-        modifier = Modifier.padding(start = 58.dp),
-        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f),
-    )
+    // 卡片之间靠外边距分隔，不再画分隔线。
 }
 
 /** 夜间模式的中文名。放在一处，避免总览摘要与选择弹窗各写一遍。 */
