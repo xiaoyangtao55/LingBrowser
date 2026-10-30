@@ -677,7 +677,8 @@ if re.search(r"fun enterReaderMode[\s\S]{0,900}?javaScriptEnabled", mgr):
 else:
     bad("未处理用户关闭 JavaScript 的情况")
 
-if "readerContent" in mgr and re.search(r"private val readerContent", mgr):
+# 正文缓存挂在每个标签的 TabSession 上（原先是独立的 readerContent 表）
+if re.search(r"var readerContent: ReaderResult\.Ok\?", mgr):
     ok("缓存已提取正文（换字号要重排版，不能重新提取）")
 else:
     bad("未缓存正文 —— 调字号会得到空页面")
@@ -687,7 +688,7 @@ if re.search(r"fun refreshReaderFontSize\(fontSize: ReaderPage\.FontSize\)", mgr
 else:
     bad("重排版直接读 settings —— 设置异步落盘，会表现为'改了没反应'")
 
-if re.search(r"private fun recycleTab[\s\S]{0,300}?readerContent\.remove", mgr):
+if re.search(r"private fun recycleTab[\s\S]{0,300}?readerContent\s*=\s*null", mgr):
     ok("关闭标签时清掉正文缓存（否则内存一直涨）")
 else:
     bad("关闭标签未清理正文缓存")

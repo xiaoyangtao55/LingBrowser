@@ -97,6 +97,33 @@ data class ConsoleEntry(
 )
 
 /**
+ * 一个标签的附属簿记。WebView 本身仍在 `webViews` 里 —— 那张表同时是 LRU 访问序。
+ * 关闭标签时只需要丢弃这个对象，不必再逐个 remove 七张表。
+ */
+private class TabSession {
+    /** document-start 的注册句柄；脚本变更或实例重建时要先摘掉旧的。 */
+    val scriptHandlers = mutableListOf<ScriptHandler>()
+
+    /** 本页已注入过的 "脚本|时机|URL"，防止同一页重复执行。 */
+    val injectedScripts = mutableSetOf<String>()
+
+    /** (`脚本|命令` -> 菜单项)，供 UI 展示「脚本菜单」。 */
+    val menus = LinkedHashMap<String, UserScriptMenuCommand>()
+
+    /** 已提取的正文；退出阅读模式 / 标签关闭时丢弃。 */
+    var readerContent: ReaderResult.Ok? = null
+
+    /** 用户已明确放行的证书错误站点（主机名），只在本标签存活期间有效。 */
+    val certExceptions = mutableSetOf<String>()
+
+    /** 最近的 ERROR 级控制台消息（新页导航时清空）。 */
+    val console = mutableListOf<ConsoleEntry>()
+
+    /** 这个标签里的 `about:blank` 是不是"主页占位"，见 [WebTabManager.isHomePlaceholder]。 */
+    var isHomePlaceholder = false
+}
+
+/**
  * 标签页与 WebView 实例的管理者。
  *
  * 设计要点：WebView 的创建代价很高（每个实例约数 MB 原生内存），
@@ -130,12 +157,15 @@ class WebTabManager(private val context: Context) {
     private val webViews = LinkedHashMap<String, LingWebView>()
 
     /**
-     * 哪些标签的 WebView 里那个 `about:blank` 是"主页占位"。
+     * tabId -> 该标签的附属簿记（脚本句柄、注入记录、菜单、阅读缓存、证书放行、
+     * 控制台记录、主页占位标记）。WebView 不在其中，见 [webViews]。
      *
-     * 只在主线程读写（[loadHome]、加载回调、[closeTab]），与 [webViews] 同线程。
-     * 见 [isHomePlaceholder] 的说明。
+     * 只在主线程读写，与 [webViews] 同线程；关闭标签时整份丢弃，不必逐表 remove。
      */
-    private val homePlaceholderTabs = mutableSetOf<String>()
+    private val sessions = HashMap<String, TabSession>()
+
+    /** 取（必要时创建）标签的附属簿记。 */
+    private fun session(id: String): TabSession = sessions.getOrPut(id) { TabSession() }
 
     /** 主线程消息队列：用于把"销毁临时 WebView"这类动作推迟到回调之外。 */
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -172,15 +202,6 @@ class WebTabManager(private val context: Context) {
      */
     private var userScripts: List<EnabledUserScript> = emptyList()
 
-    /** tabId -> document-start 的注册句柄；脚本变更或实例重建时要先摘掉旧的。 */
-    private val scriptHandlers = mutableMapOf<String, MutableList<ScriptHandler>>()
-
-    /** tabId -> 本页已注入过的 "脚本|时机|URL"，防止同一页重复执行。 */
-    private val injectedScripts = mutableMapOf<String, MutableSet<String>>()
-
-    /** tabId -> (`脚本|命令` -> 菜单项)，供 UI 展示「脚本菜单」。 */
-    private val scriptMenus = LinkedHashMap<String, MutableMap<String, UserScriptMenuCommand>>()
-
     private val _userScriptMenus = MutableStateFlow<List<UserScriptMenuCommand>>(emptyList())
 
     /** 当前各标签页注册的脚本菜单命令。 */
@@ -212,9 +233,6 @@ class WebTabManager(private val context: Context) {
 
     // ---------------------------------------------------------------- 页面控制台错误
 
-    /** tabId -> 最近的 ERROR 级控制台消息（新页导航时清空）。 */
-    private val consoleByTab = LinkedHashMap<String, MutableList<ConsoleEntry>>()
-
     private val _consoleErrors = MutableStateFlow<List<ConsoleEntry>>(emptyList())
 
     /** 当前各标签页收集到的控制台错误，供「页面错误」面板展示。 */
@@ -230,27 +248,6 @@ class WebTabManager(private val context: Context) {
     private val documentStartSupported: Boolean = runCatching {
         WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
     }.getOrDefault(false)
-
-    /**
-     * tabId -> 已提取的正文。
-     *
-     * 为什么要缓存：进入阅读视图后，页面的 DOM 已经被替换掉了，
-     * 原文不再存在于 WebView 里。此时若用户调整字号，重新跑提取
-     * 只会得到"没有正文" —— 必须留一份原始结果用来重排版。
-     *
-     * 缓存随标签关闭 / 退出阅读模式清理，避免长期占内存
-     * （正文 HTML 通常几十 KB，几个标签累积起来也不小）。
-     */
-    private val readerContent = mutableMapOf<String, ReaderResult.Ok>()
-
-    /**
-     * tabId -> 用户已明确放行的证书错误站点（主机名）。
-     *
-     * 证书错误页「继续访问」的临时白名单：放行后本标签页再访问该主机就自动
-     * 放行，不再反复弹确认。只在本标签存活期间有效 —— 关标签即清
-     * （见 [recycleTab]），**不落盘、不跨标签**，避免一次手滑变成长期放行。
-     */
-    private val certExceptions = mutableMapOf<String, MutableSet<String>>()
 
     /**
      * 尚未裁决的证书错误（FIFO）。
@@ -566,7 +563,9 @@ class WebTabManager(private val context: Context) {
      * 数据经 GM 存储写进磁盘，那与"不留痕迹"直接冲突。
      */
     private fun registerDocumentStart(tabId: String, wv: LingWebView) {
-        scriptHandlers.remove(tabId)?.forEach { handler -> runCatching { handler.remove() } }
+        val ses = session(tabId)
+        ses.scriptHandlers.forEach { handler -> runCatching { handler.remove() } }
+        ses.scriptHandlers.clear()
         if (!documentStartSupported) return
 
         val handlers = mutableListOf<ScriptHandler>()
@@ -581,7 +580,7 @@ class WebTabManager(private val context: Context) {
         if (userScripts.isEmpty() ||
             _tabs.value.firstOrNull { it.id == tabId }?.isIncognito == true
         ) {
-            if (handlers.isNotEmpty()) scriptHandlers[tabId] = handlers
+            if (handlers.isNotEmpty()) ses.scriptHandlers.addAll(handlers)
             return
         }
 
@@ -597,7 +596,7 @@ class WebTabManager(private val context: Context) {
                 )
             }
         }
-        if (handlers.isNotEmpty()) scriptHandlers[tabId] = handlers
+        if (handlers.isNotEmpty()) ses.scriptHandlers.addAll(handlers)
     }
 
     /**
@@ -616,7 +615,7 @@ class WebTabManager(private val context: Context) {
         if (userScripts.isEmpty()) return
         if (_tabs.value.firstOrNull { it.id == tabId }?.isIncognito == true) return
 
-        val injected = injectedScripts.getOrPut(tabId) { mutableSetOf() }
+        val injected = session(tabId).injectedScripts
         for (entry in userScripts) {
             val actual = entry.script.runAt
             val due = actual == runAt ||
@@ -664,36 +663,30 @@ class WebTabManager(private val context: Context) {
         // 供「脚本菜单」面板展示并支持外接键盘直接触发。
         val key = accessKey.trim().take(1).uppercase()
             .takeIf { it.isNotEmpty() && it[0].isLetterOrDigit() } ?: ""
-        scriptMenus.getOrPut(tabId) { LinkedHashMap() }[menuKey(scriptId, commandId)] =
+        session(tabId).menus[menuKey(scriptId, commandId)] =
             UserScriptMenuCommand(tabId, scriptId, commandId, clean, key)
         publishMenus()
     }
 
     /** 页面里 `GM_unregisterMenuCommand` 移除一条命令。 */
     fun unregisterUserScriptMenu(tabId: String, scriptId: String, commandId: String) {
-        val map = scriptMenus[tabId] ?: return
+        val map = sessions[tabId]?.menus ?: return
         if (map.remove(menuKey(scriptId, commandId)) == null) return
-        if (map.isEmpty()) scriptMenus.remove(tabId)
         publishMenus()
     }
 
     /** 主框架导航 / 关标签时清空该页的命令：回调函数已经随旧文档销毁。 */
     private fun clearUserScriptMenus(tabId: String) {
-        if (scriptMenus.remove(tabId) == null) return
+        val menus = sessions[tabId]?.menus ?: return
+        menus.clear()
         publishMenus()
     }
 
     /** 脚本被停用或删除时，摘掉它留下的命令。 */
     private fun pruneMenus(enabledIds: Set<String>) {
         var changed = false
-        val iterator = scriptMenus.values.iterator()
-        while (iterator.hasNext()) {
-            val map = iterator.next()
-            if (map.values.removeAll { it.scriptId !in enabledIds }) changed = true
-            if (map.isEmpty()) {
-                iterator.remove()
-                changed = true
-            }
+        for (s in sessions.values) {
+            if (s.menus.values.removeAll { it.scriptId !in enabledIds }) changed = true
         }
         if (changed) publishMenus()
     }
@@ -705,7 +698,7 @@ class WebTabManager(private val context: Context) {
      * 拼接脚本体，避免把任意字符串送进 `evaluateJavascript`。
      */
     fun invokeUserScriptMenu(tabId: String, scriptId: String, commandId: String): Boolean {
-        val registered = scriptMenus[tabId]?.containsKey(menuKey(scriptId, commandId)) == true
+        val registered = sessions[tabId]?.menus?.containsKey(menuKey(scriptId, commandId)) == true
         val wv = webViews[tabId]
         if (!registered || wv == null) return false
         wv.evaluateJavascript(
@@ -762,7 +755,8 @@ class WebTabManager(private val context: Context) {
     }
 
     private fun publishMenus() {
-        _userScriptMenus.value = scriptMenus.values
+        _userScriptMenus.value = sessions.values
+            .mapNotNull { it.menus.takeIf { m -> m.isNotEmpty() } }
             .flatMap { it.values }
             .sortedWith(compareBy({ it.tabId }, { it.scriptId }))
     }
@@ -911,13 +905,12 @@ class WebTabManager(private val context: Context) {
             wv.loadUrl("about:blank")
             wv.destroy()
         }
-        // 用户脚本的两份簿记随标签一起清掉：句柄跟着 WebView 已销毁，
+        // 该标签的附属簿记随标签一起丢弃：脚本句柄跟着 WebView 已销毁，
         // 注入记录留着只会让同名 tabId 复用时误判"这页已经跑过"。
-        scriptHandlers.remove(id)
-        injectedScripts.remove(id)
-        scriptMenus.remove(id)
-        homePlaceholderTabs.remove(id)
+        sessions.remove(id)
         publishMenus()
+        // 控制台记录随 session 一起没了，但已发布的是快照，需要重算一次。
+        publishConsoleErrors()
         // 该标签的待裁决 Safe Browsing 与控制台记录同样随标签一起清掉。
         cancelSafeBrowsingFor(id)
         clearConsoleErrors(id)
@@ -950,9 +943,9 @@ class WebTabManager(private val context: Context) {
     private fun recycleTab(tab: TabState?) {
         tab?.favicon?.takeIf { !it.isRecycled }?.recycle()
         // 一并丢掉缓存的正文，否则关掉的标签会一直把它压在内存里
-        tab?.let { readerContent.remove(it.id) }
+        tab?.let { sessions[it.id]?.readerContent = null }
         // 证书放行白名单同样随手清掉：逃生口不该比标签活得久
-        tab?.let { certExceptions.remove(it.id) }
+        tab?.let { sessions[it.id]?.certExceptions?.clear() }
         // 还有未裁决的证书错误也一并取消：标签都没了，没人会再回答弹窗。
         tab?.let { cancelCertPromptsFor(it.id) }
         // 表单重提交同理：不兑现会让该 WebView 的加载一直挂着。
@@ -1163,7 +1156,7 @@ class WebTabManager(private val context: Context) {
                     // 提取是异步的，回来时用户可能已经切走或又加载了新页面。
                     // 不做这个校验就会把 A 页面的正文渲染到 B 页面上。
                     if (_activeId.value != id) return@evaluateJavascript
-                    readerContent[id] = result
+                    session(id).readerContent = result
                     renderReader(id, result)
                 }
                 else -> onResult(result)
@@ -1282,8 +1275,9 @@ class WebTabManager(private val context: Context) {
     /** 退出阅读模式：回到原文。 */
     fun exitReaderMode() {
         val id = _activeId.value
-        val cached = readerContent[id] ?: return
-        readerContent.remove(id)
+        val ses = sessions[id] ?: return
+        val cached = ses.readerContent ?: return
+        ses.readerContent = null
         // 原文地址来自提取脚本（优先 canonical），正常情况下是 http(s)。
         // 万一它仍是个自定义协议，loadUrl 会拒绝加载，用户就**卡在阅读视图
         // 出不去**了 —— 所以这里退回网页历史：back 能回到进入阅读模式前的
@@ -1312,7 +1306,7 @@ class WebTabManager(private val context: Context) {
      * 既不能复制也没法改，拿去提交还会让 WebView 报 ERR_UNKNOWN_URL_SCHEME；
      * 进入编辑态时应该给出能用的真实地址（来源就是提取时缓存下来的 canonical）。
      */
-    fun readerOriginalUrl(id: String = _activeId.value): String? = readerContent[id]?.url
+    fun readerOriginalUrl(id: String = _activeId.value): String? = sessions[id]?.readerContent?.url
 
     /**
      * 当前标签的逻辑地址（[TabState.url]）。
@@ -1331,7 +1325,7 @@ class WebTabManager(private val context: Context) {
      * 第一个网页按返回时，状态会被写成 about:blank，主页不显示、地址栏还留着旧网址。
      */
     private fun isHomePlaceholder(id: String, url: String?): Boolean =
-        url?.trim() == HOME_PLACEHOLDER_URL && homePlaceholderTabs.contains(id)
+        url?.trim() == HOME_PLACEHOLDER_URL && sessions[id]?.isHomePlaceholder == true
 
     /**
      * 进入主页：状态切成主页，WebView 里只留一个空白占位文档。
@@ -1363,10 +1357,10 @@ class WebTabManager(private val context: Context) {
         // 放在早退之前：万一标记在某个时刻被清掉，这次回主页也要补回来。
         wv.isHomePlaceholderDocument = true
         // 已经在主页占位上（反复点「主页」）：什么都不做，别往历史里再压一条。
-        // 判据必须看 WebView 的实时地址，而不是 homePlaceholderTabs 里有没有 id：
-        // 从主页打开网页后同一个标签仍留在集合里，但这时再点「主页」必须真的回去。
+        // 判据必须看 WebView 的实时地址，而不是 session 里的 isHomePlaceholder：
+        // 从主页打开网页后同一个标签的标记仍在，但这时再点「主页」必须真的回去。
         if (isHomePlaceholder(id, wv.url)) return
-        homePlaceholderTabs.add(id)
+        session(id).isHomePlaceholder = true
         wv.stopLoading()
         // WebView 自身的底改透明：主页前景是 Compose，背景由原生背景层在
         // WebView 之下供色（见 HomeBackgroundLayer），白底会把背景整个盖住。
@@ -1462,7 +1456,7 @@ class WebTabManager(private val context: Context) {
         val tab = _tabs.value.firstOrNull { it.id == id } ?: return
         val host = runCatching { Uri.parse(tab.url).host }.getOrNull()
             ?.takeIf { it.isNotBlank() } ?: return
-        certExceptions.getOrPut(id) { mutableSetOf() }.add(host)
+        session(id).certExceptions.add(host)
         loadUrl(id, tab.url)
     }
 
@@ -1482,7 +1476,7 @@ class WebTabManager(private val context: Context) {
             handler.cancel()
             return
         }
-        if (certExceptions[tabId]?.contains(host) == true) {
+        if (sessions[tabId]?.certExceptions?.contains(host) == true) {
             handler.proceed()
             // 放行 ≠ 安全：地址栏继续标「证书错误」。
             if (mainFrame) {
@@ -1513,7 +1507,7 @@ class WebTabManager(private val context: Context) {
         certShown = null
         if (proceed) {
             if (remember) {
-                certExceptions.getOrPut(item.tabId) { mutableSetOf() }.add(item.prompt.host)
+                session(item.tabId).certExceptions.add(item.prompt.host)
             }
             item.handler.proceed()
             if (item.prompt.mainFrame) {
@@ -1704,7 +1698,7 @@ class WebTabManager(private val context: Context) {
      */
     private fun recordConsoleError(tabId: String, message: String, source: String, line: Int) {
         if (message.isBlank()) return
-        val list = consoleByTab.getOrPut(tabId) { mutableListOf() }
+        val list = session(tabId).console
         val last = list.lastOrNull()
         // 同一个循环里反复报同一条错误时不要刷屏。
         if (last != null && last.message == message && last.line == line) return
@@ -1715,12 +1709,15 @@ class WebTabManager(private val context: Context) {
 
     /** 清空某标签页的控制台错误（主框架导航 / 关闭标签时调用）。 */
     fun clearConsoleErrors(tabId: String) {
-        if (consoleByTab.remove(tabId) == null) return
+        // 只清记录，不丢整份 session —— 该标签的其它簿记还要用。
+        val ses = sessions[tabId] ?: return
+        if (ses.console.isEmpty()) return
+        ses.console.clear()
         publishConsoleErrors()
     }
 
     private fun publishConsoleErrors() {
-        _consoleErrors.value = consoleByTab.values.flatten()
+        _consoleErrors.value = sessions.values.flatMap { it.console }
     }
 
     /**
@@ -2218,7 +2215,7 @@ class WebTabManager(private val context: Context) {
                 onPageStarted = { url ->
                     // 新一次主框架导航：用户脚本的"本页已注入"闸门清零。
                     // 不放在 onPageFinished 里清 —— 那会把同页的第二次回调当成新页。
-                    injectedScripts.remove(id)
+                    sessions[id]?.injectedScripts?.clear()
                     // 脚本菜单的回调绑在旧文档上，导航后必然失效，整批清掉。
                     clearUserScriptMenus(id)
                     // 控制台错误属于旧文档，新页从零开始记。
@@ -2473,11 +2470,15 @@ class WebTabManager(private val context: Context) {
         val deadViews = webViews.toMap()
         webViews.clear()
         deadViews.forEach { (tabId, wv) ->
-            // document-start 的注册句柄跟着实例一起失效，先清掉记录避免重复移除。
-            scriptHandlers.remove(tabId)?.forEach { handler ->
-                runCatching { handler.remove() }
+            // document-start 的注册句柄跟着实例一起失效，先摘掉旧的再清空记录，
+            // 避免同一次销毁里重复移除。
+            sessions[tabId]?.let { ses ->
+                ses.scriptHandlers.forEach { handler ->
+                    runCatching { handler.remove() }
+                }
+                ses.scriptHandlers.clear()
+                ses.injectedScripts.clear()
             }
-            injectedScripts.remove(tabId)
             (wv.parent as? FrameLayout)?.removeView(wv)
             runCatching {
                 wv.stopLoading()
@@ -2502,8 +2503,9 @@ class WebTabManager(private val context: Context) {
             val victim = webViews.keys.firstOrNull { it != _activeId.value } ?: return
             webViews.remove(victim)?.let { wv ->
                 // 实例销毁后主页占位身份一并失效：重建出来的 WebView 是空白的，
-                // 若集合里还留着这个 id，它自己导航到 about:blank 就会被误认成主页。
-                homePlaceholderTabs.remove(victim)
+                // 若 session 里还留着这个标记，它自己导航到 about:blank 就会被误认成主页。
+                // 只清标记、保留 session：标签本身还在。
+                sessions[victim]?.isHomePlaceholder = false
                 (wv.parent as? FrameLayout)?.removeView(wv)
                 wv.destroy()
             }
@@ -2566,11 +2568,16 @@ class WebTabManager(private val context: Context) {
         _tabs.value.forEach { recycleTab(it) }
         _tabs.value = emptyList()
         _activeId.value = ""
-        scriptMenus.clear()
+        // 实例已销毁，document-start 的注册句柄先摘掉；随后整份簿记一起丢弃。
+        sessions.values.forEach { ses ->
+            ses.scriptHandlers.forEach { handler ->
+                runCatching { handler.remove() }
+            }
+        }
+        sessions.clear()
         publishMenus()
         // UI 即将销毁：待裁决项全部退回安全页，控制台记录也没有留存的必要。
         cancelSafeBrowsing()
-        consoleByTab.clear()
         publishConsoleErrors()
     }
 
