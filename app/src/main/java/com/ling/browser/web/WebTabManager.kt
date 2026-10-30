@@ -36,7 +36,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
-import org.json.JSONObject
 
 /**
  * 一次等待用户裁决的证书错误。
@@ -100,7 +99,7 @@ data class ConsoleEntry(
  * 一个标签的附属簿记。WebView 本身仍在 `webViews` 里 —— 那张表同时是 LRU 访问序。
  * 关闭标签时只需要丢弃这个对象，不必再逐个 remove 七张表。
  */
-private class TabSession {
+internal class TabSession {
     /** document-start 的注册句柄；脚本变更或实例重建时要先摘掉旧的。 */
     val scriptHandlers = mutableListOf<ScriptHandler>()
 
@@ -195,17 +194,28 @@ class WebTabManager(private val context: Context) {
     private var mergedBlockRules: Set<String> = settings.adBlockRules
 
     /**
-     * 启用中的用户脚本快照（见 [com.ling.browser.data.repo.UserScriptRepository]）。
+     * 用户脚本注入 / GM 桥（document-start 注册、按时机注入、菜单、值广播）。
      *
-     * 与订阅域名同理：web 层不认识仓库，由 UI 层经 [applyUserScripts] 注入。
-     * 快照里的 `valuesJson` 是 `GM_getValue` 的只读初值，注入时随包装代码一起下发。
+     * 脚本快照、菜单状态与注入记录都收在这个功能簇里（见 [ScriptBridge]）；
+     * 宿主只提供 session / WebView 表与"是否无痕"这三样事实。
      */
-    private var userScripts: List<EnabledUserScript> = emptyList()
+    private val scriptBridge = ScriptBridge(object : ScriptBridgeHost {
+        override fun session(tabId: String): TabSession = this@WebTabManager.session(tabId)
 
-    private val _userScriptMenus = MutableStateFlow<List<UserScriptMenuCommand>>(emptyList())
+        override fun findSession(tabId: String): TabSession? = this@WebTabManager.sessions[tabId]
+
+        override val allSessions: Collection<TabSession>
+            get() = this@WebTabManager.sessions.values
+
+        override val webViews: Map<String, LingWebView>
+            get() = this@WebTabManager.webViews
+
+        override fun isIncognito(tabId: String): Boolean =
+            this@WebTabManager._tabs.value.firstOrNull { it.id == tabId }?.isIncognito == true
+    })
 
     /** 当前各标签页注册的脚本菜单命令。 */
-    val userScriptMenus: StateFlow<List<UserScriptMenuCommand>> = _userScriptMenus.asStateFlow()
+    val userScriptMenus: StateFlow<List<UserScriptMenuCommand>> get() = scriptBridge.menus
 
     // ---------------------------------------------------------------- Safe Browsing
 
@@ -237,17 +247,6 @@ class WebTabManager(private val context: Context) {
 
     /** 当前各标签页收集到的控制台错误，供「页面错误」面板展示。 */
     val consoleErrors: StateFlow<List<ConsoleEntry>> = _consoleErrors.asStateFlow()
-
-    /**
-     * 系统 WebView 是否支持 document-start 注入。
-     *
-     * 不支持时 `@run-at document-start` 的脚本降级到 [ScriptRunAt.END]
-     * （首帧已提交，是可达的最早时机）。特性检查本身在老系统上可能抛异常，
-     * 因此包一层 runCatching，失败按"不支持"处理。
-     */
-    private val documentStartSupported: Boolean = runCatching {
-        WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
-    }.getOrDefault(false)
 
     /**
      * 尚未裁决的证书错误（FIFO）。
@@ -548,228 +547,43 @@ class WebTabManager(private val context: Context) {
      * 重注册只影响**下一次导航**：当前页已经跑过的脚本不会重跑（否则改一下开关
      * 就会在页面上叠一份副作用）。
      */
-    fun applyUserScripts(scripts: List<EnabledUserScript>) {
-        userScripts = scripts
-        webViews.forEach { (id, wv) -> registerDocumentStart(id, wv) }
-        // 脚本被停用/删除后，它注册的菜单也不该再出现在界面里。
-        pruneMenus(scripts.mapTo(HashSet()) { it.id })
-    }
-
-    /**
-     * 给一个 WebView 注册全部 document-start 脚本。
-     *
-     * `addDocumentStartJavaScript` 是按 WebView 注册、对**后续每次导航**生效的，
-     * 因此这里先摘掉旧句柄再按最新快照重注册。无痕标签整体跳过：脚本可能把
-     * 数据经 GM 存储写进磁盘，那与"不留痕迹"直接冲突。
-     */
-    private fun registerDocumentStart(tabId: String, wv: LingWebView) {
-        val ses = session(tabId)
-        ses.scriptHandlers.forEach { handler -> runCatching { handler.remove() } }
-        ses.scriptHandlers.clear()
-        if (!documentStartSupported) return
-
-        val handlers = mutableListOf<ScriptHandler>()
-        // 浏览器级"新标签"桥：与用户脚本无关，每个 WebView 都要挂。
-        runCatching {
-            handlers += WebViewCompat.addDocumentStartJavaScript(
-                wv,
-                TAB_LINK_JS,
-                setOf("*"),
-            )
-        }
-        if (userScripts.isEmpty() ||
-            _tabs.value.firstOrNull { it.id == tabId }?.isIncognito == true
-        ) {
-            if (handlers.isNotEmpty()) ses.scriptHandlers.addAll(handlers)
-            return
-        }
-
-        for (entry in userScripts) {
-            if (entry.script.runAt != ScriptRunAt.START) continue
-            val origins = entry.script.allowedOrigins
-            if (origins.isEmpty()) continue
-            runCatching {
-                handlers += WebViewCompat.addDocumentStartJavaScript(
-                    wv,
-                    scriptWrapper(entry.script, entry.id, entry.valuesJson, entry.requireCode, entry.resourcesJson),
-                    origins,
-                )
-            }
-        }
-        if (handlers.isNotEmpty()) ses.scriptHandlers.addAll(handlers)
-    }
-
-    /**
-     * 在某个时机把匹配当前 URL 的脚本注入页面。
-     *
-     * 每个"脚本 + 时机 + URL"只注入一次：`onPageCommitVisible` 与
-     * `onPageFinished` 都可能对同一页触发多次，不设闸门会让脚本重复执行。
-     * 闸门在 [onPageStarted] 清零（新一次主框架导航）。
-     */
-    private fun injectUserScripts(
-        tabId: String,
-        wv: LingWebView,
-        url: String,
-        runAt: ScriptRunAt,
-    ) {
-        if (userScripts.isEmpty()) return
-        if (_tabs.value.firstOrNull { it.id == tabId }?.isIncognito == true) return
-
-        val injected = session(tabId).injectedScripts
-        for (entry in userScripts) {
-            val actual = entry.script.runAt
-            val due = actual == runAt ||
-                // document-start 的脚本在 END 再兜一次：注册是按 WebView 提前做的，
-                // 脚本在页面打开之后才导入、或注册被系统静默拒绝时，注册就不会生效，
-                // 而 END 之外的时机不会补跑，表现为"脚本凭空消失"。
-                // 是否真的需要补，由下面页面里的注入标记决定。
-                (actual == ScriptRunAt.START && runAt == ScriptRunAt.END)
-            if (!due) continue
-            if (!entry.script.matches(url)) continue
-            if (!injected.add("${entry.id}|$runAt|$url")) continue
-            val code = scriptWrapper(
-                entry.script,
-                entry.id,
-                entry.valuesJson,
-                entry.requireCode,
-                entry.resourcesJson,
-            )
-            // document-start 不可用时 START 直接降级到 END，无需探测；
-            // 可用时先问页面"这份脚本跑过了吗"，避免同一页重复执行。
-            if (actual == ScriptRunAt.START && documentStartSupported) {
-                val probe = "!!(window.__lingGMInjected&&window.__lingGMInjected[${jsString(scriptMarker(entry.id))}])"
-                wv.evaluateJavascript(probe) { seen ->
-                    if (seen != "true") wv.evaluateJavascript(code, null)
-                }
-            } else {
-                wv.evaluateJavascript(code, null)
-            }
-        }
-    }
+    fun applyUserScripts(scripts: List<EnabledUserScript>) = scriptBridge.applyScripts(scripts)
 
     // ---------------------------------------------------------------- 脚本菜单 / 跨页值同步
 
-    /** 页面里 `GM_registerMenuCommand` 注册一条命令。 */
+    /** 页面里 `GM_registerMenuCommand` 注册一条命令（见 [ScriptBridge.registerMenu]）。 */
     fun registerUserScriptMenu(
         tabId: String,
         scriptId: String,
         commandId: String,
         label: String,
         accessKey: String = "",
-    ) {
-        if (commandId.isEmpty()) return
-        val clean = label.trim().ifEmpty { "未命名命令" }.take(MAX_MENU_LABEL)
-        // 只接受单个字母/数字：accessKey 在桌面端是菜单的键盘助记键，这里存下来
-        // 供「脚本菜单」面板展示并支持外接键盘直接触发。
-        val key = accessKey.trim().take(1).uppercase()
-            .takeIf { it.isNotEmpty() && it[0].isLetterOrDigit() } ?: ""
-        session(tabId).menus[menuKey(scriptId, commandId)] =
-            UserScriptMenuCommand(tabId, scriptId, commandId, clean, key)
-        publishMenus()
-    }
+    ) = scriptBridge.registerMenu(tabId, scriptId, commandId, label, accessKey)
 
     /** 页面里 `GM_unregisterMenuCommand` 移除一条命令。 */
-    fun unregisterUserScriptMenu(tabId: String, scriptId: String, commandId: String) {
-        val map = sessions[tabId]?.menus ?: return
-        if (map.remove(menuKey(scriptId, commandId)) == null) return
-        publishMenus()
-    }
+    fun unregisterUserScriptMenu(tabId: String, scriptId: String, commandId: String) =
+        scriptBridge.unregisterMenu(tabId, scriptId, commandId)
 
-    /** 主框架导航 / 关标签时清空该页的命令：回调函数已经随旧文档销毁。 */
-    private fun clearUserScriptMenus(tabId: String) {
-        val menus = sessions[tabId]?.menus ?: return
-        menus.clear()
-        publishMenus()
-    }
+    /** 执行一条菜单命令（见 [ScriptBridge.invokeMenu]）。 */
+    fun invokeUserScriptMenu(tabId: String, scriptId: String, commandId: String): Boolean =
+        scriptBridge.invokeMenu(tabId, scriptId, commandId)
 
-    /** 脚本被停用或删除时，摘掉它留下的命令。 */
-    private fun pruneMenus(enabledIds: Set<String>) {
-        var changed = false
-        for (s in sessions.values) {
-            if (s.menus.values.removeAll { it.scriptId !in enabledIds }) changed = true
-        }
-        if (changed) publishMenus()
-    }
-
-    /**
-     * 执行一条菜单命令。
-     *
-     * 只查原生侧登记过的命令，再把命令 id 交给页面自己的分发器 —— 原生从不
-     * 拼接脚本体，避免把任意字符串送进 `evaluateJavascript`。
-     */
-    fun invokeUserScriptMenu(tabId: String, scriptId: String, commandId: String): Boolean {
-        val registered = sessions[tabId]?.menus?.containsKey(menuKey(scriptId, commandId)) == true
-        val wv = webViews[tabId]
-        if (!registered || wv == null) return false
-        wv.evaluateJavascript(
-            "window.__lingGMMenu&&window.__lingGMMenu(${jsString(scriptMarker(scriptId))},${jsString(commandId)})",
-            null,
-        )
-        return true
-    }
-
-    /**
-     * 把 GM 值的变更广播给**其它**标签页。
-     *
-     * 只发消息不落盘：[com.ling.browser.data.repo.UserScriptRepository] 已经写过了。
-     * 发起页自己不需要广播 —— 它的 `V` 与监听器在 `GM_setValue` 里已同步更新。
-     */
+    /** 把 GM 值的变更广播给**其它**标签页（见 [ScriptBridge.broadcastValue]）。 */
     fun broadcastUserScriptValue(
         scriptId: String,
         key: String,
         oldValue: Any?,
         newValue: Any?,
         exceptTabId: String?,
-    ) {
-        if (webViews.isEmpty()) return
-        val js = "window.__lingGMValue&&window.__lingGMValue(" +
-            "${jsString(scriptMarker(scriptId))},${jsString(key)},${jsLiteral(oldValue)},${jsLiteral(newValue)},true)"
-        for ((tabId, wv) in webViews) {
-            if (tabId == exceptTabId) continue
-            if (_tabs.value.firstOrNull { it.id == tabId }?.isIncognito == true) continue
-            wv.evaluateJavascript(js, null)
-        }
-    }
+    ) = scriptBridge.broadcastValue(scriptId, key, oldValue, newValue, exceptTabId)
 
     /** 通知点击回传页面里的 `onclick`（详情见 [com.ling.browser.ui.BrowserViewModel.postUserScriptNotification]）。 */
-    fun dispatchUserScriptNotificationClick(tabId: String, scriptId: String, notificationId: String) {
-        val wv = webViews[tabId] ?: return
-        wv.evaluateJavascript(
-            "window.__lingGMNotice&&window.__lingGMNotice(${jsString(scriptMarker(scriptId))},${jsString(notificationId)},'click')",
-            null,
-        )
-    }
+    fun dispatchUserScriptNotificationClick(tabId: String, scriptId: String, notificationId: String) =
+        scriptBridge.dispatchNotificationClick(tabId, scriptId, notificationId)
 
-    /**
-     * 通知被点击后回传 `ondone`。
-     *
-     * Tampermonkey 里 `ondone` 在通知关闭时触发；Android 无法可靠监听"划掉通知"，
-     * 因此在点击（必然伴随通知收起）时补一次 `done=true` —— 覆盖绝大多数用法。
-     */
-    fun dispatchUserScriptNotificationDone(tabId: String, scriptId: String, notificationId: String) {
-        val wv = webViews[tabId] ?: return
-        wv.evaluateJavascript(
-            "window.__lingGMNotice&&window.__lingGMNotice(${jsString(scriptMarker(scriptId))},${jsString(notificationId)},'done')",
-            null,
-        )
-    }
-
-    private fun publishMenus() {
-        _userScriptMenus.value = sessions.values
-            .mapNotNull { it.menus.takeIf { m -> m.isNotEmpty() } }
-            .flatMap { it.values }
-            .sortedWith(compareBy({ it.tabId }, { it.scriptId }))
-    }
-
-    private fun menuKey(scriptId: String, commandId: String): String = "$scriptId|$commandId"
-
-    /** null / JSON null 都按 JS 的 `undefined` 传，与 Tampermonkey 的删除语义一致。 */
-    private fun jsLiteral(value: Any?): String = when (value) {
-        null, JSONObject.NULL -> "undefined"
-        is String -> jsString(value)
-        is Number, is Boolean -> value.toString()
-        else -> runCatching { JSONObject.wrap(value)?.toString() }.getOrNull() ?: "undefined"
-    }
+    /** 通知被点击后回传 `ondone`（细节见 [ScriptBridge.dispatchNotificationDone]）。 */
+    fun dispatchUserScriptNotificationDone(tabId: String, scriptId: String, notificationId: String) =
+        scriptBridge.dispatchNotificationDone(tabId, scriptId, notificationId)
 
     /** 命中一次拦截 +1。由后台线程经 [LingWebViewClient] 的回调调用（见 [blockedCount]）。 */
     private fun countBlocked() {
@@ -908,7 +722,7 @@ class WebTabManager(private val context: Context) {
         // 该标签的附属簿记随标签一起丢弃：脚本句柄跟着 WebView 已销毁，
         // 注入记录留着只会让同名 tabId 复用时误判"这页已经跑过"。
         sessions.remove(id)
-        publishMenus()
+        scriptBridge.publishMenus()
         // 控制台记录随 session 一起没了，但已发布的是快照，需要重算一次。
         publishConsoleErrors()
         // 该标签的待裁决 Safe Browsing 与控制台记录同样随标签一起清掉。
@@ -1951,9 +1765,8 @@ class WebTabManager(private val context: Context) {
                 }
             }
 
-            // 这个 WebView 是新建的（或刚从 LRU 里被回收后重建），
             // document-start 的注册随之丢失，必须重新挂上。
-            registerDocumentStart(id, wv)
+            scriptBridge.registerDocumentStart(id, wv)
             webChromeClient = object : WebChromeClient() {
                 override fun onProgressChanged(view: WebView?, newProgress: Int) {
                     updateTab(id) { it.copy(progress = newProgress) }
@@ -2042,7 +1855,7 @@ class WebTabManager(private val context: Context) {
                 // `window.open()` → 新标签。
                 //
                 // `<a target="_blank">` 的点击不走这里，而是在页面里由
-                // [TAB_LINK_JS] 拦截后交给宿主 —— 这条回调依赖宿主提供一个
+                // ScriptBridge 注入的新标签脚本拦截后交给宿主 —— 这条回调依赖宿主提供一个
                 // 临时 WebView 接住弹窗，实测部分机型/WebView 版本上即使挂进
                 // 窗口也不会启动导航，回调永远不来。window.open 没有 DOM 事件
                 // 可拦，只能继续走这条路。
@@ -2213,11 +2026,9 @@ class WebTabManager(private val context: Context) {
             webViewClient = LingWebViewClient(
                 isIncognito = incognito,
                 onPageStarted = { url ->
-                    // 新一次主框架导航：用户脚本的"本页已注入"闸门清零。
-                    // 不放在 onPageFinished 里清 —— 那会把同页的第二次回调当成新页。
-                    sessions[id]?.injectedScripts?.clear()
-                    // 脚本菜单的回调绑在旧文档上，导航后必然失效，整批清掉。
-                    clearUserScriptMenus(id)
+                    // 新一次主框架导航：注入闸门清零、旧文档的脚本菜单整批失效
+                    // （细节见 ScriptBridge.onPageStarted）。
+                    scriptBridge.onPageStarted(id)
                     // 控制台错误属于旧文档，新页从零开始记。
                     clearConsoleErrors(id)
                     // 内部页在 WebView 里的地址都不是逻辑地址：
@@ -2338,8 +2149,8 @@ class WebTabManager(private val context: Context) {
                         // 用户脚本：END 在这里补一次（个别页面不发 onPageCommitVisible），
                         // 再跑 IDLE 那批。两处都有一页一次的闸门，不会重复执行。
                         // 顺序固定为 END → IDLE，与脚本时机的语义一致。
-                        injectUserScripts(id, wv, url, ScriptRunAt.END)
-                        injectUserScripts(id, wv, url, ScriptRunAt.IDLE)
+                        scriptBridge.injectScripts(id, wv, url, ScriptRunAt.END)
+                        scriptBridge.injectScripts(id, wv, url, ScriptRunAt.IDLE)
 
                         // 历史记录只记真实网址。阅读视图的 url 是合成的
                         // ling://reader，主页是 ling://home —— 两者都没有记录价值，
@@ -2355,7 +2166,7 @@ class WebTabManager(private val context: Context) {
                     if (!isHomePlaceholder(id, url) &&
                         !InternalPage.isInternal(url, logicalUrlOf(id))
                     ) {
-                        injectUserScripts(id, wv, url, ScriptRunAt.END)
+                        scriptBridge.injectScripts(id, wv, url, ScriptRunAt.END)
                     }
                 },
                 onReceivedTitle = { t ->
@@ -2470,15 +2281,9 @@ class WebTabManager(private val context: Context) {
         val deadViews = webViews.toMap()
         webViews.clear()
         deadViews.forEach { (tabId, wv) ->
-            // document-start 的注册句柄跟着实例一起失效，先摘掉旧的再清空记录，
-            // 避免同一次销毁里重复移除。
-            sessions[tabId]?.let { ses ->
-                ses.scriptHandlers.forEach { handler ->
-                    runCatching { handler.remove() }
-                }
-                ses.scriptHandlers.clear()
-                ses.injectedScripts.clear()
-            }
+            // document-start 的注册句柄跟着实例一起失效：摘掉旧的、清空注入记录，
+            // 但保留整份 session（标签本身还在）。
+            scriptBridge.releaseRendererHandles(tabId)
             (wv.parent as? FrameLayout)?.removeView(wv)
             runCatching {
                 wv.stopLoading()
@@ -2569,13 +2374,9 @@ class WebTabManager(private val context: Context) {
         _tabs.value = emptyList()
         _activeId.value = ""
         // 实例已销毁，document-start 的注册句柄先摘掉；随后整份簿记一起丢弃。
-        sessions.values.forEach { ses ->
-            ses.scriptHandlers.forEach { handler ->
-                runCatching { handler.remove() }
-            }
-        }
+        scriptBridge.releaseAllHandlers()
         sessions.clear()
-        publishMenus()
+        scriptBridge.publishMenus()
         // UI 即将销毁：待裁决项全部退回安全页，控制台记录也没有留存的必要。
         cancelSafeBrowsing()
         publishConsoleErrors()
@@ -2616,35 +2417,6 @@ class WebTabManager(private val context: Context) {
         private const val TAB_BRIDGE_NAME = "LingTab"
 
         /**
-         * 页面里拦截 `target="_blank"` 点击的脚本。
-         *
-         * 只拦**可信点击**（`isTrusted`，合成事件不算）与 http(s) 链接，
-         * 并且四个修饰键都没按 —— 与桌面浏览器"普通左键打开新标签"一致。
-         * 桥不存在时直接放行，让页面保持原生的（无反应）行为，不至于
-         * 因为宿主缺能力而把链接彻底拦死。
-         */
-        private val TAB_LINK_JS = """
-            (function () {
-              if (window.__lingTabLink) return;
-              window.__lingTabLink = 1;
-              document.addEventListener('click', function (e) {
-                if (!e.isTrusted || e.button !== 0 || e.defaultPrevented) return;
-                if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-                var node = e.target;
-                var a = node && node.closest ? node.closest('a[target]') : null;
-                if (!a) return;
-                if ((a.target || '').toLowerCase() !== '_blank') return;
-                var href = a.href || '';
-                if (!/^https?:/i.test(href)) return;
-                var bridge = window.LingTab;
-                if (!bridge) return;
-                e.preventDefault();
-                try { bridge.postMessage(href); } catch (err) {}
-              }, true);
-            })();
-        """.trimIndent()
-
-        /**
          * 证书错误排队上限。
          *
          * 子资源也弹窗后，一个引用了几十张坏证书图片的页面会连续上报；
@@ -2654,9 +2426,6 @@ class WebTabManager(private val context: Context) {
 
         /** 表单重提交的待裁决上限：低频事件，超过就直接放弃重提交。 */
         private const val MAX_PENDING_FORMS = 4
-
-        /** 菜单文案上限：脚本可能塞进整段说明，界面行撑不下。 */
-        private const val MAX_MENU_LABEL = 60
 
         /** Safe Browsing 待裁决上限：低频事件，超过就直接退回安全页。 */
         private const val MAX_PENDING_SAFE = 4
