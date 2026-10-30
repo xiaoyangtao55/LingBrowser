@@ -93,7 +93,7 @@ data class UserScript(
      *
      * 只有**声明了**才校验：Tampermonkey 在缺失时会弹窗询问用户，我们没有
      * 逐请求的确认 UI，静默拒绝会让大量老脚本直接失效。声明了就按它执行，
-     * 这至少让作者的安全意图生效（见 `BrowserViewModel.startScriptRequest`）。
+     * 这至少让作者的安全意图生效（见 `UserScriptCoordinator.startScriptRequest`）。
      */
     val connects: Set<String> = emptySet(),
 ) {
@@ -813,7 +813,7 @@ internal fun jsString(value: String): String = buildString {
  *
  * 换成不可逆摘要后，页面能读到的只是一串哈希：既无法据此还原/枚举脚本 id，
  * 也拿不到一个"看起来像 id"的东西去试探。原生侧收到消息后按同样的摘要反查
- * 启用中的脚本（见 `BrowserViewModel.handleUserScriptMessage`），再用真实 id
+ * 启用中的脚本（见 `UserScriptCoordinator.handleMessage`），再用真实 id
  * 走后续逻辑，因此存储、菜单、通知等路径都不受影响。
  *
  * ⚠️ 摘要只能挡住"从 window 上白拿身份"，挡不住页面在 END 注入前劫持

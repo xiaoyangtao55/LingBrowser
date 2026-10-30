@@ -291,7 +291,7 @@ internal class ScriptBridge(private val host: ScriptBridgeHost) {
         }
     }
 
-    /** 通知点击回传页面里的 `onclick`（详情见 [com.ling.browser.ui.BrowserViewModel.postUserScriptNotification]）。 */
+    /** 通知点击回传页面里的 `onclick`（详情见 [com.ling.browser.ui.UserScriptCoordinator.postNotification]）。 */
     fun dispatchNotificationClick(tabId: String, scriptId: String, notificationId: String) {
         val wv = host.webViews[tabId] ?: return
         wv.evaluateJavascript(

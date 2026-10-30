@@ -604,7 +604,7 @@ class WebTabManager(private val context: Context) {
         exceptTabId: String?,
     ) = scriptBridge.broadcastValue(scriptId, key, oldValue, newValue, exceptTabId)
 
-    /** 通知点击回传页面里的 `onclick`（详情见 [com.ling.browser.ui.BrowserViewModel.postUserScriptNotification]）。 */
+    /** 通知点击回传页面里的 `onclick`（详情见 [com.ling.browser.ui.UserScriptCoordinator.postNotification]）。 */
     fun dispatchUserScriptNotificationClick(tabId: String, scriptId: String, notificationId: String) =
         scriptBridge.dispatchNotificationClick(tabId, scriptId, notificationId)
 
