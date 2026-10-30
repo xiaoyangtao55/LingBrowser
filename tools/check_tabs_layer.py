@@ -45,6 +45,8 @@ def read(rel):
 main = read("app/src/main/java/com/ling/browser/MainActivity.kt")
 tabs = read("app/src/main/java/com/ling/browser/ui/screens/TabsScreen.kt")
 browser = read("app/src/main/java/com/ling/browser/ui/screens/BrowserScreen.kt")
+# 四个 BottomSheet 的包装已拆到 components：面板级检查读新文件，判据不变。
+sheets = read("app/src/main/java/com/ling/browser/ui/components/BrowserSheets.kt")
 
 # ---------- 1. 标签页不再是独立路由，BrowserScreen 常驻 ----------
 print("1. 标签页不再是独立路由，BrowserScreen 常驻")
@@ -82,19 +84,19 @@ else:
     bad("未找到承载图层的 Box")
 
 # ---------- 2. 两个 BottomSheet ----------
-print("\n2. BrowserScreen 内是否用 ModalBottomSheet 承载两个面板")
-n_sheets = browser.count("ModalBottomSheet(")
+print("\n2. 浏览页的面板是否用 ModalBottomSheet 承载")
+n_sheets = sheets.count("ModalBottomSheet(")
 if n_sheets >= 2:
-    ok(f"BrowserScreen 内有 {n_sheets} 个 ModalBottomSheet（标签页 / 更多）")
+    ok(f"面板组件里有 {n_sheets} 个 ModalBottomSheet（标签页 / 更多 / 脚本菜单 / 页面错误）")
 else:
     bad(f"只找到 {n_sheets} 个 ModalBottomSheet，两个面板没有都换成 BottomSheet")
 
-if re.search(r"if \(showTabsSheet\)\s*\{[\s\S]{0,200}?ModalBottomSheet\(", browser):
+if re.search(r"internal fun TabsSheet\([\s\S]{0,400}?ModalBottomSheet\(", sheets):
     ok("标签页面板由 ModalBottomSheet 承载")
 else:
     bad("没有找到标签页的 ModalBottomSheet")
 
-if re.search(r"if \(showMoreSheet\)\s*\{[\s\S]{0,200}?ModalBottomSheet\(", browser):
+if re.search(r"internal fun MoreSheet\([\s\S]{0,400}?ModalBottomSheet\(", sheets):
     ok("「更多」面板由 ModalBottomSheet 承载")
 else:
     bad("没有找到「更多」的 ModalBottomSheet")
@@ -127,25 +129,25 @@ else:
     if v < 0.55:
         bad(f"TABS_SHEET_ALPHA = {v} 太低，面板文字会与网页内容互相干扰")
 
-if re.search(r"copy\(alpha\s*=\s*TABS_SHEET_ALPHA\)", browser):
-    ok("BrowserScreen 把 TABS_SHEET_ALPHA 应用到面板容器色")
+if re.search(r"copy\(alpha\s*=\s*TABS_SHEET_ALPHA\)", sheets):
+    ok("TabsSheet 把 TABS_SHEET_ALPHA 应用到面板容器色")
 else:
     bad("没有把 TABS_SHEET_ALPHA 应用到 ModalBottomSheet 的 containerColor")
 
 if re.search(
     r"settings\.tabsHeight == TabsHeight\.FULL\)\s*\{\s*\n"
     r"\s*MaterialTheme\.colorScheme\.surface\s*\n",
-    browser,
+    browser + sheets,
 ):
     bad("仍残留「全屏档位回退不透明」的分支，档位设置未清理干净")
-elif re.search(r"\bTabsHeight\b|\btabsHeight\b", browser):
-    bad("BrowserScreen 仍出现高度档位符号，设置项未移除干净")
+elif re.search(r"\bTabsHeight\b|\btabsHeight\b", browser + sheets):
+    bad("浏览页仍出现高度档位符号，设置项未移除干净")
 else:
     ok("容器色恒定半透明，不再有档位分支")
 
 # ---------- 4. 面板高度落在内容高度上 ----------
 print("\n4. 面板高度如何落地（固定一半，档位设置已移除）")
-if re.search(r"fillMaxHeight\(TABS_SHEET_HEIGHT_FRACTION\)", browser):
+if re.search(r"fillMaxHeight\(TABS_SHEET_HEIGHT_FRACTION\)", sheets):
     ok("标签页内容高度 = TABS_SHEET_HEIGHT_FRACTION")
 else:
     bad("标签页高度未绑定常量，面板高度失去单一来源")
@@ -157,10 +159,10 @@ else:
     bad("TABS_SHEET_HEIGHT_FRACTION 未在 TabsScreen 定义，或不再是 0.5")
 
 # 高度档位设置已随「全屏」一并移除：两个 composable 都不该再收/传高度参数
-if re.search(r"tabsHeight|onTabsHeightChange", browser):
-    bad("BrowserScreen 仍透传高度档位参数（设置项已移除）")
+if re.search(r"tabsHeight|onTabsHeightChange", browser + sheets):
+    bad("浏览页仍透传高度档位参数（设置项已移除）")
 else:
-    ok("BrowserScreen 不再透传高度档位")
+    ok("浏览页不再透传高度档位")
 
 if re.search(r"tabsHeight|onTabsHeightChange|HeightToggle", tabs):
     bad("TabsScreen 仍残留高度档位参数或切换 UI")

@@ -24,10 +24,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.focusable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -36,7 +34,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -52,7 +49,6 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -69,19 +65,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
-import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.input.key.KeyEventType
-import androidx.compose.ui.input.key.onPreviewKeyEvent
-import androidx.compose.ui.input.key.type
-import androidx.compose.ui.input.key.utf16CodePoint
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.IntOffset
@@ -103,13 +91,17 @@ import com.ling.browser.ui.BrowserViewModel
 import com.ling.browser.ui.PendingDownload
 import com.ling.browser.ui.components.AddressBar
 import com.ling.browser.ui.components.BottomToolbar
+import com.ling.browser.ui.components.ConsoleSheet
 import com.ling.browser.ui.components.DesktopModeBanner
 import com.ling.browser.ui.components.HomeBackgroundLayer
 import com.ling.browser.ui.components.IncognitoBanner
+import com.ling.browser.ui.components.MoreItem
+import com.ling.browser.ui.components.MoreSheet
+import com.ling.browser.ui.components.ScriptMenuSheet
+import com.ling.browser.ui.components.TabsSheet
 import com.ling.browser.util.UrlUtils
 import com.ling.browser.web.SecurityState
 import com.ling.browser.web.CertPrompt
-import com.ling.browser.web.ConsoleEntry
 import com.ling.browser.web.FormResubmitPrompt
 import com.ling.browser.web.JsDialogRequest
 import com.ling.browser.web.SafeBrowsingPrompt
@@ -796,37 +788,27 @@ fun BrowserScreen(
     // 用 ModalBottomSheet 自屏幕底部升起：遮罩、圆角、拖动关闭、入场/退场动画
     // 都由组件提供，TabsScreen 只负责面板内容（见其文件头说明）。
     if (showTabsSheet) {
-        ModalBottomSheet(
-            onDismissRequest = { showTabsSheet = false },
+        TabsSheet(
+            tabs = tabs,
+            activeId = activeId,
             sheetState = tabsSheetState,
-            // 面板是半透明的，透出背后的网页（"标签页是临时面板而非独立页面"）。
-            // 曾经还有「全屏」档位：全屏时不透明、且不再透出网页，与独立页面无异，
-            // 已随设置项一并移除，这里恒定用半透明容器色。
-            containerColor = MaterialTheme.colorScheme.surface.copy(alpha = TABS_SHEET_ALPHA),
-            dragHandle = { SheetDragHandle() },
-        ) {
-            TabsScreen(
-                tabs = tabs,
-                activeId = activeId,
-                onSelect = {
-                    viewModel.switchTab(it)
-                    closeTabsSheet()
-                },
-                onClose = viewModel::closeTab,
-                onNewTab = {
-                    viewModel.newTab()
-                    closeTabsSheet()
-                },
-                onNewIncognitoTab = {
-                    viewModel.newIncognitoTab()
-                    closeTabsSheet()
-                },
-                onCloseAll = { tabs.forEach { viewModel.closeTab(it.id) } },
-                onMoveTab = viewModel::moveTab,
-                // 面板高度落在**内容**的高度上，而不是依赖 sheet 自带的"半展开"锚点。
-                modifier = Modifier.fillMaxHeight(TABS_SHEET_HEIGHT_FRACTION),
-            )
-        }
+            onDismiss = { showTabsSheet = false },
+            onSelect = {
+                viewModel.switchTab(it)
+                closeTabsSheet()
+            },
+            onClose = viewModel::closeTab,
+            onNewTab = {
+                viewModel.newTab()
+                closeTabsSheet()
+            },
+            onNewIncognitoTab = {
+                viewModel.newIncognitoTab()
+                closeTabsSheet()
+            },
+            onCloseAll = { tabs.forEach { viewModel.closeTab(it.id) } },
+            onMoveTab = viewModel::moveTab,
+        )
     }
 
     // ---- 「更多」面板 ----
@@ -834,149 +816,136 @@ fun BrowserScreen(
     // 内容排成图标网格（见 [MoreGrid]）：11 项竖排要占满大半屏，横排 4 列后
     // 只有 3 行，面板更矮、基本不需要滚动。
     if (showMoreSheet) {
-        ModalBottomSheet(
-            onDismissRequest = { showMoreSheet = false },
+        val items = listOfNotNull(
+            MoreItem(
+                icon = if (isBookmarked) LingIcons.Bookmark else LingIcons.BookmarkAdd,
+                label = if (isBookmarked) "取消收藏" else "添加书签",
+                onClick = {
+                    viewModel.toggleBookmark()
+                    closeMoreSheet()
+                },
+            ),
+            MoreItem(
+                icon = LingIcons.BookmarkBorder,
+                label = "书签",
+                onClick = {
+                    onOpenBookmarks()
+                    closeMoreSheet()
+                },
+            ),
+            MoreItem(
+                icon = LingIcons.History,
+                label = "历史记录",
+                onClick = {
+                    onOpenHistory()
+                    closeMoreSheet()
+                },
+            ),
+            MoreItem(
+                icon = LingIcons.Download,
+                label = "下载",
+                onClick = {
+                    onOpenDownloads()
+                    closeMoreSheet()
+                },
+            ),
+            MoreItem(
+                icon = LingIcons.PrivacyTip,
+                label = "新建无痕标签页",
+                onClick = {
+                    viewModel.newIncognitoTab()
+                    closeMoreSheet()
+                },
+            ),
+            MoreItem(
+                icon = LingIcons.DesktopWindows,
+                label = if (settings.desktopMode) "关闭电脑模式" else "开启电脑模式",
+                onClick = {
+                    viewModel.setDesktopMode(!settings.desktopMode)
+                    closeMoreSheet()
+                },
+            ),
+            MoreItem(
+                icon = LingIcons.Nightlight,
+                // 四列比原来窄，长文案会折成两行；「夜间：」前缀比
+                // 「夜间模式：」更省一格，取值仍与设置页一致。
+                label = when (settings.nightMode) {
+                    NightMode.FOLLOW_SYSTEM -> "夜间：跟随系统"
+                    NightMode.ALWAYS_ON -> "夜间：已开启"
+                    NightMode.ALWAYS_OFF -> "夜间：已关闭"
+                },
+                onClick = {
+                    viewModel.setNightMode(
+                        when (settings.nightMode) {
+                            NightMode.FOLLOW_SYSTEM -> NightMode.ALWAYS_ON
+                            NightMode.ALWAYS_ON -> NightMode.ALWAYS_OFF
+                            NightMode.ALWAYS_OFF -> NightMode.FOLLOW_SYSTEM
+                        }
+                    )
+                    closeMoreSheet()
+                },
+            ),
+            // 阅读模式。文案随状态切换，让用户一眼看出点下去是进还是出。
+            MoreItem(
+                icon = LingIcons.Article,
+                label = if (readerActive) "退出阅读模式" else "阅读模式",
+                onClick = {
+                    viewModel.toggleReaderMode()
+                    closeMoreSheet()
+                },
+            ),
+            // 资源嗅探：先触发嗅探（写结果），再进二级页展示。
+            // 嗅探是异步的，但页面会 collect sniffResults，结果回来后自动刷新。
+            MoreItem(
+                icon = LingIcons.Movie,
+                label = "资源嗅探",
+                onClick = {
+                    viewModel.sniffResources()
+                    onOpenSniff()
+                    closeMoreSheet()
+                },
+            ),
+            // 页面错误：只有当前页真的报了错才出现，避免面板里多一个常年灰着的入口。
+            if (activeConsoleErrors.isNotEmpty()) {
+                MoreItem(
+                    icon = LingIcons.Block,
+                    label = "页面错误（${activeConsoleErrors.size}）",
+                    onClick = {
+                        showMoreSheet = false
+                        showConsoleSheet = true
+                    },
+                )
+            } else {
+                null
+            },
+            // 用户脚本通过 GM_registerMenuCommand 注册的命令。只有当前页
+            // 真的注册过才出现 —— 空面板没有意义。
+            if (activeScriptMenus.isNotEmpty()) {
+                MoreItem(
+                    icon = LingIcons.Javascript,
+                    label = "脚本菜单",
+                    onClick = {
+                        showMoreSheet = false
+                        showScriptMenuSheet = true
+                    },
+                )
+            } else {
+                null
+            },
+            MoreItem(
+                icon = LingIcons.Settings,
+                label = "设置",
+                onClick = {
+                    onOpenSettings()
+                    closeMoreSheet()
+                },
+            ),
+        )
+        MoreSheet(
+            items = items,
             sheetState = moreSheetState,
-            // 与底部工具栏同色，面板读起来和工具栏是同一层 chrome。
-            // 网格条目自己不铺底色，因此面板自上而下只有这一种颜色 ——
-            // 不会再出现「顶部一条与内容对不齐」的分色。
-            containerColor = MaterialTheme.colorScheme.surfaceContainer,
-            dragHandle = { SheetDragHandle() },
-        ) {
-            val items = listOfNotNull(
-                MoreItem(
-                    icon = if (isBookmarked) LingIcons.Bookmark else LingIcons.BookmarkAdd,
-                    label = if (isBookmarked) "取消收藏" else "添加书签",
-                    onClick = {
-                        viewModel.toggleBookmark()
-                        closeMoreSheet()
-                    },
-                ),
-                MoreItem(
-                    icon = LingIcons.BookmarkBorder,
-                    label = "书签",
-                    onClick = {
-                        onOpenBookmarks()
-                        closeMoreSheet()
-                    },
-                ),
-                MoreItem(
-                    icon = LingIcons.History,
-                    label = "历史记录",
-                    onClick = {
-                        onOpenHistory()
-                        closeMoreSheet()
-                    },
-                ),
-                MoreItem(
-                    icon = LingIcons.Download,
-                    label = "下载",
-                    onClick = {
-                        onOpenDownloads()
-                        closeMoreSheet()
-                    },
-                ),
-                MoreItem(
-                    icon = LingIcons.PrivacyTip,
-                    label = "新建无痕标签页",
-                    onClick = {
-                        viewModel.newIncognitoTab()
-                        closeMoreSheet()
-                    },
-                ),
-                MoreItem(
-                    icon = LingIcons.DesktopWindows,
-                    label = if (settings.desktopMode) "关闭电脑模式" else "开启电脑模式",
-                    onClick = {
-                        viewModel.setDesktopMode(!settings.desktopMode)
-                        closeMoreSheet()
-                    },
-                ),
-                MoreItem(
-                    icon = LingIcons.Nightlight,
-                    // 四列比原来窄，长文案会折成两行；「夜间：」前缀比
-                    // 「夜间模式：」更省一格，取值仍与设置页一致。
-                    label = when (settings.nightMode) {
-                        NightMode.FOLLOW_SYSTEM -> "夜间：跟随系统"
-                        NightMode.ALWAYS_ON -> "夜间：已开启"
-                        NightMode.ALWAYS_OFF -> "夜间：已关闭"
-                    },
-                    onClick = {
-                        viewModel.setNightMode(
-                            when (settings.nightMode) {
-                                NightMode.FOLLOW_SYSTEM -> NightMode.ALWAYS_ON
-                                NightMode.ALWAYS_ON -> NightMode.ALWAYS_OFF
-                                NightMode.ALWAYS_OFF -> NightMode.FOLLOW_SYSTEM
-                            }
-                        )
-                        closeMoreSheet()
-                    },
-                ),
-                // 阅读模式。文案随状态切换，让用户一眼看出点下去是进还是出。
-                MoreItem(
-                    icon = LingIcons.Article,
-                    label = if (readerActive) "退出阅读模式" else "阅读模式",
-                    onClick = {
-                        viewModel.toggleReaderMode()
-                        closeMoreSheet()
-                    },
-                ),
-                // 资源嗅探：先触发嗅探（写结果），再进二级页展示。
-                // 嗅探是异步的，但页面会 collect sniffResults，结果回来后自动刷新。
-                MoreItem(
-                    icon = LingIcons.Movie,
-                    label = "资源嗅探",
-                    onClick = {
-                        viewModel.sniffResources()
-                        onOpenSniff()
-                        closeMoreSheet()
-                    },
-                ),
-                // 页面错误：只有当前页真的报了错才出现，避免面板里多一个常年灰着的入口。
-                if (activeConsoleErrors.isNotEmpty()) {
-                    MoreItem(
-                        icon = LingIcons.Block,
-                        label = "页面错误（${activeConsoleErrors.size}）",
-                        onClick = {
-                            showMoreSheet = false
-                            showConsoleSheet = true
-                        },
-                    )
-                } else {
-                    null
-                },
-                // 用户脚本通过 GM_registerMenuCommand 注册的命令。只有当前页
-                // 真的注册过才出现 —— 空面板没有意义。
-                if (activeScriptMenus.isNotEmpty()) {
-                    MoreItem(
-                        icon = LingIcons.Javascript,
-                        label = "脚本菜单",
-                        onClick = {
-                            showMoreSheet = false
-                            showScriptMenuSheet = true
-                        },
-                    )
-                } else {
-                    null
-                },
-                MoreItem(
-                    icon = LingIcons.Settings,
-                    label = "设置",
-                    onClick = {
-                        onOpenSettings()
-                        closeMoreSheet()
-                    },
-                ),
-            )
-            MoreGrid(
-                items = items,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    // 小屏 / 横屏时条目可能超出一屏，留一层滚动兜底
-                    .verticalScroll(rememberScrollState())
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
-            )
-        }
+            onDismiss = { showMoreSheet = false },
+        )
     }
 
     // ---- 「脚本菜单」面板 ----
@@ -986,66 +955,16 @@ fun BrowserScreen(
         if (activeScriptMenus.isEmpty()) showScriptMenuSheet = false
     }
     if (showScriptMenuSheet) {
-        ModalBottomSheet(
-            onDismissRequest = { showScriptMenuSheet = false },
+        ScriptMenuSheet(
+            commands = activeScriptMenus,
+            installedScripts = installedScripts,
             sheetState = scriptMenuSheetState,
-            containerColor = MaterialTheme.colorScheme.surfaceContainer,
-            dragHandle = { SheetDragHandle() },
-        ) {
-            // 面板一出现就把焦点拿过来，accessKey 才收得到按键。
-            val menuFocus = remember { FocusRequester() }
-            LaunchedEffect(Unit) { runCatching { menuFocus.requestFocus() } }
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .focusRequester(menuFocus)
-                    .focusable()
-                    // 外接键盘：按 accessKey 直接触发对应命令（桌面端菜单助记键的等价物）。
-                    .onPreviewKeyEvent { event ->
-                        if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                        val key = event.utf16CodePoint.toChar().uppercaseChar()
-                        val hit = activeScriptMenus.firstOrNull {
-                            it.accessKey.isNotEmpty() && it.accessKey[0] == key
-                        } ?: return@onPreviewKeyEvent false
-                        showScriptMenuSheet = false
-                        viewModel.invokeUserScriptMenu(hit.tabId, hit.scriptId, hit.commandId)
-                        true
-                    }
-                    .verticalScroll(rememberScrollState())
-                    .padding(vertical = 8.dp),
-            ) {
-                activeScriptMenus.forEach { command ->
-                    // 前缀脚本名：同一个页面可能装了多个脚本，只给命令名会分不清。
-                    val scriptName = installedScripts
-                        .firstOrNull { it.id == command.scriptId }
-                        ?.script?.name
-                    val base = if (scriptName.isNullOrBlank()) {
-                        command.label
-                    } else {
-                        "$scriptName · ${command.label}"
-                    }
-                    Text(
-                        text = if (command.accessKey.isEmpty()) {
-                            base
-                        } else {
-                            "$base（快捷键 ${command.accessKey}）"
-                        },
-                        style = MaterialTheme.typography.bodyLarge,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable {
-                                showScriptMenuSheet = false
-                                viewModel.invokeUserScriptMenu(
-                                    command.tabId,
-                                    command.scriptId,
-                                    command.commandId,
-                                )
-                            }
-                            .padding(horizontal = 20.dp, vertical = 14.dp),
-                    )
-                }
-            }
-        }
+            onDismiss = { showScriptMenuSheet = false },
+            onInvoke = { command ->
+                showScriptMenuSheet = false
+                viewModel.invokeUserScriptMenu(command.tabId, command.scriptId, command.commandId)
+            },
+        )
     }
 
     // ---- 「页面错误」面板 ----
@@ -1054,23 +973,11 @@ fun BrowserScreen(
         if (activeConsoleErrors.isEmpty()) showConsoleSheet = false
     }
     if (showConsoleSheet) {
-        ModalBottomSheet(
-            onDismissRequest = { showConsoleSheet = false },
+        ConsoleSheet(
+            entries = activeConsoleErrors,
             sheetState = consoleSheetState,
-            containerColor = MaterialTheme.colorScheme.surfaceContainer,
-            dragHandle = { SheetDragHandle() },
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .verticalScroll(rememberScrollState())
-                    .padding(vertical = 8.dp),
-            ) {
-                activeConsoleErrors.forEach { entry ->
-                    ConsoleErrorRow(entry)
-                }
-            }
-        }
+            onDismiss = { showConsoleSheet = false },
+        )
     }
 
     // ---- 长按上下文菜单 ----
@@ -1700,158 +1607,6 @@ private fun ErrorScreen(    message: String,
                 }
             }
         }
-    }
-}
-
-/**
- * 面板顶部的拖拽手柄。
- *
- * 不用 Material3 的 `BottomSheetDefaults.DragHandle`：它自带的底色与面板容器色
- * 不是同一个来源，实机上表现为顶部多出一条与内容对不齐的横条。这里显式画一条
- * 低对比的淡灰小横条（贴近系统手势条「小白条」的观感），且**不额外铺底色**——
- * 面板上、中、下因此同色。
- */
-@Composable
-private fun SheetDragHandle() {
-    Box(
-        modifier = Modifier
-            .padding(top = 16.dp, bottom = 12.dp)
-            .size(width = 40.dp, height = 4.dp)
-            .clip(CircleShape)
-            .background(MaterialTheme.colorScheme.onSurface.copy(alpha = SHEET_HANDLE_ALPHA)),
-    )
-}
-
-/**
- * 手柄的透明度。
- *
- * 取 onSurface 的透明度分量：浅色主题下是淡灰、深色下是淡白，与系统手势条
- * 跟随明暗的行为一致。0.35 是「看得出、但不抢眼」的取值。
- */
-private const val SHEET_HANDLE_ALPHA = 0.35f
-
-/**
- * 「页面错误」面板的一行。
- *
- * 只可能是 ERROR 级消息（见 `WebTabManager.onConsoleMessage`）：正文等宽字体
- * 便于对齐缩进，来源与行号放次行小字，长消息按原样换行不截断。
- */
-@Composable
-private fun ConsoleErrorRow(entry: ConsoleEntry) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 20.dp, vertical = 10.dp),
-    ) {
-        Text(
-            text = entry.message,
-            style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
-            color = MaterialTheme.colorScheme.error,
-        )
-        if (entry.source.isNotBlank() || entry.line > 0) {
-            Spacer(Modifier.height(4.dp))
-            Text(
-                text = listOfNotNull(
-                    entry.source.takeIf { it.isNotBlank() },
-                    entry.line.takeIf { it > 0 }?.let { "第 $it 行" },
-                ).joinToString(" · "),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-    }
-}
-
-/**
- * 「更多」面板的一个条目。
- *
- * 收成数据而不是逐条散写：网格要按「每行几个」分组，散写就分不出组了。
- */
-private data class MoreItem(
-    val icon: ImageVector,
-    val label: String,
-    val onClick: () -> Unit,
-)
-
-/** 「更多」面板的列数：四列在手机上每格约 80dp，图标 + 两行文字刚好放得下。 */
-private const val MORE_GRID_COLUMNS = 4
-
-/** 格子高度：上边距 10dp + 图标容器 44dp + 间距 8dp + 最多两行文字，末行留余量。 */
-private val MORE_ITEM_HEIGHT = 96.dp
-
-/**
- * 「更多」面板的图标网格：每行 [MORE_GRID_COLUMNS] 个，图标在上、文字在下。
- *
- * 用固定列数的 Row 分组，而不是 LazyVerticalGrid：总共只有 3 行，惰性化没有
- * 收益，反而会在 BottomSheet 里再嵌一层可滚动容器，与面板自身的拖动 / 收起
- * 手势抢事件。
- */
-@Composable
-private fun MoreGrid(
-    items: List<MoreItem>,
-    modifier: Modifier = Modifier,
-) {
-    Column(
-        modifier = modifier,
-        verticalArrangement = Arrangement.spacedBy(4.dp),
-    ) {
-        items.chunked(MORE_GRID_COLUMNS).forEach { row ->
-            Row(modifier = Modifier.fillMaxWidth()) {
-                row.forEach { item ->
-                    MoreGridItem(item = item, modifier = Modifier.weight(1f))
-                }
-                // 末行不满时补空位：否则最后几个格子会被拉宽，与上面的列错位
-                repeat(MORE_GRID_COLUMNS - row.size) {
-                    Spacer(Modifier.weight(1f))
-                }
-            }
-        }
-    }
-}
-
-/** 网格里的单个条目。 */
-@Composable
-private fun MoreGridItem(
-    item: MoreItem,
-    modifier: Modifier = Modifier,
-) {
-    Column(
-        modifier = modifier
-            .height(MORE_ITEM_HEIGHT)
-            .clip(RoundedCornerShape(20.dp))
-            .clickable(onClick = item.onClick)
-            // 顶部对齐 + 固定上边距：不管文字是一行还是两行，图标都落在同一条
-            // 水平线上。若用居中排列，两行文字的格子会把图标顶上去，
-            // 一行文字的格子又把它压下来，整排图标就参差不齐了。
-            .padding(start = 4.dp, end = 4.dp, top = 10.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        // M3E 的图标一律带容器：一枚浅色圆底把图标从背景上"托"起来，
-        // 比裸图标更贴合 Expressive 的颗粒感，也让一排图标更容易对齐。
-        Box(
-            modifier = Modifier
-                .size(44.dp)
-                .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.surfaceContainerHighest),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(
-                imageVector = item.icon,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(22.dp),
-            )
-        }
-        Spacer(Modifier.height(8.dp))
-        Text(
-            text = item.label,
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurface,
-            textAlign = TextAlign.Center,
-            // 「新建无痕标签页」这类文案在四列宽度下会折成两行
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-        )
     }
 }
 
