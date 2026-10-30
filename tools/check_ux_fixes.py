@@ -39,6 +39,8 @@ def read(rel):
 SRC = "app/src/main/java/com/ling/browser"
 addr = read(f"{SRC}/ui/components/AddressBar.kt")
 vm = read(f"{SRC}/ui/BrowserViewModel.kt")
+# 书签域已拆到 delegate：正文级检查读新文件，判据不变。
+bm = read(f"{SRC}/ui/BookmarksDelegate.kt")
 browser_screen = read(f"{SRC}/ui/screens/BrowserScreen.kt")
 mgr = read(f"{SRC}/web/WebTabManager.kt")
 bm_screen = read(f"{SRC}/ui/screens/BookmarksScreen.kt")
@@ -155,12 +157,12 @@ if "onRename" in bm_screen and re.search(r"fun renameBookmark\(", vm):
 else:
     bad("书签仍不能重命名")
 
-if re.search(r"fun renameBookmark[\s\S]{0,500}?isEmpty\(\)[\s\S]{0,200}?return", vm):
+if re.search(r"fun renameBookmark[\s\S]{0,500}?isEmpty\(\)[\s\S]{0,200}?return", bm):
     ok("重命名时拒绝空名字（列表里一条没有文字的书签无法辨认）")
 else:
     bad("重命名未拦截空名字")
 
-if re.search(r"fun renameBookmark[\s\S]{0,600}?rename\(id,\s*clean,\s*current\.folder\)", vm):
+if re.search(r"fun renameBookmark[\s\S]{0,600}?rename\(id,\s*clean,\s*current\.folder\)", bm):
     ok("重命名只改标题、保留所属文件夹")
 else:
     bad("重命名可能把文件夹一起改掉")
@@ -240,7 +242,7 @@ if re.search(r"filter \{ it\.favicon == null \}", repo):
 else:
     bad("缺失判定不对")
 
-if re.search(r"setFavicon\(url, ByteArray\(0\)\)", vm):
+if re.search(r"setFavicon\(url, ByteArray\(0\)\)", bm):
     ok("抓取失败写空数组占位（否则每次进页面都重试同一批失败站点）")
 else:
     bad("抓取失败未占位，会反复重试")
@@ -257,7 +259,7 @@ else:
     bad("setFavicon 可能覆盖标题/文件夹")
 
 # 复用页面已有的图标
-if re.search(r"toggleBookmark[\s\S]{0,900}?tab\.favicon", vm):
+if re.search(r"toggleBookmark[\s\S]{0,900}?tab\.favicon", bm):
     ok("收藏时优先复用页面已加载的图标（省一次网络请求）")
 else:
     bad("收藏时未复用页面已有图标")
@@ -462,14 +464,14 @@ if re.search(r"fun externalUrl\(url: String\?, readerOriginalUrl: String\?\): St
 else:
     bad("缺少 InternalPage.externalUrl —— 各处会各判一套")
 
-if re.search(r"fun toggleBookmark\(\)[\s\S]{0,300}?bookmarkTarget\(\)", vm) and \
-        re.search(r"fun bookmarkTarget\(\): BookmarkTarget\?[\s\S]{0,300}?InternalPage\.externalUrl", vm):
+if re.search(r"fun toggleBookmark\(\)[\s\S]{0,300}?bookmarkTarget\(\)", bm) and \
+        re.search(r"fun bookmarkTarget\(\): BookmarkTarget\?[\s\S]{0,300}?InternalPage\.externalUrl", bm):
     ok("收藏用对外地址（阅读模式收藏的是原文，而不是合成地址）")
 else:
     bad("收藏仍用 tab.url —— 阅读模式会存下点不开的 ling://reader")
 
-if re.search(r"fun refreshBookmarkState\(\)[\s\S]{0,500}?bookmarkTarget\(\)\?\.url", vm) and \
-        "_isBookmarked.value = url != null &&" in vm:
+if re.search(r"fun refreshBookmarkState\(\)[\s\S]{0,500}?bookmarkTarget\(\)\?\.url", bm) and \
+        "setBookmarked(url != null &&" in bm:
     ok("收藏态查询也走同一口径，且主页会置回 false")
 else:
     bad("收藏态查询没走对外地址 —— 阅读视图里明明收藏过却显示'添加书签'")

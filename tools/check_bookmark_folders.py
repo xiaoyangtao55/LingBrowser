@@ -37,6 +37,8 @@ SRC = "app/src/main/java/com/ling/browser"
 repo = read(f"{SRC}/data/repo/BookmarkRepository.kt")
 screen = read(f"{SRC}/ui/screens/BookmarksScreen.kt")
 vm = read(f"{SRC}/ui/BrowserViewModel.kt")
+# 书签域已拆到 delegate：正文级检查读新文件，判据不变。
+bm = read(f"{SRC}/ui/BookmarksDelegate.kt")
 main = read(f"{SRC}/MainActivity.kt")
 browser = read(f"{SRC}/ui/screens/BrowserScreen.kt")
 icons = read(f"{SRC}/ui/theme/LingIcons.kt")
@@ -132,13 +134,13 @@ for name in ["moveBookmarkToFolder", "renameBookmarkFolder", "deleteBookmarkFold
         bad(f"缺少 {name}")
 
 # 重命名要拦重名
-if re.search(r"fun renameBookmarkFolder[\s\S]{0,500}?folderExists", vm):
+if re.search(r"fun renameBookmarkFolder[\s\S]{0,500}?folderExists", bm):
     ok("重命名时检测重名")
 else:
     bad("重命名未检测重名，会出现两个同名文件夹")
 
 # 删文件夹的提示要说清书签还在
-if re.search(r"fun deleteBookmarkFolder[\s\S]{0,400}?未分类", vm):
+if re.search(r"fun deleteBookmarkFolder[\s\S]{0,400}?未分类", bm):
     ok("删除文件夹的提示说明书签移到了未分类")
 else:
     bad("删除文件夹未提示书签去向，用户会以为收藏丢了")
