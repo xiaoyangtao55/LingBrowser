@@ -654,6 +654,7 @@ def read(rel):
 
 
 mgr = read("web/WebTabManager.kt")
+reader = read("web/ReaderController.kt")
 vm = read("ui/BrowserViewModel.kt")
 screen = read("ui/screens/BrowserScreen.kt")
 settings_kt = read("data/prefs/SettingsStore.kt")
@@ -662,17 +663,17 @@ settings_ui = read("ui/screens/SettingsScreen.kt")
 page = read("web/ReaderPage.kt")
 lwv = read("web/LingWebView.kt")
 
-if "ReaderExtractorJs.SCRIPT" in mgr and "evaluateJavascript" in mgr:
-    ok("WebTabManager 真的执行了提取脚本")
+if "ReaderExtractorJs.SCRIPT" in reader and "evaluateJavascript" in reader:
+    ok("ReaderController 真的执行了提取脚本")
 else:
     bad("提取脚本没有被执行 —— 阅读模式会永远拿不到正文")
 
-if re.search(r"fun enterReaderMode[\s\S]{0,400}?InternalPage\.isInternal", mgr):
+if re.search(r"fun enterReaderMode[\s\S]{0,400}?InternalPage\.isInternal", reader):
     ok("对主页拒绝进入阅读模式（否则会递归提取）")
 else:
     bad("未拦截主页，读阅模式可能在主页上递归")
 
-if re.search(r"fun enterReaderMode[\s\S]{0,900}?javaScriptEnabled", mgr):
+if re.search(r"fun enterReaderMode[\s\S]{0,900}?javaScriptEnabled", reader):
     ok("JS 被关闭时给出明确原因（用户能自己去设置里打开）")
 else:
     bad("未处理用户关闭 JavaScript 的情况")
@@ -693,7 +694,11 @@ if re.search(r"private fun recycleTab[\s\S]{0,300}?readerContent\s*=\s*null", mg
 else:
     bad("关闭标签未清理正文缓存")
 
-if re.search(r"fun exitReaderMode[\s\S]{0,400}?loadUrl\(id, cached\.url\)", mgr):
+if re.search(
+    r"fun exitReaderMode[\s\S]{0,600}?"
+    r"if \(UrlScheme\.isNavigable\(cached\.url\)\)[\s\S]{0,200}?host\.loadUrl\(id, cached\.url\)",
+    reader,
+):
     ok("退出阅读模式回到原文")
 else:
     bad("退出阅读模式没有回到原文")
@@ -871,7 +876,7 @@ else:
     bad("intent:// 未特殊处理，会静默失败（点了没反应）")
 
 # 未加载完就提取会拿到半成品 DOM
-if re.search(r"fun enterReaderMode[\s\S]{0,2200}?tab\.isLoading \|\| wv\.progress < 100", mgr):
+if re.search(r"fun enterReaderMode[\s\S]{0,2200}?tab\.isLoading \|\| wv\.progress < 100", reader):
     ok("页面未加载完时拒绝进入阅读模式（否则提取到半成品 DOM）")
 else:
     bad("未检查加载状态 —— 加载中进阅读模式会拿到残缺正文，且 canonical 还没解析到")
@@ -882,7 +887,7 @@ else:
     bad("加载中进入阅读模式没有提示，用户不知道为什么没反应")
 
 # 异步提取回来时用户可能已经切走
-if re.search(r"if \(_activeId\.value != id\) return@evaluateJavascript", mgr):
+if re.search(r"if \(host\.activeId != id\) return@evaluateJavascript", reader):
     ok("提取回调校验标签未切换（否则会把 A 页正文渲染到 B 页）")
 else:
     bad("提取回调未校验标签，切页后可能把旧正文渲染到新页面")
@@ -933,12 +938,12 @@ if "onOpenLinksExternal" in settings_ui and "onOpenLinksExternal = viewModel::se
 else:
     bad("设置界面或 MainActivity 未接上开关")
 
-if re.search(r"fun exitReaderMode\(\)[\s\S]{0,900}?isNavigable\(cached\.url\)", mgr):
+if re.search(r"fun exitReaderMode\(\)[\s\S]{0,900}?isNavigable\(cached\.url\)", reader):
     ok("退出阅读模式前先校验原文地址可加载性")
 else:
     bad("退出阅读模式直接 loadUrl —— 自定义协议会让用户卡在阅读视图")
 
-if re.search(r"fun exitReaderMode\(\)[\s\S]{0,1100}?canGoBack\(\)[\s\S]{0,300}?loadHome", mgr):
+if re.search(r"fun exitReaderMode\(\)[\s\S]{0,1100}?canGoBack\(\)[\s\S]{0,300}?loadHome", reader):
     ok("原文地址不可加载时有回退路径（历史 → 主页），不会把用户困住")
 else:
     bad("原文地址不可加载时没有回退，用户会卡在阅读视图")
@@ -968,7 +973,7 @@ else:
     bad("未说明合成地址是否写入历史 —— ling://reader 记进去点不开")
 
 # (5) 主题确实传到了阅读视图
-if re.search(r"private fun readerHtml[\s\S]{0,900}?dark = internalColors\.dark", mgr):
+if re.search(r"private fun readerHtml[\s\S]{0,900}?dark = internalColors\.dark", reader):
     ok("阅读视图的明暗由 internalColors.dark 驱动（跟随夜间模式与动态取色）")
 else:
     bad("阅读视图未接入主题明暗")
@@ -1358,7 +1363,7 @@ else:
 # 旧配色。必须在 onPageFinished 里按当前配色补一次原地刷新。
 # 主页已改为 Compose 渲染，没有"补色"这回事，因此这里只针对阅读视图。
 fin_block = body_of(mgr, r"onPageFinished = \{ url, title ->", span=3100)
-if "if (isInternal && !isHome)" in fin_block and "readerThemeJs()" in fin_block:
+if "if (isInternal && !isHome)" in fin_block and "reader.themeJs()" in fin_block:
     ok("阅读视图在文档就绪后按当前配色重新着色（刷新/进程重建不会掉回旧配色）")
 else:
     bad("内部页文档重建后不会重新着色 —— 刷新阅读视图会退回旧配色")
@@ -1434,7 +1439,7 @@ else:
 font_body = body_of(
     # span 要够大：函数体前面有一段解释"为什么用 isReaderDocument 而不是
     # ReaderPage.isReaderUrl"的注释，短窗口会在注释里截断、看不到 fontSizeJs。
-    mgr, r"fun refreshReaderFontSize\(fontSize: ReaderPage\.FontSize\)", span=900
+    reader, r"fun refreshReaderFontSize\(fontSize: ReaderPage\.FontSize\)", span=900
 )
 if "ReaderPage.fontSizeJs" in font_body and "loadDataWithBaseURL" not in font_body:
     ok("调字号走原地改变量（不压历史、不丢滚动位置）")
