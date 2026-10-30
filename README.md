@@ -67,14 +67,21 @@ LingBrowser/
 │       │   │   │   ├── prefs/SettingsStore.kt# DataStore 偏好设置
 │       │   │   │   └── repo/                 # 书签 / 历史仓库（StateFlow 暴露）
 │       │   │   ├── ui/
-│       │   │   │   ├── BrowserViewModel.kt   # 状态与业务逻辑
-│       │   │   │   ├── components/           # 地址栏、底部工具栏
+│       │   │   │   ├── BrowserViewModel.kt   # 状态与业务逻辑（按域委托）
+│       │   │   │   ├── UserScriptCoordinator.kt # 用户脚本安装、GM 桥、菜单与通知
+│       │   │   │   ├── DownloadDelegate.kt   # 下载确认、探测、权限与队列
+│       │   │   │   ├── BookmarksDelegate.kt  # 收藏、图标、重命名与文件夹
+│       │   │   │   ├── components/           # 地址栏、底部工具栏、四个底部面板
 │       │   │   │   ├── screens/              # 浏览/标签/书签/历史/设置
 │       │   │   │   └── theme/                # Material You 3 主题 + Material Symbols 图标
 │       │   │   ├── util/UrlUtils.kt          # 地址栏解析（含单元测试）
 │       │   │   └── web/
 │       │   │       ├── WebTabManager.kt      # 标签页 + WebView 实例池
 │       │   │       ├── LingWebView.kt        # WebView 子类（设置/UA/夜间）
+│       │   │       ├── ReaderController.kt   # 阅读模式提取与重排版
+│       │   │       ├── ScriptBridge.kt       # 用户脚本注入与 GM 桥
+│       │   │       ├── CertPromptQueue.kt    # 证书错误裁决队列
+│       │   │       ├── SafeBrowsingQueue.kt  # Safe Browsing 裁决队列
 │       │   │       ├── InternalPage.kt       # 内部页判定 + 地址归一化
 │       │   │       └── HomePage.kt           # 内置主页地址常量与判定
 │       │   └── res/                          # 图标、主题、字符串
