@@ -4,7 +4,6 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Bitmap
 import android.net.Uri
-import android.os.Build
 import android.webkit.ClientCertRequest
 import android.webkit.ConsoleMessage
 import android.webkit.CookieManager
@@ -13,8 +12,6 @@ import android.webkit.HttpAuthHandler
 import android.webkit.JsPromptResult
 import android.webkit.JsResult
 import android.webkit.PermissionRequest
-import android.webkit.SafeBrowsingResponse
-import android.webkit.SslErrorHandler
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
@@ -219,14 +216,13 @@ class WebTabManager(private val context: Context) {
 
     // ---------------------------------------------------------------- Safe Browsing
 
-    /** 尚未裁决的命中（FIFO，兜底用）。 */
-    private val safeQueue = ArrayDeque<PendingSafeBrowsing>()
-
-    /** 当前正在弹窗的那一条；null 表示没有弹窗。 */
-    private var safeShown: PendingSafeBrowsing? = null
+    /** Safe Browsing 的裁决队列（命中排队 + 弹窗，见 [SafeBrowsingQueue]）。 */
+    private val safePrompts = SafeBrowsingQueue()
 
     /** Safe Browsing 弹窗回调；参数为 null 表示关掉弹窗。 */
-    var onSafeBrowsingPrompt: ((SafeBrowsingPrompt?) -> Unit)? = null
+    var onSafeBrowsingPrompt: ((SafeBrowsingPrompt?) -> Unit)?
+        get() = safePrompts.onPrompt
+        set(value) { safePrompts.onPrompt = value }
 
     /**
      * 标签关闭回调。
@@ -236,11 +232,6 @@ class WebTabManager(private val context: Context) {
      */
     var onTabClosed: ((tabId: String) -> Unit)? = null
 
-    private class PendingSafeBrowsing(
-        val prompt: SafeBrowsingPrompt,
-        val callback: SafeBrowsingResponse,
-    )
-
     // ---------------------------------------------------------------- 页面控制台错误
 
     private val _consoleErrors = MutableStateFlow<List<ConsoleEntry>>(emptyList())
@@ -248,31 +239,24 @@ class WebTabManager(private val context: Context) {
     /** 当前各标签页收集到的控制台错误，供「页面错误」面板展示。 */
     val consoleErrors: StateFlow<List<ConsoleEntry>> = _consoleErrors.asStateFlow()
 
-    /**
-     * 尚未裁决的证书错误（FIFO）。
-     *
-     * 一个页面可能同时触发多个子资源握手失败，而 [SslErrorHandler] 必须逐个
-     * 兑现 —— 弹窗同一时刻只显示一个，其余排队；超过 [MAX_PENDING_CERTS]
-     * 的直接取消，避免坏页面把队列撑爆。
-     */
-    private val certQueue = ArrayDeque<PendingCert>()
-
-    /** 当前正在弹窗的那一条；null 表示没有弹窗。 */
-    private var certShown: PendingCert? = null
+    /** 证书错误的裁决队列（白名单命中直接放行，否则排队弹窗，见 [CertPromptQueue]）。 */
+    private val certPrompts = CertPromptQueue(
+        sessionOf = { session(it) },
+        findSession = { sessions[it] },
+        onMainFrameInsecure = { id ->
+            updateTab(id) { it.copy(security = SecurityState.INSECURE_CERT, errorText = null) }
+        },
+        onMainFrameBlocked = { id, reason -> markCertBlocked(id, reason) },
+    )
 
     /**
      * 证书错误弹窗回调：参数为 null 表示"当前没有待裁决项，关掉弹窗"。
      *
      * 用可空参数而不是两个回调，是为了让 UI 只维护一个状态源。
      */
-    var onCertPrompt: ((CertPrompt?) -> Unit)? = null
-
-    /** 队列里的一条：等待用户裁决的 handler 与展示信息。 */
-    private class PendingCert(
-        val tabId: String,
-        val prompt: CertPrompt,
-        val handler: SslErrorHandler,
-    )
+    var onCertPrompt: ((CertPrompt?) -> Unit)?
+        get() = certPrompts.onPrompt
+        set(value) { certPrompts.onPrompt = value }
 
     /**
      * 尚未裁决的表单重提交（FIFO）。
@@ -726,7 +710,7 @@ class WebTabManager(private val context: Context) {
         // 控制台记录随 session 一起没了，但已发布的是快照，需要重算一次。
         publishConsoleErrors()
         // 该标签的待裁决 Safe Browsing 与控制台记录同样随标签一起清掉。
-        cancelSafeBrowsingFor(id)
+        safePrompts.cancelFor(id)
         clearConsoleErrors(id)
 
         // 回收 favicon 的像素内存。必须在移出列表后立刻做：
@@ -761,7 +745,7 @@ class WebTabManager(private val context: Context) {
         // 证书放行白名单同样随手清掉：逃生口不该比标签活得久
         tab?.let { sessions[it.id]?.certExceptions?.clear() }
         // 还有未裁决的证书错误也一并取消：标签都没了，没人会再回答弹窗。
-        tab?.let { cancelCertPromptsFor(it.id) }
+        tab?.let { certPrompts.cancelFor(it.id) }
         // 表单重提交同理：不兑现会让该 WebView 的加载一直挂着。
         tab?.let { cancelFormResubmitsFor(it.id) }
     }
@@ -1260,7 +1244,7 @@ class WebTabManager(private val context: Context) {
      * 放行当前标签页的证书错误并重新导航（证书错误页的「继续访问」）。
      *
      * 只把**当前主机**加入本标签的临时白名单，然后重走一次导航：这一次
-     * [LingWebViewClient.onReceivedSslError] 上报后，[handleSslError] 会发现
+     * [LingWebViewClient.onReceivedSslError] 上报后，[CertPromptQueue.handle] 会发现
      * 白名单命中而直接 `proceed()`，不再弹窗。
      *
      * 用 [loadUrl] 而不是 `wv.reload()`：证书握手失败后 WebView 停在错误态，
@@ -1275,122 +1259,20 @@ class WebTabManager(private val context: Context) {
     }
 
     /**
-     * 网页证书校验失败：已放行过的主机直接 `proceed()`，否则排队弹窗。
-     *
-     * 主框架与子资源统一处理 —— 子资源静默取消会让页面"看起来正常但缺内容"。
-     */
-    private fun handleSslError(
-        tabId: String,
-        host: String,
-        reason: String,
-        mainFrame: Boolean,
-        handler: SslErrorHandler,
-    ) {
-        if (host.isBlank()) {
-            handler.cancel()
-            return
-        }
-        if (sessions[tabId]?.certExceptions?.contains(host) == true) {
-            handler.proceed()
-            // 放行 ≠ 安全：地址栏继续标「证书错误」。
-            if (mainFrame) {
-                updateTab(tabId) {
-                    it.copy(security = SecurityState.INSECURE_CERT, errorText = null)
-                }
-            }
-            return
-        }
-        // 坏页面可能一口气触发几十个子资源失败；超出队列上限的直接拒绝，
-        // 不能让每个都挂一个永不兑现的 handler。
-        if (certQueue.size >= MAX_PENDING_CERTS) {
-            handler.cancel()
-            return
-        }
-        certQueue.addLast(PendingCert(tabId, CertPrompt(host, reason, mainFrame), handler))
-        showNextCert()
-    }
-
-    /**
-     * 用户对待裁决证书错误的选择。
+     * 用户对待裁决证书错误的选择（见 [CertPromptQueue.resolve]）。
      *
      * [remember] 对应 Via 的「本次浏览过程中不再询问」：把主机加入本标签的
      * 白名单，之后同主机不再弹窗（关标签失效，不落盘）。
      */
-    fun resolveCertPrompt(proceed: Boolean, remember: Boolean) {
-        val item = certShown ?: return
-        certShown = null
-        if (proceed) {
-            if (remember) {
-                session(item.tabId).certExceptions.add(item.prompt.host)
-            }
-            item.handler.proceed()
-            if (item.prompt.mainFrame) {
-                updateTab(item.tabId) {
-                    it.copy(security = SecurityState.INSECURE_CERT, errorText = null)
-                }
-            }
-        } else {
-            item.handler.cancel()
-            if (item.prompt.mainFrame) markCertBlocked(item.tabId, item.prompt.reason)
-        }
-        showNextCert()
-    }
+    fun resolveCertPrompt(proceed: Boolean, remember: Boolean) = certPrompts.resolve(proceed, remember)
 
     /**
      * 把队列里所有待裁决项按拒绝处理并关掉弹窗。
      *
-     * 用于 UI 销毁 / 关标签：这些 handler 已经没人能回答，留着会让 TLS
-     * 握手永远悬空（页面停在半加载状态）。
+     * 用于 UI 销毁：这些 handler 已经没人能回答，留着会让 TLS 握手永远悬空
+     * （页面停在半加载状态）。
      */
-    fun cancelCertPrompts() {
-        val items = ArrayList<PendingCert>()
-        certShown?.let { items.add(it) }
-        certShown = null
-        while (true) {
-            items.add(certQueue.removeFirstOrNull() ?: break)
-        }
-        for (item in items) {
-            item.handler.cancel()
-            if (item.prompt.mainFrame) markCertBlocked(item.tabId, item.prompt.reason)
-        }
-        onCertPrompt?.invoke(null)
-    }
-
-    /** 关标签时清理该标签的待裁决项（其余标签的继续保留）。 */
-    private fun cancelCertPromptsFor(tabId: String) {
-        certShown?.takeIf { it.tabId == tabId }?.let {
-            it.handler.cancel()
-            certShown = null
-            showNextCert()
-        }
-        val iterator = certQueue.iterator()
-        while (iterator.hasNext()) {
-            val item = iterator.next()
-            if (item.tabId == tabId) {
-                item.handler.cancel()
-                iterator.remove()
-            }
-        }
-    }
-
-    /** 队列里挑一条展示；没有待裁决项时向 UI 发 null 关掉弹窗。 */
-    private fun showNextCert() {
-        if (certShown == null) {
-            while (true) {
-                val next = certQueue.removeFirstOrNull() ?: break
-                val listener = onCertPrompt
-                if (listener == null) {
-                    // UI 还没接线：这条没人能回答，只能拒绝。
-                    next.handler.cancel()
-                    if (next.prompt.mainFrame) markCertBlocked(next.tabId, next.prompt.reason)
-                    continue
-                }
-                certShown = next
-                break
-            }
-        }
-        onCertPrompt?.invoke(certShown?.prompt)
-    }
+    fun cancelCertPrompts() = certPrompts.cancelAll()
 
     /** 主框架被拒绝：落证书错误页，而不是留一句泛化的加载失败。 */
     private fun markCertBlocked(tabId: String, reason: String) {
@@ -1405,102 +1287,11 @@ class WebTabManager(private val context: Context) {
 
     // ---------------------------------------------------------------- Safe Browsing
 
-    /**
-     * Safe Browsing 命中：排队弹窗，由用户决定继续还是返回。
-     *
-     * 队列上限很小 —— 主框架命中本来就是低频事件；超出时直接退回安全页，
-     * 不能让 callback 悬空（悬空等于 WebView 一直等在那里）。
-     */
-    private fun handleSafeBrowsingHit(
-        tabId: String,
-        url: String,
-        mainFrame: Boolean,
-        threatType: Int,
-        callback: SafeBrowsingResponse,
-    ) {
-        // SafeBrowsingResponse 及其方法都是 API 27+；低版本根本不会触发
-        // onSafeBrowsingHit。显式守卫让 Lint 能证明边界，也避免误调用时
-        // 触发 NoSuchMethodError。
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O_MR1) return
-        if (safeQueue.size >= MAX_PENDING_SAFE) {
-            callback.backToSafety(true)
-            return
-        }
-        val host = runCatching { Uri.parse(url).host }.getOrNull().orEmpty()
-        safeQueue.addLast(
-            PendingSafeBrowsing(
-                SafeBrowsingPrompt(tabId, host, safeThreatLabel(threatType), mainFrame),
-                callback,
-            ),
-        )
-        showNextSafe()
-    }
-
     /** 用户对 Safe Browsing 警告的选择：true = 继续访问，false = 返回安全页。 */
-    fun resolveSafeBrowsing(proceed: Boolean) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O_MR1) return
-        val item = safeShown ?: return
-        safeShown = null
-        if (proceed) item.callback.proceed(false) else item.callback.backToSafety(true)
-        showNextSafe()
-    }
+    fun resolveSafeBrowsing(proceed: Boolean) = safePrompts.resolve(proceed)
 
     /** UI 销毁时把待裁决项全部按「返回安全页」兑现，避免 callback 悬空。 */
-    fun cancelSafeBrowsing() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O_MR1) return
-        val items = ArrayList<PendingSafeBrowsing>()
-        safeShown?.let { items.add(it) }
-        safeShown = null
-        while (true) {
-            items.add(safeQueue.removeFirstOrNull() ?: break)
-        }
-        for (item in items) item.callback.backToSafety(true)
-        onSafeBrowsingPrompt?.invoke(null)
-    }
-
-    /** 关标签时只清理该标签的待裁决项。 */
-    private fun cancelSafeBrowsingFor(tabId: String) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O_MR1) return
-        safeShown?.takeIf { it.prompt.tabId == tabId }?.let {
-            it.callback.backToSafety(true)
-            safeShown = null
-            showNextSafe()
-        }
-        val iterator = safeQueue.iterator()
-        while (iterator.hasNext()) {
-            val item = iterator.next()
-            if (item.prompt.tabId == tabId) {
-                item.callback.backToSafety(true)
-                iterator.remove()
-            }
-        }
-    }
-
-    private fun showNextSafe() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O_MR1) return
-        if (safeShown == null) {
-            while (true) {
-                val next = safeQueue.removeFirstOrNull() ?: break
-                if (onSafeBrowsingPrompt == null) {
-                    // UI 还没接线：没人能回答，直接退回安全页。
-                    next.callback.backToSafety(true)
-                    continue
-                }
-                safeShown = next
-                break
-            }
-        }
-        onSafeBrowsingPrompt?.invoke(safeShown?.prompt)
-    }
-
-    private fun safeThreatLabel(threatType: Int): String = when (threatType) {
-        WebViewClient.SAFE_BROWSING_THREAT_MALWARE -> "恶意软件"
-        WebViewClient.SAFE_BROWSING_THREAT_PHISHING -> "钓鱼网站"
-        WebViewClient.SAFE_BROWSING_THREAT_UNWANTED_SOFTWARE -> "有害软件"
-        // SAFE_BROWSING_THREAT_BILLING（值为 4）在部分编译 SDK 里没有公开常量。
-        4 -> "可能有害的应用"
-        else -> "危险网站"
-    }
+    fun cancelSafeBrowsing() = safePrompts.cancelAll()
 
     // ---------------------------------------------------------------- 页面控制台错误
 
@@ -2078,7 +1869,7 @@ class WebTabManager(private val context: Context) {
                             url = storedUrl,
                             // 新一次主框架导航：安全状态先按协议落到**基础态**，
                             // 混合内容 / 证书错误会在加载过程中把它升级
-                            // （见 onMixedContent / handleSslError）。
+                            // （见 onMixedContent / CertPromptQueue.handle）。
                             security = SecurityState.baseForUrl(storedUrl),
                             isLoading = !isInternal,
                             errorText = null,
@@ -2194,7 +1985,7 @@ class WebTabManager(private val context: Context) {
                 currentUrl = { _tabs.value.firstOrNull { it.id == id }?.url },
                 // 主框架与子资源统一排队：白名单命中直接放行，否则交给 UI 弹窗。
                 onSslErrorRequest = { host, reason, mainFrame, handler ->
-                    handleSslError(id, host, reason, mainFrame, handler)
+                    certPrompts.handle(id, host, reason, mainFrame, handler)
                 },
                 onError = { _, desc ->
                     updateTab(id) { it.copy(isLoading = false, errorText = desc) }
@@ -2219,7 +2010,7 @@ class WebTabManager(private val context: Context) {
                 },
                 // Safe Browsing：弹出「危险网站」确认框，而不是静默退回。
                 onSafeBrowsingHit = { url, mainFrame, threatType, callback ->
-                    handleSafeBrowsingHit(id, url, mainFrame, threatType, callback)
+                    safePrompts.handle(id, url, mainFrame, threatType, callback)
                 },
                 onExternalScheme = { uri -> onExternalUri?.invoke(uri) ?: false },
                 // `.user.js` 以附件形式下发时不会走 shouldOverrideUrlLoading，
@@ -2416,19 +2207,8 @@ class WebTabManager(private val context: Context) {
         /** 浏览器级"新标签"桥在页面里的对象名（`window.LingTab`）。 */
         private const val TAB_BRIDGE_NAME = "LingTab"
 
-        /**
-         * 证书错误排队上限。
-         *
-         * 子资源也弹窗后，一个引用了几十张坏证书图片的页面会连续上报；
-         * 队列封顶后其余直接取消，避免内存里堆满永不兑现的 handler。
-         */
-        private const val MAX_PENDING_CERTS = 8
-
         /** 表单重提交的待裁决上限：低频事件，超过就直接放弃重提交。 */
         private const val MAX_PENDING_FORMS = 4
-
-        /** Safe Browsing 待裁决上限：低频事件，超过就直接退回安全页。 */
-        private const val MAX_PENDING_SAFE = 4
 
         /** 每个标签页保留的控制台错误条数。 */
         private const val MAX_CONSOLE_ERRORS = 30
