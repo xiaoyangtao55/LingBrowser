@@ -79,9 +79,15 @@ class DownloadEngine(
         OkHttpClient.Builder()
             // 连接超时短一些：连不上趁早报错，别让用户傻等
             .connectTimeout(15, TimeUnit.SECONDS)
-            // 读超时用「每字节超时」语义（OkHttp 默认），大文件慢速下载不会被误杀
-            .readTimeout(30, TimeUnit.SECONDS)
-            .writeTimeout(30, TimeUnit.SECONDS)
+            // readTimeout 是**单次 read() 调用**的等待上限，不是整个响应体的时限。
+            // 30s 对国内 CDN 上的大文件偏紧：服务端限速到几百 KB/s 时，一次
+            // read 卡住 30 秒就会被判超时，表现为"下着下着就错误了"。
+            // 放宽到 60s，配合每块独立重试（见 downloadChunkWithRetry），
+            // 偶发的长时间停顿也能自愈。
+            .readTimeout(60, TimeUnit.SECONDS)
+            .writeTimeout(60, TimeUnit.SECONDS)
+            // 心跳式探测：服务端主动保持连接但不发数据时，别让连接被无限期挂着
+            .retryOnConnectionFailure(true)
             // 带上浏览器里的 Cookie，否则需要登录态的文件（网盘、论坛附件）会直接 403。
             //
             // 这里刻意用 CookieJar 而不是把 `Cookie` 头钉死在请求上：CookieJar 会在
@@ -910,11 +916,20 @@ class DownloadEngine(
             if (shouldPublish) publishProgress(taskId, plan.total, written, speed)
         }
 
+        // 每块**各自重试**，而不是让任一块的失败拖垮整批。
+        //
+        // 原来的写法是裸 `launch`：任何一块抛出 IOException，coroutineScope 会
+        // 立刻取消其它三块并向外抛 —— 于是整批失败，只能靠外层那 3 次重试兜底。
+        // 对 191 MB 的包（b 站客户端）来说，4 块各 48 MB，一条连接抖一下就把
+        // 另外三条 48 MB 的进度一起废掉，表现为"下着下着自己就错误了"。
+        //
+        // 现在每块自己退避重试；只有某块**连续失败超过上限**才向上抛，
+        // 到那时外层再整体重试 —— 而重试会从各自的断点继续，不会白下。
         try {
             kotlinx.coroutines.coroutineScope {
                 for (index in 0 until plan.chunkCount) {
                     launch {
-                        downloadChunk(taskId, entry, target, plan, index, onProgress)
+                        downloadChunkWithRetry(taskId, entry, target, plan, index, onProgress)
                     }
                 }
             }
@@ -926,6 +941,68 @@ class DownloadEngine(
         if (!plan.isComplete()) throw java.io.IOException("分块未下载完整")
         ChunkStore.delete(appContext, taskId)
         markSuccess(taskId, target)
+    }
+
+    /**
+     * 带独立重试地下载一块。
+     *
+     * 为什么每块要自己重试（而不是让 runChunked 整体失败再由外层重试）：
+     * 分块是并发的，外层重试意味着**四条连接全部重来** —— 而它们各自的
+     * 进度其实还在（[ChunkPlan.written] 逐块记账）。让失败的那一块自己
+     * 从断点续，比让另外三块陪跑更省时也更省流量。
+     *
+     * 重试判据与单流路径一致：超时 / 连接被重置 / 服务器提前断流都算临时
+     * 故障，退避后重试；HTTP 4xx（除 408/429）属于确定性失败，不重试。
+     *
+     * 每块用独立的计数，避免某块反复失败把整批的重试次数吃光。
+     */
+    private suspend fun downloadChunkWithRetry(
+        taskId: Long,
+        entry: DownloadEntry,
+        target: DownloadDestination.Target,
+        plan: ChunkPlan,
+        index: Int,
+        onProgress: suspend (Long) -> Unit,
+    ) {
+        var attempt = 0
+        while (true) {
+            // 每次尝试前重新确认这块的进度：上一轮可能已经写进去一部分
+            if (plan.written[index] >= plan.chunkLength(index)) return
+            try {
+                downloadChunk(taskId, entry, target, plan, index, onProgress)
+                return
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // 暂停 / 取消 / 移除：不要吞掉，也不要重试
+                throw e
+            } catch (e: java.io.IOException) {
+                // 确定性失败不重试：404/403 这类重试多少次都一样，
+                // 只会把用户的时间耗在必然失败的循环里。
+                if (!isRetryable(e) || ++attempt > CHUNK_MAX_RETRIES) throw e
+                // 退避 500ms -> 1s -> 2s，比单流路径更短：
+                // 分块的重试是针对"这一条连接抖了"，不像整任务失败那么重。
+                delay(500L * (1L shl (attempt - 1)))
+            } catch (e: Exception) {
+                // 其它异常（例如目标写入失败）一律视为不可重试，直接抛
+                throw e
+            }
+        }
+    }
+
+    /**
+     * 该异常是否值得重试。
+     *
+     * 只对明确由网络引起的情况返回 true；HTTP 状态码类错误由调用方在
+     * [downloadChunk] 里以 IOException 抛出，这里按消息前缀区分。
+     */
+    private fun isRetryable(e: java.io.IOException): Boolean {
+        val msg = e.message.orEmpty()
+        // 服务端 4xx/5xx 里只有 408（超时）与 429（限流）值得再试
+        if (msg.startsWith("HTTP ")) {
+            val code = msg.removePrefix("HTTP ").toIntOrNull() ?: return true
+            return code == 408 || code == 429 || code >= 500
+        }
+        // 其余（连接重置、超时、提前断流、区间错误）都当临时故障
+        return true
     }
 
     /**
@@ -953,6 +1030,8 @@ class DownloadEngine(
         client.newCall(request).execute().use { response ->
             // 这一块必须是 206：200 说明服务端无视了 Range，写下去会覆盖别的块
             if (response.code != 206) {
+                // 带上 HTTP 前缀让 isRetryable 能分级：403/404 这类重试也不会变，
+                // 而 408/429/5xx 是临时的，值得再试。
                 throw java.io.IOException(
                     if (response.code == 200) "服务器忽略了 Range" else "HTTP ${response.code}",
                 )
@@ -1375,6 +1454,15 @@ class DownloadEngine(
          * 再多容易被服务端限速，也会让每个任务的进度慢到像卡住。
          */
         private const val MAX_CONCURRENT_DOWNLOADS = 3
+
+        /**
+         * **单块**失败的重试上限（不含首次）。
+         *
+         * 与 [MAX_RETRIES]（整任务重试）是两个层级：分块下载时每块独立计数，
+         * 一块抖动不会吃掉整批的次数。5 次配合 500ms 起的短退避，足以跨过
+         * 移动网络常见的瞬时拥塞，又不至于让用户盯着一个死块干等。
+         */
+        private const val CHUNK_MAX_RETRIES = 5
 
         /** 流式写盘缓冲区：8 KiB，与 OkHttp 内部一致。 */
         private const val BUFFER_SIZE = 8 * 1024

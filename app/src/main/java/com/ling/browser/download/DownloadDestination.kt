@@ -261,14 +261,37 @@ object DownloadDestination {
 
         override val supportsRandomAccess: Boolean get() = true
 
+        /**
+         * 从 [offset] 开始写入。
+         *
+         * 不能用 `FileOutputStream(file, true)`：O_APPEND 会让所有写入都跑到
+         * 文件尾，position 被系统忽略。RandomAccessFile 才是真正的随机写。
+         *
+         * ⚠️ 关闭责任：`Channels.newOutputStream` 返回的流 close 时会关闭底层
+         * channel，但 RandomAccessFile 自己还要单独关 —— 这里包一层，避免
+         * 分块下载反复开关时漏掉 raf 的句柄。
+         */
         override fun outputStreamAt(offset: Long): OutputStream {
             val parent = file.parentFile
             if (parent != null && !parent.exists()) parent.mkdirs()
-            // 不能用 FileOutputStream(file, true)：O_APPEND 会让所有写入都跑到文件尾，
-            // position 被系统忽略。RandomAccessFile 打开才是真正的随机写。
             val raf = java.io.RandomAccessFile(file, "rw")
             raf.seek(offset)
-            return java.nio.channels.Channels.newOutputStream(raf.channel)
+            // Channels.newOutputStream(raf.channel)：写走 channel，close 时
+            // 关闭 channel；RandomAccessFile 本身在 close 里一并释放。
+            // 刻意不包 BufferedOutputStream 之外的东西 —— 我们的调用方已经
+            // 用 8 KiB 的 buffer 批量写，这里再加一层缓冲收益很小，
+            // 却要多担一份 flush 顺序的责任。
+            val stream = java.nio.channels.Channels.newOutputStream(raf.channel)
+            return object : java.io.OutputStream() {
+                override fun write(b: Int) = stream.write(b)
+                override fun write(b: ByteArray, off: Int, len: Int) = stream.write(b, off, len)
+                override fun flush() = stream.flush()
+
+                override fun close() {
+                    runCatching { stream.close() }
+                    runCatching { raf.close() }
+                }
+            }
         }
 
         override fun displayPath(): String = file.absolutePath
@@ -309,25 +332,37 @@ object DownloadDestination {
             } ?: 0L
         }.getOrDefault(0L)
 
+        /**
+         * 顺序写入。
+         *
+         * ⚠️ 必须用 [android.os.ParcelFileDescriptor.AutoCloseOutputStream] 而不是
+         * `FileOutputStream(pfd.fileDescriptor)`：后者的 close **只关 fd 本身**，
+         * `ParcelFileDescriptor` 这个包装对象仍然持有引用、永远等不到 GC ——
+         * 系统会在 logcat 里刷 `A resource failed to call close`，
+         * 而多次重试后 fd 会真的耗尽。
+         */
         override fun outputStream(append: Boolean): OutputStream {
             // "wa" = write + append；"w" = write + truncate
             val mode = if (append) "wa" else "w"
-            val fd = context.contentResolver.openFileDescriptor(uri, mode)
+            val pfd = context.contentResolver.openFileDescriptor(uri, mode)
                 ?: throw java.io.IOException("无法打开 MediaStore 输出流")
-            // 用 FileDescriptor 构造 OutputStream；RandomAccessFile 不支持
-            // ParcelFileDescriptor 的 fd 直接构造（它需要真实文件路径），
-            // 这里用 FileOutputStream 的 fd 构造函数写入。
-            return java.io.FileOutputStream(fd.fileDescriptor)
+            return android.os.ParcelFileDescriptor.AutoCloseOutputStream(pfd)
         }
 
         override val supportsRandomAccess: Boolean get() = true
 
+        /**
+         * 从 [offset] 开始写入。
+         *
+         * 与 [outputStream] 同样必须走 AutoCloseOutputStream：分块下载时每块、
+         * 每次重试都会开一个 pfd，不关的话一次 191 MB 的下载就能漏掉十几个，
+         * 最终表现为"下到一半突然失败"（fd 耗尽 / provider 侧引用计数异常）。
+         */
         override fun outputStreamAt(offset: Long): OutputStream {
             // "rw" 允许 seek 写；打开后把通道位置移到块的起点即可。
-            // fd 的所有权交给 FileOutputStream（close 时一并关闭），与 [outputStream] 一致。
             val pfd = context.contentResolver.openFileDescriptor(uri, "rw")
                 ?: throw java.io.IOException("无法打开 MediaStore 输出流")
-            val out = java.io.FileOutputStream(pfd.fileDescriptor)
+            val out = android.os.ParcelFileDescriptor.AutoCloseOutputStream(pfd)
             out.channel.position(offset)
             return out
         }
