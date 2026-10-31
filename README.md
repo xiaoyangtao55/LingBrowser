@@ -6,9 +6,7 @@
 把速度提到最快，不做新闻流、不做信息流干扰，只专心把「打开网页」这件事做好。
 
 - **包名**：`com.ling.browser`
-- **版本**：1.11.0 (versionCode 1011000)
 - **兼容**：Android 6.0 (API 23) ~ Android 16 (API 36)
-- **体积**：release APK 约 **1.4 MB**
 - **UI**：Jetpack Compose + **Material You 3**（Android 12+ 自动跟随壁纸动态取色）
 
 ---
@@ -152,12 +150,8 @@ LingBrowser/
   -PLING_KEY_PASSWORD=xxx
 ```
 
-> ⚠️ `keystore/` 已在 `.gitignore` 中排除，密钥库**不会**进入仓库。
-> 详见 [keystore/README.md](keystore/README.md)。
-
 ### CI 自动构建
 
-本地设备编译较慢，因此提供了 GitHub Actions 工作流
 [.github/workflows/release.yml](.github/workflows/release.yml)：
 
 - **PR 到 main/master** → 先跑 `static-checks`（文本级检查，不需要 Android SDK），再跑 Android Lint、单元测试并构建 release APK，产物在该次运行的 Artifacts 里下载
@@ -192,7 +186,6 @@ README 只保留「是什么 / 怎么用 / 怎么构建」，细节看那边。
 
 ## 五、启动图标
 
-启动图标是一套外部导出的完整资源包，直接铺进 `res/`，不再由仓库内的脚本生成：
 
 | 资源 | 内容 |
 |---|---|
@@ -209,11 +202,6 @@ Android 13+ 的**主题化图标** —— 系统读 `ic_launcher_monochrome` 单
 
 > 自适应图标的画布是 108dp，但只有中心 72dp 直径对所有遮罩形状可见。这套资源已
 > 按该规则裁好前景与单色层，无需再手工缩放。
-
-> 旧版是一枚手绘描边羽毛，由 `tools/icon_source.svg → gen_launcher_icon.py →`
-> `三层 vector drawable` 这条本地管线生成，再用 `make_icons.py` 产出 PNG fallback，
-> 另有 `LauncherIconTest` 与一批 `check_launcher_*` 脚本守着它的造型。改用这套外部
-> 资源后该管线已整体退役，相关生成脚本、检查脚本与回归测试一并删除。
 
 ---
 
@@ -279,13 +267,6 @@ python tools/ascii_icons.py Download Layers          # 渲染指定图标
 | 静态自检（17 项） | ✅ 全部通过 |
 | 真机多标签压测（MI 8） | ✅ 10 标签来回切不重载、不崩溃；回收后历史栈与滚动位置均恢复 |
 
-
-> 图标全部为官方 Material Symbols（44 个，见 [DESIGN.md](DESIGN.md) §2），
-> 其中 16 个通过 `check_icon_fidelity.py` 与源文件逐点核对。
->
-> **仍未做逐点比对的 28 个图标**：`check_icon_fidelity.py` 的 `MAPPING` 只覆盖
-> 了一部分，包括全部 11 个下载文件类型图标与 `PlayArrow`/`Pause`/`Palette`
-> 等。这是已知缺口 —— 源文件不在仓库里，补齐需要先拿到对应的官方 XML。
 
 > **多标签实例池**（本轮新增）：正常内存下上限 10，超过才按 LRU 回收；
 > 被回收的标签切回来会恢复历史栈与滚动位置。已在 Xiaomi MI 8 上验证：
@@ -393,9 +374,6 @@ hello world                -> 必应搜索（默认引擎）
 | 资源嗅探 | 注入 JS 扫描 DOM，抓视频/音频/图片/下载链接；结果二级页分组展示，可打开或下载 |
 | 外部链接开关 | 非 http(s) 链接是否交给外部 App，**默认关**（本机没装该 App 时更稳定） |
 
-> 早先下载的 8 个未使用官方图标（`help` / `language` / `license` / `menu` 等）
-> 可对应「关于页 / 翻译 / 许可」等后续功能，需要时直接映射即可，
-> 无需重新下载。
 
 ---
 
