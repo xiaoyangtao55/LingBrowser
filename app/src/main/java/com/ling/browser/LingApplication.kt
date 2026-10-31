@@ -16,6 +16,26 @@ class LingApplication : Application() {
     lateinit var container: AppContainer
         private set
 
+    /**
+     * WebView 实例池的内存压力回调（由 WebTabManager 注册，见 [onTrimMemory]）。
+     *
+     * 用可空 lambda 而不是直接持有 WebTabManager：Application 是进程级的，
+     * 而 WebTabManager 的生命周期跟着 Activity。UI 层 attach/detach 时
+     * 设置或清空这里，避免 Application 长期持有一个已销毁的 Activity 的引用。
+     */
+    var onTrimMemoryListener: ((level: Int) -> Unit)? = null
+
+    /**
+     * 系统内存压力回调。
+     *
+     * 这里只做转发，判定与动作都在 WebTabManager.updateCacheLimit 里 ——
+     * 它知道实例表长什么样，Application 不该知道。
+     */
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        onTrimMemoryListener?.invoke(level)
+    }
+
     override fun onCreate() {
         super.onCreate()
         container = AppContainer(this)

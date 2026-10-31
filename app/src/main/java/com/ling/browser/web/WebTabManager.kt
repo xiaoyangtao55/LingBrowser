@@ -1,7 +1,9 @@
 package com.ling.browser.web
 
 import android.annotation.SuppressLint
+import android.content.ComponentCallbacks2
 import android.content.Context
+import android.os.Bundle
 import android.graphics.Bitmap
 import android.net.Uri
 import android.webkit.ClientCertRequest
@@ -117,6 +119,34 @@ internal class TabSession {
 
     /** 这个标签里的 `about:blank` 是不是"主页占位"，见 [WebTabManager.isHomePlaceholder]。 */
     var isHomePlaceholder = false
+
+    /**
+     * 实例被回收时存下的回退/前进历史栈（[android.webkit.WebView.saveState]）。
+     *
+     * 为什么要它：WebView 实例一销毁，历史栈就没了 —— 用户切回旧标签时
+     * 即使页面重新加载出来，按返回也回不到上一页。saveState 存的是**历史栈**
+     * 而非渲染结果，所以恢复后仍要重新加载当前页，但"翻到哪"这条链能接上。
+     *
+     * 用 Bundle 而不是自己序列化：Android 的 saveState/restoreState 是一对
+     * 配套 API —— `saveState(outState: Bundle)` 把历史栈写进 Bundle，
+     * `restoreState(inState: Bundle)` 再读回来。自己存 WebBackForwardList
+     * 没有可用的恢复入口（它只是个只读快照）。
+     *
+     * 回收实例时写入，[WebTabManager.obtainWebView] 建新实例后消费并清空。
+     */
+    var savedState: Bundle? = null
+
+    /**
+     * 实例被回收时的滚动位置（CSS 像素）。
+     *
+     * 为什么单独存一个数字而不做"全状态序列化"：现代 SPA 的 store 在闭包里，
+     * `window` 上根本读不到，序列化出来也还原不回去（框架不会拿它重建组件树）。
+     * 而滚动位置是用户切回来时最直接感知的东西 —— 一个数字就能拿回 80% 的体验。
+     *
+     * 由 [captureScrollY] 在销毁前异步抓取（evaluateJavascript 是异步的，
+     * 不能在 destroy 里同步等），重建后由 [restoreScrollY] 在页面加载完成时用。
+     */
+    var scrollY: Int = 0
 }
 
 /**
@@ -151,6 +181,26 @@ class WebTabManager(private val context: Context) {
 
     /** tabId -> WebView。仅在内存中存活，不参与状态序列化。 */
     private val webViews = LinkedHashMap<String, LingWebView>()
+
+    /**
+     * 当前允许同时存活的 WebView 实例数（动态，见 [updateCacheLimit]）。
+     *
+     * 为什么不是常量：实例数是**内存压力**的函数，不是固定值。
+     * 平时给足（[MAX_WEBVIEWS_DEFAULT]），标签切来切去都是原样；
+     * 系统报内存吃紧时再收缩，牺牲"切回来是原样"换取不被 OOM 杀掉。
+     *
+     * 只写不读之外的线程安全：只在主线程读写（onTrimMemory 也投递到主线程，
+     * 见 [updateCacheLimit]），与 [webViews] 同线程，无需加锁。
+     */
+    private var maxWebViews: Int = MAX_WEBVIEWS_DEFAULT
+
+    /**
+     * [obtainWebView] 最近一次是否从 [TabSession.savedState] 恢复了历史栈。
+     *
+     * 只由 [obtainWebView] 写、[switchTo] 紧接着读一次，因此不需要更复杂的传递方式。
+     * 语义是"这个新实例已经有内容了，别再 loadUrl 覆盖它"。
+     */
+    private var restoredFromSnapshot = false
 
     /**
      * tabId -> 该标签的附属簿记（脚本句柄、注入记录、菜单、阅读缓存、证书放行、
@@ -839,17 +889,12 @@ class WebTabManager(private val context: Context) {
             (wv.parent as? FrameLayout)?.removeView(wv)
             h.addView(wv)
         }
-        // LRU 回收后重建的实例没有可恢复的文档 —— 新实例是纯白底。
+        // 回收后重建的实例没有文档（纯白底）。统一走 loadUrl 重新加载标签
+        // 自己的地址 —— 它内部已分派主页 / 自定义协议 / 阅读视图 / .user.js。
         //
-        // 之前只处理了主页标签（空的 WebView 会盖住 HomeBackgroundLayer），
-        // 普通网页则什么都不做，于是"实例被回收 → 切回来"表现为**白页**，
-        // 而且按刷新也没反应（对空白实例 reload 不会加载任何东西）。
-        // 这正是"开满 8 个标签后，切回旧的只剩白页"的原因。
-        //
-        // 这里统一走 loadUrl 重新加载标签自己的地址：它内部已经处理了
-        // 主页（loadHome）、自定义协议（忽略）、阅读视图（回主页）、
-        // .user.js（交给安装流程）等分支，比在这里再判一遍更稳妥。
-        if (recreated) {
+        // ⚠️ 若该实例刚从 saveState 恢复过历史栈（见 obtainWebView），
+        // 则**不能再 loadUrl**：那会把恢复出来的栈顶掉，返回键照样回不去。
+        if (recreated && !restoredFromSnapshot) {
             val restoredUrl = _tabs.value.firstOrNull { it.id == id }?.url
             if (!restoredUrl.isNullOrBlank()) {
                 loadUrl(id, restoredUrl)
@@ -1397,6 +1442,8 @@ class WebTabManager(private val context: Context) {
 
         val tab = _tabs.value.firstOrNull { it.id == id }
         val incognito = tab?.isIncognito ?: false
+        // 复位：这个标记只描述"本次新建"，命中缓存的分支不该留下上一次的残留值。
+        restoredFromSnapshot = false
 
         val wv = LingWebView(context)
         // 先建实例再配置（而不是 LingWebView(context).apply { ... }）：
@@ -1837,6 +1884,13 @@ class WebTabManager(private val context: Context) {
                             canGoForward = canGoForward(),
                         )
                     }
+                    // 实例重建后的滚动位置还原：页面刚加载完，scrollY 才有意义。
+                    // 只在"重建 + 之前存过位置"时生效，用完即清（见 restoreScrollY）。
+                    // 放在这里而不是 onPageStarted：那时文档还没布局，scrollTo 无效。
+                    if (!isInternal && !isHome) {
+                        sessions[id]?.let { ses -> restoreScrollY(wv, ses) }
+                    }
+
                     // 阅读视图的颜色是"烘"进 HTML 字符串里的，任何一次文档重建
                     // （reload 重放 data URL、渲染进程被回收后重建、历史前进/后退
                     // 到旧条目）都会停在烘死时的旧配色。原地改 :root 的 CSS 变量
@@ -1967,6 +2021,23 @@ class WebTabManager(private val context: Context) {
         // HTTP 认证回调挂在 WebViewClient 上（不是 WebChromeClient）。
         // 这里必须传"读委托的 lambda"而不是把委托本身拷进来：UI 的接线
         // 发生在 composition 之后，直接拷会永久拿到 null、401 永远被取消。
+        // 恢复上次被回收时存下的历史栈（见 TabSession.savedState）。
+        //
+        // 时机很关键：必须在挂到视图树、开始导航**之前**调 restoreState，
+        // 否则新实例已经导航到目标地址，restoreState 会把历史栈整个替换掉，
+        // 表现为"页面跳回旧地址"。这里紧接着就 return，后续的 loadUrl
+        // 会沿用恢复出来的历史。
+        //
+        // 消费后立刻清空：一份快照只该用一次，留着会让下一次重建
+        // 又恢复到那个旧历史栈上。
+        sessions[id]?.savedState?.let { state ->
+            // restoreState 返回恢复后的 WebBackForwardList（失败时为 null）。
+            // 调用方据此跳过"重新 loadUrl"，否则会把刚恢复的栈顶掉。
+            restoredFromSnapshot =
+                runCatching { wv.restoreState(state) != null }.getOrDefault(false)
+            sessions[id]?.savedState = null
+        }
+
         webViews[id] = wv
         // Cookie 策略是进程级的：新建的 WebView 只有正好是当前激活标签时才动全局策略，
         // 后台标签（例如 ensureHomeRendered 给非激活标签补建实例）等切过去时再对齐。
@@ -2015,15 +2086,106 @@ class WebTabManager(private val context: Context) {
         }
     }
 
+    /**
+     * 异步抓取当前页面的滚动位置，写进 [TabSession.scrollY]。
+     *
+     * 为什么不能同步：`evaluateJavascript` 的回调要等 JS 引擎执行完才回来，
+     * 而调用点（[enforceCacheLimit]）是个同步 while 循环，马上就要 destroy()。
+     * 等它等于把整个回收流程改成异步队列 —— 代价远大于收益。
+     *
+     * 因此这里**发出去就不管**：回调回来时实例可能已经销毁，
+     * 但 lambda 只捕获 [TabSession]（普通 Kotlin 对象），不碰 WebView，
+     * 写一个 Int 是安全的。最坏情况是这次没抓到，scrollY 保持旧值。
+     */
+    private fun captureScrollY(wv: LingWebView, ses: TabSession) {
+        runCatching {
+            wv.evaluateJavascript(SCROLL_Y_JS) { raw ->
+                // evaluateJavascript 的返回值是 JSON 编码的字符串（数字就是 "123"）
+                raw?.trim()?.trim('"')?.toDoubleOrNull()?.let { y ->
+                    if (y.isFinite() && y >= 0) ses.scrollY = y.toInt()
+                }
+            }
+        }
+    }
+
+    /**
+     * 页面加载完成后把滚动位置还原回去。
+     *
+     * 只在"实例是重建出来的"这条路上调用（见 switchTo），且用完即清 ——
+     * 否则用户之后正常刷新也会被拽回旧位置。
+     *
+     * 用 `window.scrollTo` 而不是 `document.documentElement.scrollTop = y`：
+     * 后者在部分站点（滚动容器不是 document）上无效，scrollTo 走的是同一套语义。
+     */
+    private fun restoreScrollY(wv: LingWebView, ses: TabSession) {
+        val y = ses.scrollY
+        if (y <= 0) return
+        ses.scrollY = 0
+        runCatching {
+            wv.evaluateJavascript("try{window.scrollTo(0,$y)}catch(e){}", null)
+        }
+    }
+
+    /**
+     * 按系统内存压力调整实例上限。
+     *
+     * 由 UI 层从 `Application.onTrimMemory` 转发进来（web 层不认识 Activity/
+     * Application 生命周期，与其它回调同一分层思路）。**必须投递到主线程**：
+     * 它会改 [webViews] 并调 [enforceCacheLimit]，而那张表是主线程独占的。
+     *
+     * 分档依据是"还能不能撑住"：
+     *  - 正常 / 后台：不收缩（后台时用户随时会切回来，砍了就是白重载）；
+     *  - RUNNING_LOW：降一档，牺牲最久未用的那几个；
+     *  - RUNNING_CRITICAL：降到最低，先别被系统杀掉。
+     *
+     * 调高时不主动补建实例 —— 那些标签切过去时 [obtainWebView] 自然会建。
+     */
+    fun updateCacheLimit(level: Int) {
+        val target = when (level) {
+            ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL,
+            ComponentCallbacks2.TRIM_MEMORY_COMPLETE,
+            -> MAX_WEBVIEWS_CRITICAL
+
+            ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW,
+            ComponentCallbacks2.TRIM_MEMORY_RUNNING_MODERATE,
+            -> MAX_WEBVIEWS_LOW
+
+            else -> MAX_WEBVIEWS_DEFAULT
+        }
+        if (target == maxWebViews) return
+        maxWebViews = target
+        // 收缩后立刻执行，否则上限要等到下一次"新建实例"才生效 ——
+        // 而内存危急时用户可能根本不建新实例，等于白设。
+        enforceCacheLimit()
+    }
+
     /** WebView 实例上限：超过则回收最久未使用的非激活实例。 */
     private fun enforceCacheLimit() {
-        while (webViews.size > MAX_WEBVIEWS) {
+        while (webViews.size > maxWebViews) {
             val victim = webViews.keys.firstOrNull { it != _activeId.value } ?: return
             webViews.remove(victim)?.let { wv ->
                 // 实例销毁后主页占位身份一并失效：重建出来的 WebView 是空白的，
                 // 若 session 里还留着这个标记，它自己导航到 about:blank 就会被误认成主页。
                 // 只清标记、保留 session：标签本身还在。
                 sessions[victim]?.isHomePlaceholder = false
+                // 销毁前存下回退/前进历史栈：实例一没，这条链就断了。
+                // saveState 必须在 destroy() **之前**、实例仍可用时调用 ——
+                // 销毁后再调只会拿到 null。
+                //
+                // 注意它存的是历史栈，不是页面内容：恢复后仍要重新加载当前页，
+                // 但用户按返回能回到上一页（见 obtainWebView 里的 restoreState）。
+                sessions[victim]?.let { ses ->
+                    ses.savedState = runCatching {
+                        Bundle().also { out ->
+                            @Suppress("DEPRECATION")
+                            wv.saveState(out)
+                        }
+                    }.getOrNull()
+                    // 滚动位置只能异步取：evaluateJavascript 的回调要等 JS 执行完，
+                    // 而这里是同步循环。回调里只写一个 Int，不碰任何已销毁的对象 ——
+                    // 此时 wv 可能已经 destroy，但 lambda 捕获的是 session，安全。
+                    captureScrollY(wv, ses)
+                }
                 // ⚠️ 必须先摘 document-start 句柄，再 destroy()。
                 //
                 // ScriptHandler 绑的是**WebView 实例**，而 session 跟的是**标签**：
@@ -2127,8 +2289,24 @@ class WebTabManager(private val context: Context) {
     }
 
     companion object {
-        /** 同时存活的 WebView 实例上限。Via 这类轻量浏览器也维持类似的少量实例。 */
-        private const val MAX_WEBVIEWS = 6
+        /**
+         * WebView 实例上限的**默认值**（正常内存压力下）。
+         *
+         * 早期固定为 6，结果 7 个以上标签必然触发回收 —— 而回收意味着
+         * "切回去要重新加载"，滚动位置、表单、视频进度全丢。这正是
+         * "标签一多，切一个重载一个"的直接原因。
+         *
+         * 提到 10 之后，绝大多数人的日常使用（10 个标签以内）完全不会重载。
+         * 真正的兜底交给 [updateCacheLimit] —— 由系统 onTrimMemory 回调
+         * 按实际内存压力动态收缩，而不是一上来就按最坏情况砍。
+         */
+        private const val MAX_WEBVIEWS_DEFAULT = 10
+
+        /** 内存吃紧时的实例上限（TRIM_MEMORY_RUNNING_LOW）。 */
+        private const val MAX_WEBVIEWS_LOW = 6
+
+        /** 内存危急时的实例上限（TRIM_MEMORY_RUNNING_CRITICAL）。 */
+        private const val MAX_WEBVIEWS_CRITICAL = 3
 
         /**
          * 主页占位文档的地址。
@@ -2153,6 +2331,16 @@ class WebTabManager(private val context: Context) {
 
         /** 单条控制台错误的展示长度，避免长堆栈把面板撑爆。 */
         private const val MAX_CONSOLE_MESSAGE = 500
+
+        /**
+         * 读当前滚动位置。
+         *
+         * 用 `Math.round` 而不是原值：evaluateJavascript 会把它 JSON 编码成
+         * `"123.456"`，直接取整省掉一次解析里的浮点误差。
+         * 整个表达式包在 try 里 —— 页面可能已进入销毁流程，任何 DOM 访问都可能抛。
+         */
+        private const val SCROLL_Y_JS =
+            "try{Math.round(window.scrollY||document.documentElement.scrollTop||0)}catch(e){0}"
 
         /**
          * 临时 WebView 的存活上限。

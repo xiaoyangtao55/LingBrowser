@@ -1,5 +1,6 @@
 package com.ling.browser.ui.screens
 
+import com.ling.browser.LingApplication
 import com.ling.browser.ui.theme.LingIcons
 import android.Manifest
 import android.annotation.SuppressLint
@@ -338,7 +339,16 @@ fun BrowserScreen(
 
     DisposableEffect(host) {
         viewModel.tabManager.attachHost(host)
-        onDispose { viewModel.tabManager.detachHost(host) }
+        // 把系统的内存压力回调接到 WebView 实例池上（见 WebTabManager.updateCacheLimit）。
+        // 挂在 attachHost 的同一个 DisposableEffect 里，是为了让它的生命周期
+        // 与宿主容器严格一致：detach 时必须摘掉，否则 Application 会一直
+        // 持有一个已销毁 Activity 的 ViewModel。
+        val app = host.context.applicationContext as? LingApplication
+        app?.onTrimMemoryListener = { level -> viewModel.tabManager.updateCacheLimit(level) }
+        onDispose {
+            app?.onTrimMemoryListener = null
+            viewModel.tabManager.detachHost(host)
+        }
     }
 
     // 网页 <input type="file"> → 系统文件选择器。
