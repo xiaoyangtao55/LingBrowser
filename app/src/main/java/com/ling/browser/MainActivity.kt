@@ -235,6 +235,28 @@ class MainActivity : ComponentActivity() {
         browserViewModel.flushBlockedCount()
         super.onStop()
     }
+
+    /**
+     * 销毁时释放 WebView 实例池。
+     *
+     * 为什么不能只靠 ViewModel.onCleared()：
+     *  - 进程被系统直接杀掉时，onCleared 根本不会执行（没有回调）；
+     *  - 配置变更（分屏、多窗口、字体缩放）下 ViewModel 可能存活、
+     *    Activity 却已经销毁 —— 那时 WebView 挂在已死的窗口上。
+     *
+     * 这里做的是"Activity 真的没了"这一层的兜底。destroyAll 本身是幂等的
+     * （先 webViews.clear() 再处理，重复调用不会二次 destroy），
+     * 因此与 onCleared 同时触发也安全。
+     *
+     * 注意：**只有 isFinishing == false 且未配置变更**时才算"真的没了"，
+     * 否则旋转屏幕会把所有标签的实例全销毁，切回来全是重载。
+     */
+    override fun onDestroy() {
+        if (!isChangingConfigurations) {
+            browserViewModel.tabManager.destroyAll()
+        }
+        super.onDestroy()
+    }
 }
 
 /**

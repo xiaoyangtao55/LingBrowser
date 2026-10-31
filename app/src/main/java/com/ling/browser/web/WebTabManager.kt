@@ -99,7 +99,15 @@ data class ConsoleEntry(
  * 一个标签的附属簿记。WebView 本身仍在 `webViews` 里 —— 那张表同时是 LRU 访问序。
  * 关闭标签时只需要丢弃这个对象，不必再逐个 remove 七张表。
  */
-internal class TabSession {
+internal class TabSession(
+    /**
+     * 这个簿记属于哪个标签。
+     *
+     * 需要它是因为滚动位置恢复要重试：回调回来时得能确认"我对应的 WebView
+     * 还是原来那个吗"，而 session 本身不持有 WebView（见类注释的分工）。
+     */
+    val tabId: String,
+) {
     /** document-start 的注册句柄；脚本变更或实例重建时要先摘掉旧的。 */
     val scriptHandlers = mutableListOf<ScriptHandler>()
 
@@ -205,7 +213,7 @@ class WebTabManager(private val context: Context) {
     private val sessions = HashMap<String, TabSession>()
 
     /** 取（必要时创建）标签的附属簿记。 */
-    private fun session(id: String): TabSession = sessions.getOrPut(id) { TabSession() }
+    private fun session(id: String): TabSession = sessions.getOrPut(id) { TabSession(id) }
 
     /** 主线程消息队列：用于把"销毁临时 WebView"这类动作推迟到回调之外。 */
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -876,6 +884,16 @@ class WebTabManager(private val context: Context) {
     fun switchTo(id: String) {
         if (_activeId.value == id && webViews[id] != null) return
         val recreated = webViews[id] == null
+        // 切走之前先把**旧**标签的滚动位置记下来。
+        //
+        // 必须在这里抓，不能等 enforceCacheLimit 销毁时才抓：那时实例
+        // 马上就要 destroy()，evaluateJavascript 的回调几乎必然拿不到值
+        // （JS 上下文随实例一起没了）。切走这一刻实例还活着，回调一定回来。
+        //
+        // 旧标签此刻可能并不在视图树上（它本来就在后台），但 WebView 的
+        // 文档与滚动状态仍在，读 scrollY 是有效的。
+        val leaving = _activeId.value
+        if (leaving.isNotEmpty() && leaving != id) captureScrollYFor(leaving)
         _activeId.value = id
         val (wv, restoredFromSnapshot) = obtainWebViewDetailed(id)
         host?.let { h ->
@@ -2114,12 +2132,15 @@ class WebTabManager(private val context: Context) {
      * 异步抓取当前页面的滚动位置，写进 [TabSession.scrollY]。
      *
      * 为什么不能同步：`evaluateJavascript` 的回调要等 JS 引擎执行完才回来，
-     * 而调用点（[enforceCacheLimit]）是个同步 while 循环，马上就要 destroy()。
-     * 等它等于把整个回收流程改成异步队列 —— 代价远大于收益。
+     * 而调用点是个同步流程。等它等于把整个回收流程改成异步队列 ——
+     * 代价远大于收益。
      *
-     * 因此这里**发出去就不管**：回调回来时实例可能已经销毁，
-     * 但 lambda 只捕获 [TabSession]（普通 Kotlin 对象），不碰 WebView，
-     * 写一个 Int 是安全的。最坏情况是这次没抓到，scrollY 保持旧值。
+     * ⚠️ **必须在实例仍然存活时调用**。早期版本是在 [enforceCacheLimit] 里
+     * 调它、紧接着就 destroy() —— 那几乎必然拿不到值：JS 上下文随实例一起没了，
+     * 回调要么不来、要么回来时已经无法求值。等于代码看着完整、功能从未生效。
+     *
+     * 现在的调用点是 [switchTo] 切走**旧**标签时（见 [captureScrollYFor]），
+     * 那时实例还活得好好的，回调一定能回来。
      */
     private fun captureScrollY(wv: LingWebView, ses: TabSession) {
         runCatching {
@@ -2133,6 +2154,21 @@ class WebTabManager(private val context: Context) {
     }
 
     /**
+     * 记录某个标签当前的滚动位置（切走时调用）。
+     *
+     * 与 [captureScrollY] 的区别只是多了两道前置判断：
+     *  - 内部页（主页 / 阅读视图）没有"滚动位置"可言，跳过；
+     *  - 实例不存在（已被回收）时没什么可抓的，跳过。
+     */
+    private fun captureScrollYFor(id: String) {
+        val wv = webViews[id] ?: return
+        val ses = sessions[id] ?: return
+        val tab = _tabs.value.firstOrNull { it.id == id } ?: return
+        if (HomePage.isHomeUrl(tab.url) || InternalPage.isInternal(wv.url, tab.url)) return
+        captureScrollY(wv, ses)
+    }
+
+    /**
      * 页面加载完成后把滚动位置还原回去。
      *
      * 只在"实例是重建出来的"这条路上调用（见 switchTo），且用完即清 ——
@@ -2140,14 +2176,37 @@ class WebTabManager(private val context: Context) {
      *
      * 用 `window.scrollTo` 而不是 `document.documentElement.scrollTop = y`：
      * 后者在部分站点（滚动容器不是 document）上无效，scrollTo 走的是同一套语义。
+     *
+     * ⚠️ **必须重试**：`onPageFinished` 触发时 SPA 往往还没渲染出正文，
+     * 此时 `scrollTo` 会被随后的布局计算重置回顶部 —— 表现就是"位置没恢复"。
+     * 这里按 [SCROLL_RESTORE_RETRY_MS] 重试几次，每次都确认是否已经滚到位：
+     * 到位就停，避免把用户之后的手动滚动又拽回去。
      */
     private fun restoreScrollY(wv: LingWebView, ses: TabSession) {
         val y = ses.scrollY
         if (y <= 0) return
         ses.scrollY = 0
-        runCatching {
-            wv.evaluateJavascript("try{window.scrollTo(0,$y)}catch(e){}", null)
+        // 用局部函数而不是自引用 lambda：Kotlin 里 `val f: () -> Unit = { ... f() }`
+        // 的初始化式在声明点还看不到 f 自己，编译期会报 Unresolved reference。
+        // 局部 fun 没有这个问题，递归调用天然可见。
+        var attempt = 0
+        fun tryOnce() {
+            // 实例可能在这期间被回收 / 标签被关掉，每次都要重新确认还活着。
+            if (webViews[ses.tabId] !== wv) return
+            runCatching {
+                wv.evaluateJavascript(
+                    "try{window.scrollTo(0,$y);Math.round(window.scrollY||0)}catch(e){-1}",
+                ) { raw ->
+                    // 已经滚到位就不再重试：后续重试会把用户自己的滚动拽回去。
+                    val now = raw?.trim()?.trim('"')?.toDoubleOrNull() ?: -1.0
+                    val settled = kotlin.math.abs(now - y) <= SCROLL_RESTORE_TOLERANCE_PX
+                    if (!settled && ++attempt < SCROLL_RESTORE_MAX_ATTEMPTS) {
+                        mainHandler.postDelayed({ tryOnce() }, SCROLL_RESTORE_RETRY_MS)
+                    }
+                }
+            }
         }
+        tryOnce()
     }
 
     /**
@@ -2236,10 +2295,10 @@ class WebTabManager(private val context: Context) {
                             wv.saveState(out)
                         }
                     }.getOrNull()?.takeIf { bundleBytes(it) <= MAX_SAVED_STATE_BYTES }
-                    // 滚动位置只能异步取：evaluateJavascript 的回调要等 JS 执行完，
-                    // 而这里是同步循环。回调里只写一个 Int，不碰任何已销毁的对象 ——
-                    // 此时 wv 可能已经 destroy，但 lambda 捕获的是 session，安全。
-                    captureScrollY(wv, ses)
+                    // 滚动位置**不在这里抓**：本函数马上就要 destroy()，
+                    // 那时 JS 上下文已随实例销毁，evaluateJavascript 的回调
+                    // 几乎必然拿不到值。改在 switchTo 切走旧标签时预抓
+                    // （见 captureScrollYFor），那时实例还活着。
                 }
                 // ⚠️ 必须先摘 document-start 句柄，再 destroy()。
                 //
@@ -2306,8 +2365,22 @@ class WebTabManager(private val context: Context) {
         }
     }
 
-    /** 退出时释放全部 WebView，避免泄漏。 */
+    /**
+     * 退出时释放全部 WebView，避免泄漏。
+     *
+     * 幂等：重复调用安全（第二遍 webViews 已空）。因此 onDestroy 与
+     * ViewModel.onCleared 两处都调也不会出事。
+     */
     fun destroyAll() {
+        if (webViews.isEmpty()) {
+            // 已经释放过：后面的状态清理同样不必重复（会重复 recycle favicon）。
+            return
+        }
+        // ⚠️ 顺序与 enforceCacheLimit 一致：先摘句柄，再 destroy()。
+        // 句柄绑的是 WebView 实例，实例销毁后它就成了失效引用 ——
+        // 之后任何一次 registerDocumentStart 去 remove() 都会在 Chromium 内部
+        // 空指针崩溃（见 enforceCacheLimit 里那段说明）。
+        scriptBridge.releaseAllHandlers()
         webViews.values.forEach {
             (it.parent as? FrameLayout)?.removeView(it)
             it.stopLoading()
@@ -2319,8 +2392,7 @@ class WebTabManager(private val context: Context) {
         _tabs.value.forEach { recycleTab(it) }
         _tabs.value = emptyList()
         _activeId.value = ""
-        // 实例已销毁，document-start 的注册句柄先摘掉；随后整份簿记一起丢弃。
-        scriptBridge.releaseAllHandlers()
+        // 句柄已在 destroy() 之前摘掉（见上），这里只丢弃整份簿记。
         sessions.clear()
         scriptBridge.publishMenus()
         // UI 即将销毁：待裁决项全部退回安全页，控制台记录也没有留存的必要。
@@ -2380,6 +2452,15 @@ class WebTabManager(private val context: Context) {
 
         /** 表单重提交的待裁决上限：低频事件，超过就直接放弃重提交。 */
         private const val MAX_PENDING_FORMS = 4
+
+        /** 滚动位置恢复的重试间隔（毫秒）。SPA 渲染慢，给几次机会。 */
+        private const val SCROLL_RESTORE_RETRY_MS = 350L
+
+        /** 滚动位置恢复的最大重试次数。超过就放弃，避免无限打扰页面。 */
+        private const val SCROLL_RESTORE_MAX_ATTEMPTS = 6
+
+        /** 判定"已经滚到位"的像素容差：布局换算可能差几个像素，不必苛求。 */
+        private const val SCROLL_RESTORE_TOLERANCE_PX = 4.0
 
         /** 每个标签页保留的控制台错误条数。 */
         private const val MAX_CONSOLE_ERRORS = 30
