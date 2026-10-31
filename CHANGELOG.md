@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.13.0](https://github.com/xiaoyangtao55/LingBrowser/compare/v1.12.0...v1.13.0) (2026-10-31)
+
+
+### Features
+
+* **download:** 断网时进入「等待网络」并自愈，不再弹无意义的「网络受限」 ([82bddfd](https://github.com/xiaoyangtao55/LingBrowser/commit/82bddfd3b370576feedfa9df66e79c53d87c779a))
+* **history:** 历史记录显示网站图标 ([edae2ee](https://github.com/xiaoyangtao55/LingBrowser/commit/edae2ee109857da8011350b5ef7da75ba4db111d))
+* **settings:** 搜索索引覆盖子页全部设置项 ([da335ba](https://github.com/xiaoyangtao55/LingBrowser/commit/da335ba8a251d3eb8c9e5701ca096bb04af37c81))
+
+
+### Bug Fixes
+
+* **download:** 修复大文件下载中途失败（ParcelFileDescriptor 泄漏 + 分块重试粒度） ([5f53b16](https://github.com/xiaoyangtao55/LingBrowser/commit/5f53b163e0ab5704d930b504e1357e493499dfdb))
+
+
+### Performance Improvements
+
+* **history:** 图标按站点去重抓取，并在抓到后回填同站点记录 ([2c3d4ea](https://github.com/xiaoyangtao55/LingBrowser/commit/2c3d4ea6e20cd8ba9d520f2a0881b84968db4dab))
+
 ## [1.12.0](https://github.com/xiaoyangtao55/LingBrowser/compare/v1.11.0...v1.12.0) (2026-10-31)
 
 
