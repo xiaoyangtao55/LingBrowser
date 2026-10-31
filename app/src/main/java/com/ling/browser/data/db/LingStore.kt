@@ -46,7 +46,8 @@ class LingDatabase(context: Context) : SQLiteOpenHelper(
                 title TEXT NOT NULL,
                 url TEXT NOT NULL,
                 visited_at INTEGER NOT NULL,
-                visit_count INTEGER NOT NULL DEFAULT 1
+                visit_count INTEGER NOT NULL DEFAULT 1,
+                favicon BLOB
             )
             """.trimIndent()
         )
@@ -103,6 +104,11 @@ class LingDatabase(context: Context) : SQLiteOpenHelper(
             // 存库能让书签列表离线也显示图标，且卸载即清理、不留残 file。
             runCatching { db.execSQL("ALTER TABLE bookmarks ADD COLUMN favicon BLOB") }
         }
+        if (oldVersion < 5) {
+            // 历史记录的网站图标。与书签同理存 BLOB：图标很小，存库能离线显示、
+            // 卸载即清理。NULL 表示"还没抓过"，空数组表示"抓过但失败"。
+            runCatching { db.execSQL("ALTER TABLE history ADD COLUMN favicon BLOB") }
+        }
         if (oldVersion < 4) {
             // 下载保存位置（应用私有 / 公共目录）。老记录默认为应用私有目录，
             // 与此前 DownloadManager 落到 getExternalFilesDir 的行为一致。
@@ -118,12 +124,13 @@ class LingDatabase(context: Context) : SQLiteOpenHelper(
         const val DB_NAME = "ling.db"
 
         /**
+         * 5：history 增加 favicon 列（历史记录图标）。
          * 4：downloads 增加 download_location 列（下载保存位置）。
          * 3：bookmarks 增加 favicon 列（书签图标）。
          * 2：新增 downloads 表。
          * 1：初版（bookmarks / history / tabs）。
          */
-        const val VERSION = 4
+        const val VERSION = 5
     }
 }
 
@@ -147,6 +154,10 @@ internal fun Cursor.toHistory(): HistoryEntry = HistoryEntry(
     url = getString(getColumnIndexOrThrow("url")),
     visitedAt = getLong(getColumnIndexOrThrow("visited_at")),
     visitCount = getInt(getColumnIndexOrThrow("visit_count")),
+    // 列可能不存在（老库尚未迁移完成），故不抛异常 —— 与书签那边同一处理
+    favicon = getColumnIndex("favicon").let {
+        if (it >= 0 && !isNull(it)) getBlob(it) else null
+    },
 )
 
 internal fun Cursor.toTabSnapshot(): TabSnapshot = TabSnapshot(

@@ -54,7 +54,38 @@ data class HistoryEntry(
     val visitedAt: Long = System.currentTimeMillis(),
     /** 同一 URL 的累计访问次数。 */
     val visitCount: Int = 1,
-)
+    /**
+     * 网站图标的原始字节，与 [Bookmark.favicon] 同一套约定：
+     * `null` = 还没抓过，空数组 = 抓过但失败了（不再重试）。
+     *
+     * 历史记录是自动累积的，条目数远多于书签，因此**不保证每条都有图标** ——
+     * 只有近期、且被抓取过的才有。缺图标时 UI 退回字母占位。
+     */
+    val favicon: ByteArray? = null,
+) {
+    // 与 Bookmark 同理：data class 含数组必须手写 equals/hashCode，
+    // 否则比较的是数组引用，每次从库里读出来都被判成"变了"而触发无谓重组。
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is HistoryEntry) return false
+        return id == other.id &&
+            title == other.title &&
+            url == other.url &&
+            visitedAt == other.visitedAt &&
+            visitCount == other.visitCount &&
+            (favicon?.contentEquals(other.favicon) ?: (other.favicon == null))
+    }
+
+    override fun hashCode(): Int {
+        var result = id.hashCode()
+        result = 31 * result + title.hashCode()
+        result = 31 * result + url.hashCode()
+        result = 31 * result + visitedAt.hashCode()
+        result = 31 * result + visitCount
+        result = 31 * result + (favicon?.contentHashCode() ?: 0)
+        return result
+    }
+}
 
 /** 会话恢复用的标签页快照。 */
 data class TabSnapshot(

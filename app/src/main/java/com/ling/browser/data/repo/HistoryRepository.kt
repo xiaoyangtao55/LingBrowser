@@ -1,5 +1,6 @@
 package com.ling.browser.data.repo
 
+import android.content.ContentValues
 import com.ling.browser.data.db.HistoryEntry
 import com.ling.browser.data.db.LingDatabase
 import com.ling.browser.data.db.historyValues
@@ -112,5 +113,52 @@ class HistoryRepository(private val db: LingDatabase) {
     suspend fun clear() = withContext(Dispatchers.IO) {
         db.writableDatabase.delete("history", null, null)
         refresh()
+    }
+
+    // ------------------------------------------------------------ 网站图标
+
+    /**
+     * 写入某条历史的图标字节。已存在则覆盖。
+     *
+     * 只更新 favicon 一列：补图标是后台动作，不能反过来覆盖标题或访问时间。
+     * 按 url 定位而不是 id —— 同一 URL 在库里去重后只有一行。
+     */
+    suspend fun setFavicon(url: String, bytes: ByteArray?) = withContext(Dispatchers.IO) {
+        val values = ContentValues().apply {
+            if (bytes == null) putNull("favicon") else put("favicon", bytes)
+        }
+        db.writableDatabase.update("history", values, "url = ?", arrayOf(url))
+        refresh()
+    }
+
+    /**
+     * 哪些历史记录还没有图标，按最近访问排序取前 [limit] 个。
+     *
+     * 两条约束，都与书签那边不同：
+     *
+     *  1. **只看最近 [MAX_FAVICON_ROWS] 条**。历史是自动累积的，可能有上千条；
+     *     给全部补图标意味着上千次网络请求 —— 而用户看历史基本只看最近的。
+     *     老记录没有图标不影响使用（UI 有字母占位）。
+     *  2. **null 才算缺失**，空数组表示"抓过但失败"，不再重试。
+     *     不这样区分的话，每次打开历史页都会重新请求同一批注定失败的站点。
+     *
+     * 返回 URL 而不是实体：调用方只需要拿它去下载。
+     */
+    fun urlsMissingFavicon(limit: Int = 8): List<String> =
+        _history.value.asSequence()
+            .filter { it.favicon == null }
+            .take(MAX_FAVICON_ROWS)
+            .map { it.url }
+            .take(limit)
+            .toList()
+
+    private companion object {
+        /**
+         * 参与图标抓取的历史条目上限（按最近访问排序的前 N 条）。
+         *
+         * 50 条足以覆盖"用户翻回最近浏览"的实际范围，同时把最坏情况下的
+         * 网络请求量压到 50 次以内 —— 且只在用户进历史页时才发生。
+         */
+        const val MAX_FAVICON_ROWS = 50
     }
 }

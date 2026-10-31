@@ -30,6 +30,7 @@ import com.ling.browser.data.repo.planHistoryImport
 import com.ling.browser.data.repo.planImport
 import com.ling.browser.data.repo.toHistoryHtml
 import com.ling.browser.data.repo.toNetscapeHtml
+import com.ling.browser.util.FaviconFetcher
 import com.ling.browser.util.UrlUtils
 import com.ling.browser.web.ConsoleEntry
 import com.ling.browser.web.HitTarget
@@ -882,6 +883,32 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             container.history.clear()
             _message.value = "已清除浏览历史"
+        }
+    }
+
+    /**
+     * 给历史记录补网站图标。
+     *
+     * 与书签（[BookmarksDelegate.fetchMissingFavicons]）同一套路：分批、串行、
+     * 失败写空数组占位。但**触发时机不同** —— 只在打开历史页时补一批，
+     * 而不是每次导航后都抓：
+     *
+     *  - 历史是自动累积的，每条都抓意味着正常浏览时平白多出大量请求；
+     *  - 用户看历史时才需要图标，那时补刚刚好。
+     *
+     * 仓库侧已经把候选限制在最近 50 条内（见 urlsMissingFavicon），
+     * 因此这里不必再判断"太老的记录不值得抓"。
+     */
+    fun fetchMissingHistoryFavicons() {
+        val pending = container.history.urlsMissingFavicon(limit = 8)
+        if (pending.isEmpty()) return
+        viewModelScope.launch {
+            pending.forEach { url ->
+                val bytes = FaviconFetcher.fetch(url)
+                // 取不到就写空数组：表示"试过了"，下次不再重复请求。
+                // setFavicon 内部会 refresh，历史流随之更新。
+                container.history.setFavicon(url, bytes ?: ByteArray(0))
+            }
         }
     }
 

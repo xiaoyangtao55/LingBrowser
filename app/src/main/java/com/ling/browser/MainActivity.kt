@@ -719,6 +719,7 @@ private fun LingApp(viewModel: BrowserViewModel) {
                     onDelete = viewModel::deleteHistory,
                     onClearAll = viewModel::clearHistory,
                     onBack = pop,
+                    onNeedIcons = viewModel::fetchMissingHistoryFavicons,
                 )
 
                 Route.Downloads -> DownloadsScreen(
