@@ -6,7 +6,6 @@ import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -86,70 +85,64 @@ private enum class SettingsSection(val title: String) {
     OTHER("其他"),
 }
 
-/** 总览页的一行：分组入口 + 它挂在哪个分区下。 */
+/**
+ * 总览页的一行：分组入口 + 它挂在哪个分区下。
+ *
+ * **刻意不带摘要**。以前每行下面跟一行小字（"必应 · 内置主页"、
+ * "JavaScript、无图模式、广告拦截"），问题是那一列语义混杂：有的写
+ * "现在是什么值"，有的写"这页里有什么"，读起来要顿一下。而总览页的
+ * 职责本来就只是"把入口列清楚"，具体值点进去看更直接。
+ */
 private data class SettingsEntry(
     val section: SettingsSection,
     val group: SettingsGroup,
     val icon: ImageVector,
     val title: String,
-    val subtitle: String,
 )
 
-/** 总览页的全部入口。摘要永远跟着当前设置走，所以每次重组时现算。 */
-private fun settingsEntries(settings: LingSettings): List<SettingsEntry> = listOf(
+/** 总览页的全部入口。纯静态列表 —— 没有摘要，也就不必读 settings。 */
+private fun settingsEntries(): List<SettingsEntry> = listOf(
     SettingsEntry(
         section = SettingsSection.BASIC,
         group = SettingsGroup.SEARCH_HOME,
         icon = LingIcons.Search,
         title = SettingsGroup.SEARCH_HOME.title,
-        subtitle = if (settings.customHomepage.isBlank()) {
-            "${settings.searchEngineLabel} · 内置主页"
-        } else {
-            "${settings.searchEngineLabel} · ${settings.customHomepage}"
-        },
     ),
     SettingsEntry(
         section = SettingsSection.BASIC,
         group = SettingsGroup.APPEARANCE,
         icon = LingIcons.AutoAwesome,
         title = SettingsGroup.APPEARANCE.title,
-        subtitle = "${nightModeLabel(settings.nightMode)} · 字号${settings.readerFontSize.label}",
     ),
     SettingsEntry(
         section = SettingsSection.BASIC,
         group = SettingsGroup.BROWSING,
         icon = LingIcons.Public,
         title = SettingsGroup.BROWSING.title,
-        subtitle = "JavaScript、无图模式、广告拦截",
     ),
     SettingsEntry(
         section = SettingsSection.ADVANCED,
         group = SettingsGroup.DOWNLOAD,
         icon = LingIcons.Download,
         title = SettingsGroup.DOWNLOAD.title,
-        subtitle = "${settings.downloaderType.label} · " +
-            "${downloadLocationShortLabel(settings.downloadLocation)}",
     ),
     SettingsEntry(
         section = SettingsSection.ADVANCED,
         group = SettingsGroup.PRIVACY,
         icon = LingIcons.PrivacyTip,
         title = SettingsGroup.PRIVACY.title,
-        subtitle = "选择性清除历史、Cookie、缓存与会话",
     ),
     SettingsEntry(
         section = SettingsSection.ADVANCED,
         group = SettingsGroup.BACKUP,
         icon = LingIcons.Bookmark,
         title = SettingsGroup.BACKUP.title,
-        subtitle = "导出书签与历史记录，或从其它浏览器导入",
     ),
     SettingsEntry(
         section = SettingsSection.OTHER,
         group = SettingsGroup.ABOUT,
         icon = LingIcons.Article,
         title = SettingsGroup.ABOUT.title,
-        subtitle = "版本、WebView 内核与开源许可",
     ),
 )
 
@@ -168,24 +161,25 @@ fun SettingsScreen(
     modifier: Modifier = Modifier,
 ) {
     var query by remember { mutableStateOf("") }
-    val entries = settingsEntries(settings)
+    val entries = settingsEntries()
+    // 摘要去掉后，搜索只匹配分组标题。这也更符合预期：总览页能搜的
+    // 本来就只有这几个入口，子页里的具体设置项不该在这里被"假装搜到"。
     val visible = if (query.isBlank()) {
         entries
     } else {
-        entries.filter {
-            it.title.contains(query, ignoreCase = true) ||
-                it.subtitle.contains(query, ignoreCase = true)
-        }
+        entries.filter { it.title.contains(query, ignoreCase = true) }
     }
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
         topBar = {
             Column {
+                // 不再挂右上角「?」：它原本跳到「关于」页，语义是错的 ——
+                // 用户期待"帮助说明"，点开却是版本号与许可。而且总览页本身
+                // 只有 7 个入口，一眼看得完，不需要额外的求助入口。
                 LingPageTopBar(
                     title = "设置",
                     onBack = onBack,
-                    action = { HelpButton(onClick = { onOpenGroup(SettingsGroup.ABOUT) }) },
                 )
                 SettingsSearchField(query = query, onQueryChange = { query = it })
             }
@@ -1485,25 +1479,6 @@ private fun SettingsPageScaffold(
     }
 }
 
-/** 标题栏右侧的帮助入口：圆圈里一个问号，与系统设置的图标造型一致。 */
-@Composable
-private fun HelpButton(onClick: () -> Unit) {
-    IconButton(onClick = onClick, modifier = Modifier.size(48.dp)) {
-        Box(
-            modifier = Modifier
-                .size(24.dp)
-                .border(1.5.dp, MaterialTheme.colorScheme.onSurface, CircleShape),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                text = "?",
-                style = MaterialTheme.typography.labelLarge,
-                color = MaterialTheme.colorScheme.onSurface,
-            )
-        }
-    }
-}
-
 /** 总览页的搜索框：只过滤下方入口，不进入独立搜索页。 */
 @Composable
 private fun SettingsSearchField(
@@ -1621,18 +1596,14 @@ private fun SettingsEntryRow(
     ) {
         SettingsIcon(icon = entry.icon)
         Spacer(Modifier.width(20.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = entry.title,
-                style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.onSurface,
-            )
-            Text(
-                text = entry.subtitle,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
+        // 只有标题（摘要已去掉，见 SettingsEntry 的注释）。用 weight 撑开
+        // 剩余宽度，让右侧箭头贴边、点击热区覆盖整行。
+        Text(
+            text = entry.title,
+            style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.weight(1f),
+        )
         Spacer(Modifier.width(8.dp))
         Icon(
             imageVector = LingIcons.ArrowForward,
