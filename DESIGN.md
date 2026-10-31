@@ -36,28 +36,31 @@ source set 注册上冲突（`Using kotlin.sourceSets DSL to add Kotlin sources 
 allowed with built-in Kotlin`）。本项目只有 3 张结构简单的表，直接用平台自带的
 `SQLiteOpenHelper` 手写 SQL，少一层构建复杂度，也更贴合轻量定位。
 
-## 2. 图标：为什么不用字体，也不用 material-icons-extended？
+## 2. 图标：从手写矢量代码改为 material-icons-extended
 
-三种方案的实测代价对比：
+### 早期方案（已废弃）
 
-| 方案 | 代价 |
+最初把 44 个官方 Material Symbols 图标**转成 Compose 的 ImageVector 代码**
+（`tools/import_material_icons.py` 解析 VectorDrawable，960 视口不缩放）。
+理由是当时的一个判断：`material-icons-extended` 会把上万个图标编进 dex，
+debug 包 18 MB。
+
+### 现在：直接引用 material-icons-extended
+
+那个判断**只对 debug 包成立**。实测（release 走 R8）：
+
+| 场景 | APK 体积 |
 |---|---|
-| `material-icons-extended` | 上万个图标全部编进 dex，单个 `classes.dex` 达 **40+ MB**，debug 包 **18 MB** |
-| Material Symbols TTF | 单文件 **948 KB**（Filled 版 1.4 MB），几乎等于整个 APK |
-| **矢量代码（本方案）** | 44 个图标约 **90 KB** 源码 |
+| release · 手写 44 个图标 | 1.97 MB |
+| release · 图标库 + 引用 44 个 | **1.97 MB（+571 B）** |
+| debug · 手写 44 个图标 | 13.24 MB |
+| debug · 图标库（仅引用 5 个） | **24.25 MB（+11 MB）** |
 
-Via 这类浏览器整个安装包才几百 KB。**一个图标字体就顶得上当前 APK（1.4 MB）
-的 68%**，为二十几个图标翻倍不划算。而且字体图标无法参与 Compose 的
-tint 与交互动画，取字形还要按 Unicode 码点逐个核对。
+**R8 会把没引用到的图标全部裁掉**：release 里 44 个图标几乎不占空间。
+代价全落在 debug 包上（debug 不裁剪，11000 个类全进 dex，且与用多少个无关）。
 
-因此改为把官方图标**转成 Compose 的 ImageVector 代码**：
-造型是 Material Symbols 的原始坐标（一位不差），只是换了个表达形式。
-
-### 坐标网格：保留官方的 960，不缩放到 24
-官方导出的是 **960×960** 视口。转换时**不做缩放** —— 960 是 Google 的原始
-设计网格，保留它意味着坐标能与官方文件逐位对照，出问题可直接 diff；
-缩放反而引入浮点误差。渲染尺寸由 `defaultWidth/Height = 24.dp` 控制，
-与视口无关。
+权衡下来值得：加图标不用再跑 Python 转换管线，而 debug 的 24 MB 只影响
+本地编译与装机，不影响发布产物。
 
 ### 又踩了一次 `arcTo` 的坑……这次是它的"命名兄弟"
 早期版本用手绘描边图标，用 `arcTo` + `largeArc` 画圆弧，当起点与终点恰好

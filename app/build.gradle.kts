@@ -162,6 +162,8 @@ dependencies {
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.foundation)
     implementation(libs.androidx.compose.material3)
+    // 图标库：release 走 R8 只留实际用到的（实测 44 个约 +19 KB）
+    implementation(libs.androidx.compose.material.icons.extended)
     // 注意：刻意不使用 material-icons-extended —— 它会把上万个图标类编进 dex，
     // 仅此一项就让 debug 包膨胀到 18 MB。所有图标见 ui/theme/LingIcons.kt。
 

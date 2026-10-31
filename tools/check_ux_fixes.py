@@ -283,10 +283,22 @@ if m_up and "DROP TABLE" in m_up.group(0):
 else:
     ok("onUpgrade 不再 DROP 重建（用户数据不会因升级丢失）")
 
-if re.search(r"VERSION = 4", store):
-    ok("版本号已升到 4")
+# 版本号必须与最近一次迁移的 oldVersion 阈值一致 —— 写死具体数字的话，
+# 每加一次迁移这个脚本就要改一遍（已经踩过：加到 5 之后这里还在查 4）。
+# 改成"读出声明的版本号，并要求它是所有 `if (oldVersion < N)` 里的最大值"。
+m_ver = re.search(r"const val VERSION = (\d+)", store)
+m_old = re.findall(r"if \(oldVersion < (\d+)\)", store)
+declared = int(m_ver.group(1)) if m_ver else 0
+max_old = max((int(x) for x in m_old), default=0)
+# 关系是「等于」而不是「大于」：每次加迁移时，VERSION 要同步抬到那个阈值。
+# 若 VERSION 停在小阈值，老库不会走新迁移；若大于所有阈值，说明有段迁移
+# 缺少对应的阈值判断（VERSION 涨了但没人用）。
+if declared == max_old:
+    ok(f"版本号 {declared} 与最大迁移阈值一致（升级会走到最新那段迁移）")
+elif declared < max_old:
+    bad(f"版本号 {declared} 小于迁移阈值 {max_old} —— 那段迁移永远不会触发")
 else:
-    bad("版本号未升到 4，迁移不会触发")
+    bad(f"版本号 {declared} 大于所有迁移阈值 {max_old} —— 疑似有空迁移的版本号")
 
 # 4 是「下载保存位置」这次迁移带来的：必须同时看到对应的 ALTER。
 if re.search(r"if \(oldVersion < 4\)", store) and \
