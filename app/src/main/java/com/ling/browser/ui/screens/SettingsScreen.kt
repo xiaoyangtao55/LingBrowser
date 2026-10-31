@@ -9,6 +9,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -282,7 +283,9 @@ fun SettingsScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(inner),
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 32.dp),
+            // 左右 20dp 对齐卡片视觉边距（Chrome 设置页同一量级）；
+            // top 留 8dp，让第一个分区标题和搜索框之间不至于贴死。
+            contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 32.dp),
         ) {
             val nothingMatched = matchedGroups.isEmpty() && matchedItems.isEmpty()
             if (nothingMatched) {
@@ -1642,76 +1645,71 @@ private fun SettingsSearchField(
     }
 }
 
-/** 分区小标题，如「基本」「高级」。 */
+/**
+ * 分区小标题，如「基本」「高级」。
+ *
+ * 左缩进 8dp 而不是 0：卡片有一层外边距，标题若与卡片外沿对齐会显得"贴边"，
+ * 缩进一点才和卡片内的文字形成同一条视觉基线。
+ */
 @Composable
 private fun SectionHeader(title: String) {
     Text(
         text = title,
         style = MaterialTheme.typography.titleSmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.padding(start = 4.dp, top = 16.dp, bottom = 8.dp),
+        modifier = Modifier.padding(start = 8.dp, top = 24.dp, bottom = 10.dp),
     )
 }
 
 /**
- * 一个分区的卡片：同一分区的行装在一起，行间用内缩细线分隔。
+ * 一个分区的入口列表：**每项独立一张卡**，卡间留 8dp。
  *
- * 分隔线从文字起点开始（避让图标），这样线只切过"内容"不切过"图形"，
- * 视觉上更像系统设置里的列表。
+ * 早期是"同一分区的行装进一张卡、行间用内缩细线分隔"，理由是"一叠"更有
+ * 整体感。但那样每行只有 14dp 的垂直内边距，一屏塞进七八项，看着很挤；
+ * 而且细线在深色主题下几乎看不见，分隔感全靠间距撑着。
+ *
+ * 改成一项一卡（Chrome 设置页的做法）：行高立起来、卡片之间自然断开，
+ * 每项都像"一个可以点进去的东西"，而不是"列表里的一行字"。
+ *
+ * 顺带去掉了右侧箭头：卡片本身有圆角与底色，已经足够表达"可点击"，
+ * 再放一排箭头反而在视觉上重复强调。
  */
 @Composable
 private fun SettingsGroupCard(
     entries: List<SettingsEntry>,
     onOpen: (SettingsGroup) -> Unit,
 ) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(24.dp))
-            .background(MaterialTheme.colorScheme.surfaceContainerLow),
-    ) {
-        entries.forEachIndexed { index, entry ->
-            SettingsEntryRow(entry = entry, onClick = { onOpen(entry.group) })
-            if (index != entries.lastIndex) {
-                HorizontalDivider(
-                    modifier = Modifier.padding(start = 64.dp, end = 16.dp),
-                    thickness = 1.dp,
-                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
-                )
-            }
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        entries.forEach { entry ->
+            SettingsEntryCard(entry = entry, onClick = { onOpen(entry.group) })
         }
     }
 }
 
-/** 卡片里的一行：图标 + 标题 + 摘要 + 右箭头。 */
+/** 一个入口：图标 + 标题。整张卡可点。 */
 @Composable
-private fun SettingsEntryRow(
+private fun SettingsEntryCard(
     entry: SettingsEntry,
     onClick: () -> Unit,
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .clip(RoundedCornerShape(24.dp))
+            .background(MaterialTheme.colorScheme.surfaceContainerLow)
             .clickable(onClick = onClick)
-            .padding(horizontal = 20.dp, vertical = 14.dp),
+            .padding(horizontal = 20.dp, vertical = 18.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         SettingsIcon(icon = entry.icon)
         Spacer(Modifier.width(20.dp))
-        // 只有标题（摘要已去掉，见 SettingsEntry 的注释）。用 weight 撑开
-        // 剩余宽度，让右侧箭头贴边、点击热区覆盖整行。
+        // 只有标题（摘要已去掉，见 SettingsEntry 的注释）。weight 让文字占满
+        // 剩余宽度，点击热区覆盖整张卡。
         Text(
             text = entry.title,
             style = MaterialTheme.typography.bodyLarge,
             color = MaterialTheme.colorScheme.onSurface,
             modifier = Modifier.weight(1f),
-        )
-        Spacer(Modifier.width(8.dp))
-        Icon(
-            imageVector = LingIcons.ArrowForward,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.size(20.dp),
         )
     }
 }
@@ -1730,45 +1728,27 @@ private fun SettingsItemResultCard(
     items: List<SettingsSearchItem>,
     onOpen: (SettingsGroup) -> Unit,
 ) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(24.dp))
-            .background(MaterialTheme.colorScheme.surfaceContainerLow),
-    ) {
-        items.forEachIndexed { index, item ->
-            Row(
+    // 与总览页保持一致：每项独立一张卡、卡间 8dp、不放右箭头。
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        items.forEach { item ->
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .clip(RoundedCornerShape(24.dp))
+                    .background(MaterialTheme.colorScheme.surfaceContainerLow)
                     .clickable { onOpen(item.group) }
-                    .padding(horizontal = 20.dp, vertical = 14.dp),
-                verticalAlignment = Alignment.CenterVertically,
+                    .padding(horizontal = 20.dp, vertical = 16.dp),
             ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = item.title,
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = MaterialTheme.colorScheme.onSurface,
-                    )
-                    Text(
-                        text = item.group.title,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Spacer(Modifier.width(8.dp))
-                Icon(
-                    imageVector = LingIcons.ArrowForward,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(20.dp),
+                Text(
+                    text = item.title,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurface,
                 )
-            }
-            if (index != items.lastIndex) {
-                HorizontalDivider(
-                    modifier = Modifier.padding(start = 20.dp, end = 20.dp),
-                    thickness = 1.dp,
-                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    text = item.group.title,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }
