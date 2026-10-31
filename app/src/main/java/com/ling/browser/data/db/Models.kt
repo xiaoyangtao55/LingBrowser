@@ -177,6 +177,16 @@ enum class DownloadStatus(val label: String) {
     PENDING("等待中"),
     RUNNING("下载中"),
     PAUSED("已暂停"),
+
+    /**
+     * 等网络：任务因网络不可用 / 不满足策略而自动停住，网络恢复后会自己继续。
+     *
+     * 与 [PAUSED] 分开是为了让用户分得清「我按了暂停」和「系统在等我」——
+     * 前者要用户点恢复，后者会自愈，不该让用户以为需要手动干预。
+     * 两者的共同点是都不占传输槽位、进度都保留。
+     */
+    WAITING_NETWORK("等待网络"),
+
     SUCCESS("已完成"),
     FAILED("失败"),
 }

@@ -222,6 +222,25 @@ class DownloadEngine(
     private val _downloads = MutableStateFlow<List<DownloadEntry>>(emptyList())
     val downloads: StateFlow<List<DownloadEntry>> = _downloads.asStateFlow()
 
+
+    /**
+     * 冷启动时「被接上的下载任务名」，没人消费前一直留着。
+     *
+     * 这里**必须用 StateFlow 而不是 SharedFlow**：引擎在构造函数的 init 里
+     * 就 emit，而 UI 侧的收集器是后一步才订阅的 —— SharedFlow 没有 replay 时
+     * 那个事件直接丢了，提示永远不出现（实测过，Toast 一次都没弹）。
+     * StateFlow 会把最新值留在那里，等收集器来了再交付。
+     *
+     * 消费完由 [consumeResumedOnLaunch] 清空，避免每次重组都重复弹提示。
+     */
+    private val _resumedOnLaunch = MutableStateFlow<List<String>>(emptyList())
+    val resumedOnLaunch: StateFlow<List<String>> = _resumedOnLaunch.asStateFlow()
+
+    /** 提示已展示，清空事件 —— 由 UI 在弹完提示后调用。 */
+    fun consumeResumedOnLaunch() {
+        _resumedOnLaunch.value = emptyList()
+    }
+
     init {
         // 启动时把库里的记录载入内存；进行中的先落成「已暂停」。
         // 进程被杀后不可能还有任务在跑，直接标失败会让已下载的部分白白浪费，
@@ -234,6 +253,12 @@ class DownloadEngine(
         publish()
         registerNetworkMonitor()
         if (interrupted.isNotEmpty()) {
+            // 先告诉用户「有任务被接上了」再实际恢复：
+            // 进程被杀对用户是完全无感的 —— 他可能以为下载丢了，
+            // 打开 App 却看到进度还在，会困惑是不是要重新下。
+            // 一条提示把这件事说清楚，比让用户自己猜要省心得多。
+            val names = saved.filter { it.id in interrupted }.map { it.fileName }
+            _resumedOnLaunch.value = names
             scope.launch {
                 // 逐个走公开的 resume：它会重新登记任务、按网络策略决定立即开跑
                 // 还是先停着等网，与用户点「继续」完全同一条路径。
@@ -543,6 +568,19 @@ class DownloadEngine(
                 // 协程被取消（暂停 / 取消 / 移除），不重试
                 throw e
             } catch (_: Exception) {
+                // ⚠️ 先判断是不是「网络没了」，而不是直接计入重试。
+                //
+                // 断网时 executeDownload 会立刻抛 IOException（连接失败），
+                // 3 次重试连同 1s/2s/4s 的退避只要七八秒就烧完了 —— 等不到
+                // 网络回调来救，任务已经被判成 FAILED。这样「断网自动等待、
+                // 恢复后自愈」这条路径等于不存在。
+                //
+                // 现在改为：网络不达标就转 WAITING_NETWORK 并退出这个循环，
+                // 由 ConnectivityManager 的回调在恢复时重新 resume。
+                if (!isNetworkAllowed(taskId)) {
+                    markNetworkPaused(taskId)
+                    return
+                }
                 retries++
                 if (retries > MAX_RETRIES) {
                     stateMutex.withLock {
@@ -1247,14 +1285,61 @@ class DownloadEngine(
      *
      * 传 [taskId] 时先看它是否已被用户单独放行（见 [forceResume]）。
      */
+    /**
+     * 网络不达标的原因。决定要不要打扰用户。
+     *
+     * [NO_NETWORK] 是**客观无网**（断 Wi-Fi、飞行模式）：会自己恢复，不该弹窗 ——
+     * 弹出来问「是否继续（可能产生流量费用）」完全是错的，此刻根本没有流量可产生。
+     * 之前不分原因一律弹窗，用户关了 Wi-Fi 就看到一个莫名其妙的「网络受限」对话框。
+     *
+     * [POLICY_VIOLATION] 才是「有网、但不符合你设的限制」（例如只允许 Wi-Fi，
+     * 现在是移动数据）—— 这种情况下继续下会真的花钱，必须问用户。
+     */
+    private enum class NetworkBlock { NONE, NO_NETWORK, POLICY_VIOLATION }
+
+    /** 把 [isNetworkAllowed] 的结论细化为"为什么不允许"。 */
+    private fun networkBlockReason(taskId: Long? = null): NetworkBlock {
+        if (taskId != null && networkOverrides.contains(taskId)) return NetworkBlock.NONE
+        val cm = connectivityManager ?: return NetworkBlock.NONE
+        val caps = runCatching { cm.getNetworkCapabilities(cm.activeNetwork) }.getOrNull()
+        // 没有默认网络，或默认网络不声称有互联网能力 —— 客观无网
+            ?: return NetworkBlock.NO_NETWORK
+        if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
+            return NetworkBlock.NO_NETWORK
+        }
+        // 有网，再看策略是否被违反
+        val violated = when (networkPolicy.value) {
+            DownloadNetwork.ALL -> false
+            DownloadNetwork.UNMETERED ->
+                !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
+            DownloadNetwork.WIFI_ONLY ->
+                !caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
+                    !caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
+        }
+        return if (violated) NetworkBlock.POLICY_VIOLATION else NetworkBlock.NONE
+    }
+
     private fun isNetworkAllowed(taskId: Long? = null): Boolean {
         if (taskId != null && networkOverrides.contains(taskId)) return true
         val policy = networkPolicy.value
-        if (policy == DownloadNetwork.ALL) return true
         val cm = connectivityManager ?: return true
         val caps = runCatching { cm.getNetworkCapabilities(cm.activeNetwork) }.getOrNull()
             ?: return false
+        // 先要求"真的有网"，再看策略。
+        //
+        // ⚠️ 这一条不能省，也不能因为 policy == ALL 就提前 return true：
+        // ALL 的语义是"不限网络类型（Wi-Fi / 移动数据都行）"，**不是"不需要网络"**。
+        // 早期版本对 ALL 直接放行，于是断网时这里仍返回 true —— runDownload
+        // 的"网络不可用就等待"分支完全不生效，任务被三次重试耗尽后判成 FAILED。
+        // 这就是"关了 Wi-Fi 没提示、最后直接错误"的根因。
         if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) return false
+        // 有默认网络但连不上外网（例如连了个需要认证的公共热点）也视为不可用。
+        if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) {
+            // 少数 ROM 不给 VALIDATED 位但有 INTERNET，按"可用"处理以免永久卡住：
+            // 只有在明确处于无网状态时才判否。
+            val hasAny = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            if (!hasAny) return false
+        }
         return when (policy) {
             DownloadNetwork.ALL -> true
             DownloadNetwork.UNMETERED ->
@@ -1286,15 +1371,22 @@ class DownloadEngine(
                     // 排队中的任务同样要停：它们的协程还挂在 Semaphore 上，
                     // 网络不达标时没必要继续占位等。
                     jobs.remove(cur.id)?.cancel()
-                    val paused = cur.copy(status = DownloadStatus.PAUSED, speedBytesPerSec = 0L)
-                    tasks.update { it + (cur.id to paused) }
-                    persist(paused)
-                    changed.add(paused)
+                    // 同 markNetworkPaused：这是「等网络」，不是用户主动暂停
+                    val waiting = cur.copy(
+                        status = DownloadStatus.WAITING_NETWORK,
+                        speedBytesPerSec = 0L,
+                    )
+                    tasks.update { it + (cur.id to waiting) }
+                    persist(waiting)
+                    changed.add(waiting)
                 }
         }
         if (changed.isNotEmpty()) {
             publish()
-            changed.forEach { _networkBlocked.tryEmit(it) }
+            // 同 markNetworkPaused：只有策略不符才打扰用户，客观无网不弹窗。
+            if (networkBlockReason() == NetworkBlock.POLICY_VIOLATION) {
+                changed.forEach { _networkBlocked.tryEmit(it) }
+            }
         }
     }
 
@@ -1303,7 +1395,13 @@ class DownloadEngine(
         val ids = stateMutex.withLock { autoPaused.toList().also { autoPaused.clear() } }
         ids.forEach { id ->
             val entry = tasks.value[id] ?: return@forEach
-            if (entry.status == DownloadStatus.PAUSED) resume(id)
+            // 认两种：新状态 WAITING_NETWORK，以及历史数据里可能残留的 PAUSED
+            // （升级前的版本把网络暂停也写成了 PAUSED）。
+            if (entry.status == DownloadStatus.WAITING_NETWORK ||
+                entry.status == DownloadStatus.PAUSED
+            ) {
+                resume(id)
+            }
         }
     }
 
@@ -1318,17 +1416,27 @@ class DownloadEngine(
         stateMutex.withLock {
             tasks.value[taskId]?.let { cur ->
                 if (cur.isRunning) {
-                    val paused = cur.copy(status = DownloadStatus.PAUSED, speedBytesPerSec = 0L)
-                    tasks.update { it + (taskId to paused) }
-                    persist(paused)
-                    blocked = paused
+                    // 用 WAITING_NETWORK 而不是 PAUSED：这是「系统在等我」，
+                    // 网络回来会自愈，不该显示成用户主动暂停的样子。
+                    val waiting = cur.copy(
+                        status = DownloadStatus.WAITING_NETWORK,
+                        speedBytesPerSec = 0L,
+                    )
+                    tasks.update { it + (taskId to waiting) }
+                    persist(waiting)
+                    blocked = waiting
                 }
                 autoPaused.add(taskId)
             }
         }
         publish()
-        // 交给 UI 弹窗：这里只是「按策略停了」，用户点继续就放行（见 forceResume）。
-        blocked?.let { _networkBlocked.tryEmit(it) }
+        // 只有「有网但不合策略」才需要用户裁决 —— 那才是真的可能产生流量费用。
+        // 客观无网（断 Wi-Fi / 飞行模式）会自己恢复，弹窗只会让人困惑：
+        // 明明没网，还问我要不要继续、还警告我花钱。
+        val reason = networkBlockReason(taskId)
+        if (reason == NetworkBlock.POLICY_VIOLATION) {
+            blocked?.let { _networkBlocked.tryEmit(it) }
+        }
     }
 
     private fun registerNetworkMonitor() {

@@ -63,6 +63,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.pow
 import com.ling.browser.data.db.DownloadEntry
+import com.ling.browser.data.prefs.DownloadNetwork
 import com.ling.browser.data.prefs.NightMode
 import com.ling.browser.download.DownloadService
 import com.ling.browser.download.installApkFromUri
@@ -602,12 +603,29 @@ private fun LingApp(viewModel: BrowserViewModel) {
     networkPrompts.firstOrNull()?.let { blocked ->
         AlertDialog(
             onDismissRequest = { viewModel.keepDownloadPaused(blocked.id) },
-            title = { Text("网络受限") },
-            text = {
+            title = {
                 Text(
-                    "当前网络不满足「${settings.downloadNetwork.label}」的限制，" +
-                        "下载已暂停。继续下载“${blocked.fileName}”可能产生流量费用，" +
-                        "是否继续？",
+                    if (settings.downloadNetwork == DownloadNetwork.ALL) "下载已暂停" else "网络受限",
+                )
+            },
+            text = {
+                // 文案按策略分支：
+                //  - 设了「仅 Wi-Fi」却走流量：要说明白会花钱；
+                //  - 设了「不限网络」却弹出来（理论上不该发生，见引擎侧的
+                //    networkBlockReason）—— 说明是别的原因，不能照抄那句
+    
+                //    “不满足「不限网络」的限制”，那是自相矛盾的表述。
+                Text(
+                    when (settings.downloadNetwork) {
+                        DownloadNetwork.ALL ->
+                            "网络已恢复，是否继续下载“${blocked.fileName}”？"
+                        DownloadNetwork.UNMETERED ->
+                            "当前用的是计费流量，不符合「${settings.downloadNetwork.label}」的限制。" +
+                                "继续下载“${blocked.fileName}”可能产生流量费用，是否继续？"
+                        DownloadNetwork.WIFI_ONLY ->
+                            "当前不是 Wi-Fi，不符合「${settings.downloadNetwork.label}」的限制。" +
+                                "继续下载“${blocked.fileName}”会消耗移动数据，是否继续？"
+                    },
                 )
             },
             confirmButton = {

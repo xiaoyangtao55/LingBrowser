@@ -140,6 +140,25 @@ internal class DownloadDelegate(private val host: DownloadHost) {
                 }
             }
         }
+        // 冷启动时被接上的下载：给一条提示。
+        //
+        // 用户视角是「上次下载到一半，App 被系统杀了」—— 他并不知道那些
+        // 字节还在磁盘上、还能续传。所以要在打开 App 时明确告诉他「已接着下」，
+        // 否则他很可能直接取消重下，白费之前的流量。
+        host.scope.launch {
+            host.downloadEngine.resumedOnLaunch.collect { names ->
+                if (names.isEmpty()) return@collect
+                val text = if (names.size == 1) {
+                    "正在继续上次未完成的下载：${names.first()}"
+                } else {
+                    "正在继续 ${names.size} 个未完成的下载"
+                }
+                host.showMessage(text)
+                // 展示完立刻清空：StateFlow 会保留最新值，不清的话每次
+                // 重组/重进页面都会再弹一次同样的提示。
+                host.downloadEngine.consumeResumedOnLaunch()
+            }
+        }
     }
 
     /**

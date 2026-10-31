@@ -69,7 +69,19 @@ class DownloadTest {
 
     @Test
     fun `状态枚举数量变化时提醒同步测试`() {
-        assertEquals(5, DownloadStatus.entries.size)
+        // 6 = PENDING / RUNNING / PAUSED / WAITING_NETWORK / SUCCESS / FAILED。
+        // 新增状态时这里会失败，提醒同步检查 UI 的 when 分支是否都覆盖到。
+        assertEquals(6, DownloadStatus.entries.size)
+    }
+
+    @Test
+    fun `等网络状态不算用户主动暂停`() {
+        // isRunning 只认 PENDING / RUNNING —— WAITING_NETWORK 与 PAUSED 都
+        // 不占传输槽位。但 UI 要区分它们：前者会自愈，后者要用户点恢复。
+        assertFalse(DownloadStatus.WAITING_NETWORK.name.let { n ->
+            DownloadEntry(downloadId = 1, fileName = "a", url = "u", status = DownloadStatus.valueOf(n)).isRunning
+        })
+        assertEquals("等待网络", DownloadStatus.WAITING_NETWORK.label)
     }
 
     // ------------------------------------------------------------ 体积格式化

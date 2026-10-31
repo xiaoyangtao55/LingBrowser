@@ -171,10 +171,13 @@ private fun DownloadRow(
     // 也不知道是文件没了还是功能坏了。现在统一交给打开逻辑，由它按文件名兜底
     // 查找，找不到再明确提示。
     val canOpen = entry.status == DownloadStatus.SUCCESS
-    // 进行中（RUNNING）或已暂停（PAUSED）都需要操作按钮：
-    // RUNNING → 暂停 + 取消；PAUSED → 恢复 + 取消
+    // 三种「进行中」都要操作按钮：
+    //   RUNNING        → 暂停 + 取消
+    //   PAUSED         → 恢复 + 取消（用户主动停的）
+    //   WAITING_NETWORK→ 取消（恢复网络会自己续，不需要用户点）
     val hasActiveControls = entry.status == DownloadStatus.RUNNING ||
-        entry.status == DownloadStatus.PAUSED
+        entry.status == DownloadStatus.PAUSED ||
+        entry.status == DownloadStatus.WAITING_NETWORK
 
     Column(
         modifier = Modifier
@@ -240,6 +243,19 @@ private fun DownloadRow(
                         )
                     }
                 }
+                DownloadStatus.WAITING_NETWORK -> {
+                    // 等网络时**不提供「恢复」按钮**：网络回来会自动继续，
+                    // 这里再放一个可点按钮反而让用户以为要手动干预。
+                    // 只保留取消（有人就是想彻底不下这个文件）。
+                    IconButton(onClick = onCancel) {
+                        Icon(
+                            LingIcons.Close,
+                            contentDescription = "取消并删除文件",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
+                }
                 DownloadStatus.PAUSED -> {
                     if (isBuiltIn) {
                         IconButton(onClick = onResume) {
@@ -276,14 +292,19 @@ private fun DownloadRow(
         // 进度条在下载中或已暂停时显示：暂停时让用户看到已下载的部分
         if (hasActiveControls) {
             Spacer(Modifier.height(8.dp))
-            if (entry.totalBytes > 0) {
-                LinearProgressIndicator(
+            when {
+                // 等网络：用**不确定态**（来回跑的条）表达「在推进、但暂时没在动」。
+                // 用确定态的定格条会让人以为卡死了，而这其实是一个会自愈的状态。
+                entry.status == DownloadStatus.WAITING_NETWORK ->
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+
+                entry.totalBytes > 0 -> LinearProgressIndicator(
                     progress = { entry.progress },
                     modifier = Modifier.fillMaxWidth(),
                 )
-            } else {
+
                 // 总大小未知（服务器没给 Content-Length）时用不确定进度条
-                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                else -> LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
             }
         }
 
@@ -313,6 +334,17 @@ private fun DownloadRow(
 /** 副标题：状态 + 大小/进度/速度/剩余时间。 */
 private fun subtitleOf(entry: DownloadEntry): String = when {
     entry.status == DownloadStatus.RUNNING -> runningSubtitle(entry)
+    // 等网络时补一句「已下多少」：用户最关心的是进度有没有丢，
+    // 而不是当前有没有在传。
+    entry.status == DownloadStatus.WAITING_NETWORK -> buildString {
+        append(entry.status.label)
+        if (entry.totalBytes > 0) {
+            append(" ${(entry.progress * 100).toInt()}%  ·  ")
+            append("已下载 ${formatBytes(entry.downloadedBytes)}")
+        } else if (entry.downloadedBytes > 0) {
+            append("  ·  已下载 ${formatBytes(entry.downloadedBytes)}")
+        }
+    }
     entry.status == DownloadStatus.PAUSED && entry.totalBytes > 0 ->
         "${entry.status.label} ${(entry.progress * 100).toInt()}%  ·  ${formatBytes(entry.totalBytes)}"
     entry.status == DownloadStatus.SUCCESS ->
