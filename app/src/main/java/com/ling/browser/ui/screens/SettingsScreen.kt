@@ -100,6 +100,88 @@ private data class SettingsEntry(
     val title: String,
 )
 
+/**
+ * 一条可被搜索到的**具体设置项**（子页里的某一行）。
+ *
+ * 为什么需要它：只索引分组入口是不够的 —— 用户搜「无图」时，期待的是直接
+ * 找到那个开关，而不是先去猜它藏在「浏览」里。分组名往往和用户的说法对不上
+ * （「网页跟随夜间模式」没人会先想「外观」）。
+ *
+ * [keywords] 是额外的匹配词：同义词、英文名、常见旧称。用户记得的措辞
+ * 未必等于界面上的原文（比如搜「油猴」要能出「用户脚本」）。
+ */
+private data class SettingsSearchItem(
+    val title: String,
+    val group: SettingsGroup,
+    val keywords: List<String> = emptyList(),
+) {
+    fun matches(query: String): Boolean =
+        title.contains(query, ignoreCase = true) ||
+            keywords.any { it.contains(query, ignoreCase = true) }
+}
+
+/**
+ * 全部子页设置项的搜索索引。
+ *
+ * **新增设置项时必须同步这里** —— 否则那个开关在总览页搜不到，而用户
+ * 很难判断"搜不到"是没这个功能还是索引漏了。
+ *
+ * 刻意不做到"滚动定位到具体那一行"：每个子页最多十来个开关，点进分组
+ * 一眼就能看到；而按 index 定位要和各页的条件渲染（如按 SDK 版本显示的
+ * 动态取色开关）绑定，任何一处增删都会让后续下标全部错位。
+ */
+private val settingsSearchIndex: List<SettingsSearchItem> = listOf(
+    // ---- 搜索与主页
+    SettingsSearchItem(
+        "搜索引擎", SettingsGroup.SEARCH_HOME,
+        listOf("必应", "百度", "Google", "DuckDuckGo", "search engine", "默认搜索"),
+    ),
+    SettingsSearchItem("自定义主页", SettingsGroup.SEARCH_HOME, listOf("首页", "homepage", "起始页")),
+    SettingsSearchItem("主页背景", SettingsGroup.SEARCH_HOME, listOf("壁纸", "背景图", "background")),
+
+    // ---- 外观
+    SettingsSearchItem("夜间模式", SettingsGroup.APPEARANCE, listOf("深色", "暗色", "dark", "night")),
+    SettingsSearchItem(
+        "Material You 动态取色", SettingsGroup.APPEARANCE,
+        listOf("动态取色", "壁纸取色", "monet", "dynamic color", "Material You"),
+    ),
+    SettingsSearchItem("主题配色", SettingsGroup.APPEARANCE, listOf("主题色", "强调色", "accent", "theme")),
+    SettingsSearchItem("阅读模式字号", SettingsGroup.APPEARANCE, listOf("字体大小", "正文字号", "reader font")),
+    SettingsSearchItem("恢复上次浏览页面", SettingsGroup.APPEARANCE, listOf("会话恢复", "session", "启动恢复")),
+
+    // ---- 浏览
+    SettingsSearchItem("网页跟随夜间模式", SettingsGroup.BROWSING, listOf("网页暗化", "强制暗色", "force dark")),
+    SettingsSearchItem("启用 JavaScript", SettingsGroup.BROWSING, listOf("js", "脚本执行")),
+    SettingsSearchItem("自定义 User-Agent", SettingsGroup.BROWSING, listOf("UA", "useragent", "电脑模式", "桌面版")),
+    SettingsSearchItem("无图模式", SettingsGroup.BROWSING, listOf("不加载图片", "省流量", "images")),
+    SettingsSearchItem("广告拦截", SettingsGroup.BROWSING, listOf("adblock", "去广告", "拦截", "屏蔽")),
+    SettingsSearchItem("自定义规则", SettingsGroup.BROWSING, listOf("域名规则", "黑名单", "拦截规则")),
+    SettingsSearchItem("订阅名单", SettingsGroup.BROWSING, listOf("订阅", "hosts", "adguard", "规则订阅")),
+    SettingsSearchItem("已拦截广告", SettingsGroup.BROWSING, listOf("拦截计数", "统计", "拦截数量")),
+    SettingsSearchItem("用户脚本", SettingsGroup.BROWSING, listOf("油猴", "tampermonkey", "userscript", "gm", "插件")),
+    SettingsSearchItem(
+        "用外部 App 打开链接", SettingsGroup.BROWSING,
+        listOf("外部应用", "scheme", "zhihu", "weixin", "拉起"),
+    ),
+
+    // ---- 下载
+    SettingsSearchItem("下载器", SettingsGroup.DOWNLOAD, listOf("下载方式", "downloader", "系统下载")),
+    SettingsSearchItem("保存位置", SettingsGroup.DOWNLOAD, listOf("下载目录", "存储路径", "download folder")),
+    SettingsSearchItem("网络限制", SettingsGroup.DOWNLOAD, listOf("仅 wifi", "流量", "network", "移动数据")),
+
+    // ---- 隐私（弹窗里的四个勾选项一并映射到这一行，用户搜哪个都能命中）
+    SettingsSearchItem(
+        "清除浏览数据", SettingsGroup.PRIVACY,
+        listOf("清除数据", "清空", "历史记录", "cookie", "缓存", "cache", "标签页会话", "clean"),
+    ),
+
+    // ---- 备份与恢复
+    SettingsSearchItem("导出书签", SettingsGroup.BACKUP, listOf("备份", "export", "html", "书签导出")),
+    SettingsSearchItem("导出历史记录", SettingsGroup.BACKUP, listOf("备份历史", "export history")),
+    SettingsSearchItem("导入书签", SettingsGroup.BACKUP, listOf("恢复", "import", "书签迁移", "html")),
+    SettingsSearchItem("导入历史记录", SettingsGroup.BACKUP, listOf("恢复历史", "import history")),
+)
+
 /** 总览页的全部入口。纯静态列表 —— 没有摘要，也就不必读 settings。 */
 private fun settingsEntries(): List<SettingsEntry> = listOf(
     SettingsEntry(
@@ -151,7 +233,10 @@ private fun settingsEntries(): List<SettingsEntry> = listOf(
  *
  * 布局照系统设置的「大标题 + 搜索 + 分区卡片」来做：同一分区的入口装进一张
  * 卡里、行间用内缩的细线分隔，而不是一行一张卡 —— 一列独立卡片会让页面
- * 显得零碎，分组才有"一叠"的整体感。搜索框只过滤入口，不跳转页面。
+ * 显得零碎，分组才有"一叠"的整体感。
+ *
+ * 搜索框既能命中分组入口，也能命中子页里的具体设置项（见 settingsSearchIndex）——
+ * 命中具体项时点击同样进入所属分组，不另开独立搜索页。
  */
 @Composable
 fun SettingsScreen(
@@ -162,12 +247,20 @@ fun SettingsScreen(
 ) {
     var query by remember { mutableStateOf("") }
     val entries = settingsEntries()
-    // 摘要去掉后，搜索只匹配分组标题。这也更符合预期：总览页能搜的
-    // 本来就只有这几个入口，子页里的具体设置项不该在这里被"假装搜到"。
-    val visible = if (query.isBlank()) {
+    // 搜索同时命中两类目标：
+    //  - 分组入口（「外观」「下载」…），点了进那一页；
+    //  - 子页里的具体设置项（「无图模式」「订阅名单」…），点了同样进那一页。
+    // 只索引分组是不够的 —— 分组名和用户的说法经常对不上，搜「油猴」时
+    // 没人会先想「浏览」。
+    val matchedGroups = if (query.isBlank()) {
         entries
     } else {
         entries.filter { it.title.contains(query, ignoreCase = true) }
+    }
+    val matchedItems = if (query.isBlank()) {
+        emptyList()
+    } else {
+        settingsSearchIndex.filter { it.matches(query) }
     }
 
     Scaffold(
@@ -191,19 +284,28 @@ fun SettingsScreen(
                 .padding(inner),
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 32.dp),
         ) {
-            if (visible.isEmpty()) {
+            val nothingMatched = matchedGroups.isEmpty() && matchedItems.isEmpty()
+            if (nothingMatched) {
                 item { SearchEmptyLabel() }
-            } else {
-                SettingsSection.entries.forEach { section ->
-                    val sectionEntries = visible.filter { it.section == section }
-                    if (sectionEntries.isNotEmpty()) {
-                        item(key = "header-${section.name}") {
-                            SectionHeader(section.title)
-                        }
-                        item(key = "card-${section.name}") {
-                            SettingsGroupCard(entries = sectionEntries, onOpen = onOpenGroup)
-                        }
+            }
+            // 分组入口在前、具体设置项在后：先给"去哪一页"，再给"那一页里的哪个"。
+            SettingsSection.entries.forEach { section ->
+                val sectionEntries = matchedGroups.filter { it.section == section }
+                if (sectionEntries.isNotEmpty()) {
+                    item(key = "header-${section.name}") {
+                        SectionHeader(section.title)
                     }
+                    item(key = "card-${section.name}") {
+                        SettingsGroupCard(entries = sectionEntries, onOpen = onOpenGroup)
+                    }
+                }
+            }
+            if (matchedItems.isNotEmpty()) {
+                item(key = "header-items") {
+                    SectionHeader("设置项")
+                }
+                item(key = "card-items") {
+                    SettingsItemResultCard(items = matchedItems, onOpen = onOpenGroup)
                 }
             }
         }
@@ -1479,7 +1581,7 @@ private fun SettingsPageScaffold(
     }
 }
 
-/** 总览页的搜索框：只过滤下方入口，不进入独立搜索页。 */
+/** 总览页的搜索框：过滤下方列表（分组 + 具体设置项），不进入独立搜索页。 */
 @Composable
 private fun SettingsSearchField(
     query: String,
@@ -1611,6 +1713,65 @@ private fun SettingsEntryRow(
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.size(20.dp),
         )
+    }
+}
+
+/**
+ * 搜索结果里的「具体设置项」卡片。
+ *
+ * 与分组入口卡片只有一处区别：每行下面多一行所属分组名。
+ *
+ * 这跟之前从总览页删掉的摘要**不是一回事**：那里的摘要语义混杂（有的写
+ * 当前值、有的写这页有什么），而这里显示「它在哪一页」是搜索结果必须给出的
+ * 信息 —— 否则用户看到「无图模式」不知道点进去会落在哪儿。
+ */
+@Composable
+private fun SettingsItemResultCard(
+    items: List<SettingsSearchItem>,
+    onOpen: (SettingsGroup) -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(24.dp))
+            .background(MaterialTheme.colorScheme.surfaceContainerLow),
+    ) {
+        items.forEachIndexed { index, item ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onOpen(item.group) }
+                    .padding(horizontal = 20.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = item.title,
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        text = item.group.title,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Spacer(Modifier.width(8.dp))
+                Icon(
+                    imageVector = LingIcons.ArrowForward,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(20.dp),
+                )
+            }
+            if (index != items.lastIndex) {
+                HorizontalDivider(
+                    modifier = Modifier.padding(start = 20.dp, end = 20.dp),
+                    thickness = 1.dp,
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
+                )
+            }
+        }
     }
 }
 

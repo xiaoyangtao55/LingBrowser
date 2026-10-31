@@ -62,6 +62,7 @@ jobs:
             tools/check_workflow.py
             tools/check_signing.py
             tools/check_js_dialog.py
+            tools/check_settings_index.py
           )
           # check_icon_fidelity.py 依赖未入库的官方 Material 源 XML，只在本地改图标时跑
           for f in "${scripts[@]}"; do

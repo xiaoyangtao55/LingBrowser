@@ -225,6 +225,7 @@ Android 13+ 的**主题化图标** —— 系统读 `ic_launcher_monochrome` 单
 | `tools/check_reader.py` | 校验阅读模式提取脚本语法与算法（用 Node 真实运行）、以及各层接线完整 |
 | `tools/check_client_thread.py` | 校验 `shouldInterceptRequest` 方法体不引用 WebView —— 它跑在后台线程，`view.url` 会触发 `checkThread()` 抛异常并让进程闪退 |
 | `tools/check_js_dialog.py` | 校验 JS 对话框四个子类型（alert/confirm/prompt/beforeunload）的委托声明、override、接线与穷尽处理，以及 `window.open` 新标签 |
+| `tools/check_settings_index.py` | 校验设置搜索索引与界面行一致 —— 新增开关忘了加索引，用户就搜不到它，这类静默不一致只能靠脚本抓 |
 | `tools/check_adblock_subscription.py` | 校验订阅名单：解析器是纯函数、Hosts/AdGuard 三格式归一、元素/例外/路径规则跳过并计数、双文件存储、gzip 魔数兜底、拦截热路径读预合并集、各层接线完整 |
 | `tools/check_junit_args.py` | 抓 JUnit 参数顺序写反（应为 `(message, value)`） |
 | `tools/check_workflow.py` | 校验 GitHub Actions YAML 结构 |
