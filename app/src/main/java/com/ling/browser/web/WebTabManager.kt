@@ -2117,8 +2117,12 @@ class WebTabManager(private val context: Context) {
      * 用 Parcel 实测而不是猜：Bundle 里装的是 Parcelable，估算不准。
      * 拿不到大小（Parcel 异常）时按 0 处理，即允许保存 —— 保守选择。
      */
-    private fun bundleBytes(bundle: Bundle): Int =
-        runCatching {
+    private fun bundleBytes(bundle: Bundle): Int {
+        // 粗判在前：Parcel.obtain() 要分配一块 native 内存，而这段代码
+        // 偏偏跑在"内存吃紧、要回收实例"的时刻。空 Bundle 直接返回 0，
+        // 省掉一次分配（空 Bundle 序列化后本来也只有几十字节）。
+        if (bundle.isEmpty) return 0
+        return runCatching {
             val parcel = Parcel.obtain()
             try {
                 bundle.writeToParcel(parcel, 0)
@@ -2127,6 +2131,7 @@ class WebTabManager(private val context: Context) {
                 parcel.recycle()
             }
         }.getOrDefault(0)
+    }
 
     /**
      * 异步抓取当前页面的滚动位置，写进 [TabSession.scrollY]。
@@ -2191,8 +2196,14 @@ class WebTabManager(private val context: Context) {
         // 局部 fun 没有这个问题，递归调用天然可见。
         var attempt = 0
         fun tryOnce() {
-            // 实例可能在这期间被回收 / 标签被关掉，每次都要重新确认还活着。
+            // 三道身份校验，缺一不可：
+            //  1. 实例还在、且就是这个 wv（可能已被回收重建）；
+            //  2. 标签还在（可能已被关掉）；
+            //  3. **标签仍是激活的那个** —— 用户切走后还去滚动一个后台页面
+            //     既没意义，又会触发一次多余的 JS 执行与重排。
             if (webViews[ses.tabId] !== wv) return
+            if (_activeId.value != ses.tabId) return
+            if (_tabs.value.none { it.id == ses.tabId }) return
             runCatching {
                 wv.evaluateJavascript(
                     "try{window.scrollTo(0,$y);Math.round(window.scrollY||0)}catch(e){-1}",
@@ -2242,6 +2253,10 @@ class WebTabManager(private val context: Context) {
             ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW,
             ComponentCallbacks2.TRIM_MEMORY_RUNNING_MODERATE,
             ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN,
+            // BACKGROUND（值 40）：进程已退到 LRU 列表靠后、随时可能被杀。
+            // 这时给满池实例是错的 —— 而它是后台状态里**最常见**的一档，
+            // 漏掉的话"后台被回收"这条路径等于没有收缩。
+            ComponentCallbacks2.TRIM_MEMORY_BACKGROUND,
             -> MAX_WEBVIEWS_LOW
 
             else -> MAX_WEBVIEWS_DEFAULT
@@ -2273,10 +2288,31 @@ class WebTabManager(private val context: Context) {
         // 放宽时不补建实例：那些标签切过去时 obtainWebView 自然会建。
     }
 
+    /**
+     * 挑一个可以安全回收的实例；没有合适的就返回 null（宁可暂时超限）。
+     *
+     * 三条排除规则，按顺序：
+     *  1. **激活标签**永远不动 —— 用户正在看的那一页。
+     *  2. **正在加载的标签**不动。以前只排除激活标签，于是后台正在
+     *     下载大页面的标签会被 destroy() 打断，用户切回去看到残缺页面或白页。
+     *     加载中的标签很快会结束，多等一轮即可，没必要现在就砍。
+     *  3. 其余的按 [webViews] 的插入顺序取最靠前的 —— obtainWebView 命中
+     *     缓存时会把该项移到末尾，因此这个顺序就是 LRU。
+     *
+     * 如果所有非激活标签都在加载中，返回 null：宁可短暂超限，也不打断加载。
+     */
+    private fun pickEvictionCandidate(): String? {
+        val loading = _tabs.value.asSequence()
+            .filter { it.isLoading }
+            .map { it.id }
+            .toHashSet()
+        return webViews.keys.firstOrNull { it != _activeId.value && it !in loading }
+    }
+
     /** WebView 实例上限：超过则回收最久未使用的非激活实例。 */
     private fun enforceCacheLimit() {
         while (webViews.size > maxWebViews) {
-            val victim = webViews.keys.firstOrNull { it != _activeId.value } ?: return
+            val victim = pickEvictionCandidate() ?: return
             webViews.remove(victim)?.let { wv ->
                 // 实例销毁后主页占位身份一并失效：重建出来的 WebView 是空白的，
                 // 若 session 里还留着这个标记，它自己导航到 about:blank 就会被误认成主页。
@@ -2284,17 +2320,26 @@ class WebTabManager(private val context: Context) {
                 sessions[victim]?.isHomePlaceholder = false
                 // 销毁前存下回退/前进历史栈：实例一没，这条链就断了。
                 // saveState 必须在 destroy() **之前**、实例仍可用时调用 ——
-                // 销毁后再调只会拿到 null。
+                // 销毁后再调只会拿到 null。它存的是历史栈而非页面内容，
+                // 恢复后仍要重新加载当前页，但用户按返回能回到上一页
+                // （见 obtainWebView 里的 restoreState）。
                 //
-                // 注意它存的是历史栈，不是页面内容：恢复后仍要重新加载当前页，
-                // 但用户按返回能回到上一页（见 obtainWebView 里的 restoreState）。
+                // **无痕标签不存**：saveState 的 Bundle 里含历史栈中的完整
+                // URL，属于敏感信息。虽然只在内存、不写盘，但让它活过实例
+                // 销毁本身就没有必要 —— 无痕的语义是"关掉即忘"，
+                // 返回栈也不该被捞回来。
+                val incognito = _tabs.value.firstOrNull { it.id == victim }?.isIncognito == true
                 sessions[victim]?.let { ses ->
-                    ses.savedState = runCatching {
-                        Bundle().also { out ->
-                            @Suppress("DEPRECATION")
-                            wv.saveState(out)
-                        }
-                    }.getOrNull()?.takeIf { bundleBytes(it) <= MAX_SAVED_STATE_BYTES }
+                    ses.savedState = if (incognito) {
+                        null
+                    } else {
+                        runCatching {
+                            Bundle().also { out ->
+                                @Suppress("DEPRECATION")
+                                wv.saveState(out)
+                            }
+                        }.getOrNull()?.takeIf { bundleBytes(it) <= MAX_SAVED_STATE_BYTES }
+                    }
                     // 滚动位置**不在这里抓**：本函数马上就要 destroy()，
                     // 那时 JS 上下文已随实例销毁，evaluateJavascript 的回调
                     // 几乎必然拿不到值。改在 switchTo 切走旧标签时预抓
