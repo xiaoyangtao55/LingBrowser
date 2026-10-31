@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.12.0](https://github.com/xiaoyangtao55/LingBrowser/compare/v1.11.0...v1.12.0) (2026-10-31)
+
+
+### Features
+
+* **web:** 标签实例池按内存压力动态调整，回收时保存历史栈与滚动位置 ([fadabdb](https://github.com/xiaoyangtao55/LingBrowser/commit/fadabdbe5375e47fad98232cab9e59098ae9412e))
+
+
+### Bug Fixes
+
+* **web:** 修复多标签切换时的 SIGSEGV 崩溃与白页 ([3858bfb](https://github.com/xiaoyangtao55/LingBrowser/commit/3858bfb9e99e20f5386b80ee4b0fba4a14d3cb04))
+* **web:** 修正实例池在并发、生命周期与状态恢复上的四处缺陷 ([3927dbd](https://github.com/xiaoyangtao55/LingBrowser/commit/3927dbd4feff08fc1218b2a78f3b487729fa0993))
+* **web:** 修正滚动位置抓取时机、恢复重试与 destroyAll 生命周期 ([7f10650](https://github.com/xiaoyangtao55/LingBrowser/commit/7f10650194d831fbdafe8d431913ab49417a6246))
+* **web:** 回收候选排除加载中标签、无痕不存历史栈，并补齐内存分档 ([c722113](https://github.com/xiaoyangtao55/LingBrowser/commit/c7221132d5906de80fb049140f1223cb05fdf395))
+
 ## [1.11.0](https://github.com/xiaoyangtao55/LingBrowser/compare/v1.10.0...v1.11.0) (2026-10-29)
 
 
