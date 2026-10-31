@@ -86,6 +86,9 @@ import androidx.compose.ui.window.PopupProperties
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.ling.browser.data.prefs.NightMode
 import com.ling.browser.ui.BrowserViewModel
@@ -349,6 +352,22 @@ fun BrowserScreen(
             app?.onTrimMemoryListener = null
             viewModel.tabManager.detachHost(host)
         }
+    }
+
+    // 界面回到前台时把实例上限恢复成默认值。
+    //
+    // 必须单独接一个观察者：onTrimMemory 只报告"压力来了"，系统**不会**在
+    // 内存宽裕后补发"压力解除"。少了这一步，上限一旦被降到 3 就永久停在 3，
+    // 用户开第 4 个标签就开始重载 —— 比修复前的固定 6 还差。
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                viewModel.tabManager.resetCacheLimit()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     // 网页 <input type="file"> → 系统文件选择器。

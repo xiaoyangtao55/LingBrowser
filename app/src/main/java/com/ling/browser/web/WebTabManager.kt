@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.content.ComponentCallbacks2
 import android.content.Context
 import android.os.Bundle
+import android.os.Parcel
 import android.graphics.Bitmap
 import android.net.Uri
 import android.webkit.ClientCertRequest
@@ -194,13 +195,6 @@ class WebTabManager(private val context: Context) {
      */
     private var maxWebViews: Int = MAX_WEBVIEWS_DEFAULT
 
-    /**
-     * [obtainWebView] 最近一次是否从 [TabSession.savedState] 恢复了历史栈。
-     *
-     * 只由 [obtainWebView] 写、[switchTo] 紧接着读一次，因此不需要更复杂的传递方式。
-     * 语义是"这个新实例已经有内容了，别再 loadUrl 覆盖它"。
-     */
-    private var restoredFromSnapshot = false
 
     /**
      * tabId -> 该标签的附属簿记（脚本句柄、注入记录、菜单、阅读缓存、证书放行、
@@ -883,7 +877,7 @@ class WebTabManager(private val context: Context) {
         if (_activeId.value == id && webViews[id] != null) return
         val recreated = webViews[id] == null
         _activeId.value = id
-        val wv = obtainWebView(id)
+        val (wv, restoredFromSnapshot) = obtainWebViewDetailed(id)
         host?.let { h ->
             h.removeAllViews()
             (wv.parent as? FrameLayout)?.removeView(wv)
@@ -1432,19 +1426,27 @@ class WebTabManager(private val context: Context) {
     // ---------------------------------------------------------------- 内部
 
     /** 取得（必要时创建）某个标签页的 WebView。 */
-    private fun obtainWebView(id: String): LingWebView {
+    private fun obtainWebView(id: String): LingWebView = obtainWebViewDetailed(id).first
+
+    /**
+     * [obtainWebView] 的完整版本，额外返回"本次是否刚从快照恢复历史栈"。
+     *
+     * 为什么不用一个类字段传递：`obtainWebView` 有 8 个调用点（attachHost、
+     * loadUrl、reload、stopLoading、clearHistory…），任何一个中间调用都会
+     * 覆盖那个字段。而 [switchTo] 读它时早已不是"紧接着"了 —— 误判成
+     * "已恢复"会跳过 loadUrl 导致白页，误判成"未恢复"会把恢复出来的
+     * 历史栈顶掉。改成返回值后这个竞态从根上消失。
+     */
+    private fun obtainWebViewDetailed(id: String): Pair<LingWebView, Boolean> {
         webViews[id]?.let { wv ->
             // LRU：访问过的移到末尾
             webViews.remove(id)
             webViews[id] = wv
-            return wv
+            return wv to false
         }
 
         val tab = _tabs.value.firstOrNull { it.id == id }
         val incognito = tab?.isIncognito ?: false
-        // 复位：这个标记只描述"本次新建"，命中缓存的分支不该留下上一次的残留值。
-        restoredFromSnapshot = false
-
         val wv = LingWebView(context)
         // 先建实例再配置（而不是 LingWebView(context).apply { ... }）：
         // 下面的回调 lambda 会在 apply 作用域**之外**执行，若没有这个名字，
@@ -2030,20 +2032,20 @@ class WebTabManager(private val context: Context) {
         //
         // 消费后立刻清空：一份快照只该用一次，留着会让下一次重建
         // 又恢复到那个旧历史栈上。
-        sessions[id]?.savedState?.let { state ->
+        val restored = sessions[id]?.savedState?.let { state ->
             // restoreState 返回恢复后的 WebBackForwardList（失败时为 null）。
             // 调用方据此跳过"重新 loadUrl"，否则会把刚恢复的栈顶掉。
-            restoredFromSnapshot =
+            val ok =
                 runCatching { wv.restoreState(state) != null }.getOrDefault(false)
             sessions[id]?.savedState = null
-        }
-
+            ok
+        } ?: false
         webViews[id] = wv
         // Cookie 策略是进程级的：新建的 WebView 只有正好是当前激活标签时才动全局策略，
         // 后台标签（例如 ensureHomeRendered 给非激活标签补建实例）等切过去时再对齐。
         if (id == _activeId.value) syncCookiePolicy(id)
         enforceCacheLimit()
-        return wv
+        return wv to restored
     }
 
     /**
@@ -2085,6 +2087,28 @@ class WebTabManager(private val context: Context) {
             container.addView(wv)
         }
     }
+
+    /**
+     * 估算 Bundle 序列化后的大小（字节）。
+     *
+     * 为什么需要它：`saveState` 会把**整个历史栈**塞进 Bundle —— 一个标签
+     * 浏览几十页就可能几百 KB。而它偏偏是在"内存吃紧、要回收实例"时执行，
+     * 再额外分配几 MB 等于雪上加霜。超限时宁可不存（只丢返回栈），
+     * 也不能让"省内存的操作"本身变成内存杀手。
+     *
+     * 用 Parcel 实测而不是猜：Bundle 里装的是 Parcelable，估算不准。
+     * 拿不到大小（Parcel 异常）时按 0 处理，即允许保存 —— 保守选择。
+     */
+    private fun bundleBytes(bundle: Bundle): Int =
+        runCatching {
+            val parcel = Parcel.obtain()
+            try {
+                bundle.writeToParcel(parcel, 0)
+                parcel.dataSize()
+            } finally {
+                parcel.recycle()
+            }
+        }.getOrDefault(0)
 
     /**
      * 异步抓取当前页面的滚动位置，写进 [TabSession.scrollY]。
@@ -2130,17 +2154,27 @@ class WebTabManager(private val context: Context) {
      * 按系统内存压力调整实例上限。
      *
      * 由 UI 层从 `Application.onTrimMemory` 转发进来（web 层不认识 Activity/
-     * Application 生命周期，与其它回调同一分层思路）。**必须投递到主线程**：
-     * 它会改 [webViews] 并调 [enforceCacheLimit]，而那张表是主线程独占的。
+     * Application 生命周期，与其它回调同一分层思路）。
+     *
+     * ⚠️ **必须投递到主线程**：`Application.onTrimMemory` 的调用线程没有
+     * 任何文档保证（部分 ROM 在 binder 线程回调），而这里要改 [webViews]
+     * 并 destroy() WebView —— 跨线程操作主线程独占的 LinkedHashMap，
+     * 轻则 ConcurrentModificationException，重则和之前那个 SIGSEGV 一样直接崩。
      *
      * 分档依据是"还能不能撑住"：
-     *  - 正常 / 后台：不收缩（后台时用户随时会切回来，砍了就是白重载）；
-     *  - RUNNING_LOW：降一档，牺牲最久未用的那几个；
-     *  - RUNNING_CRITICAL：降到最低，先别被系统杀掉。
+     *  - RUNNING_CRITICAL / COMPLETE：降到最低，先别被系统杀掉；
+     *  - RUNNING_LOW / MODERATE：降一档，牺牲最久未用的那几个；
+     *  - UI_HIDDEN：**也要收缩**。应用已不可见，占着满池实例最危险，
+     *    而用户下次回来时重新加载是可接受的（本来也要等冷启动）；
+     *  - 其余（含 TRIM_MEMORY_BACKGROUND 等）：维持默认。
      *
      * 调高时不主动补建实例 —— 那些标签切过去时 [obtainWebView] 自然会建。
      */
     fun updateCacheLimit(level: Int) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post { updateCacheLimit(level) }
+            return
+        }
         val target = when (level) {
             ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL,
             ComponentCallbacks2.TRIM_MEMORY_COMPLETE,
@@ -2148,6 +2182,7 @@ class WebTabManager(private val context: Context) {
 
             ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW,
             ComponentCallbacks2.TRIM_MEMORY_RUNNING_MODERATE,
+            ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN,
             -> MAX_WEBVIEWS_LOW
 
             else -> MAX_WEBVIEWS_DEFAULT
@@ -2157,6 +2192,26 @@ class WebTabManager(private val context: Context) {
         // 收缩后立刻执行，否则上限要等到下一次"新建实例"才生效 ——
         // 而内存危急时用户可能根本不建新实例，等于白设。
         enforceCacheLimit()
+    }
+
+    /**
+     * 把实例上限恢复到默认值。
+     *
+     * 为什么必须有这个方法：`onTrimMemory` **只报告压力，不报告压力解除**。
+     * 系统不会在内存宽裕后补发一个"可以放开"的回调，因此只靠它降档的话，
+     * 上限一旦降到 3 就永久停在 3 —— 用户从此开第 4 个标签就开始重载，
+     * 比修复前的固定 6 还差。
+     *
+     * 调用时机是界面回到前台（见 BrowserScreen 的 ON_RESUME）。
+     */
+    fun resetCacheLimit() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post { resetCacheLimit() }
+            return
+        }
+        if (maxWebViews == MAX_WEBVIEWS_DEFAULT) return
+        maxWebViews = MAX_WEBVIEWS_DEFAULT
+        // 放宽时不补建实例：那些标签切过去时 obtainWebView 自然会建。
     }
 
     /** WebView 实例上限：超过则回收最久未使用的非激活实例。 */
@@ -2180,7 +2235,7 @@ class WebTabManager(private val context: Context) {
                             @Suppress("DEPRECATION")
                             wv.saveState(out)
                         }
-                    }.getOrNull()
+                    }.getOrNull()?.takeIf { bundleBytes(it) <= MAX_SAVED_STATE_BYTES }
                     // 滚动位置只能异步取：evaluateJavascript 的回调要等 JS 执行完，
                     // 而这里是同步循环。回调里只写一个 Int，不碰任何已销毁的对象 ——
                     // 此时 wv 可能已经 destroy，但 lambda 捕获的是 session，安全。
@@ -2328,6 +2383,14 @@ class WebTabManager(private val context: Context) {
 
         /** 每个标签页保留的控制台错误条数。 */
         private const val MAX_CONSOLE_ERRORS = 30
+
+        /**
+         * 单个标签保存的历史栈上限（字节）。超过就不存，只丢返回栈不丢标签。
+         *
+         * 512 KB 足够覆盖上百页的浏览历史；再大基本是异常（页面自己压了
+         * 大量数据进 history.state），存下来也是浪费内存。
+         */
+        private const val MAX_SAVED_STATE_BYTES = 512 * 1024
 
         /** 单条控制台错误的展示长度，避免长堆栈把面板撑爆。 */
         private const val MAX_CONSOLE_MESSAGE = 500
