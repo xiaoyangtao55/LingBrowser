@@ -741,6 +741,10 @@ class WebTabManager(private val context: Context) {
         if (closing != null) onTabClosed?.invoke(id)
         val remaining = _tabs.value.filterNot { it.id == id }
         webViews.remove(id)?.let { wv ->
+            // 与 enforceCacheLimit 同理：句柄必须先摘，再销毁实例。
+            // 虽然下面会把整份 session 丢掉，但 destroy() 之后、sessions.remove()
+            // 之前的这段窗口里，任何一次 registerDocumentStart 都可能踩到失效句柄。
+            scriptBridge.releaseRendererHandles(id)
             (wv.parent as? FrameLayout)?.removeView(wv)
             wv.stopLoading()
             wv.loadUrl("about:blank")
@@ -835,11 +839,21 @@ class WebTabManager(private val context: Context) {
             (wv.parent as? FrameLayout)?.removeView(wv)
             h.addView(wv)
         }
-        // LRU 回收后重建的实例没有可恢复的文档。主页标签重新装一次占位
-        // （空的 WebView 是白底，会盖住 HomeBackgroundLayer，也没有返回帧）；
-        // 普通网页的懒加载不在本次改动范围内。
-        if (recreated && HomePage.isHomeUrl(_tabs.value.firstOrNull { it.id == id }?.url)) {
-            loadHome(id)
+        // LRU 回收后重建的实例没有可恢复的文档 —— 新实例是纯白底。
+        //
+        // 之前只处理了主页标签（空的 WebView 会盖住 HomeBackgroundLayer），
+        // 普通网页则什么都不做，于是"实例被回收 → 切回来"表现为**白页**，
+        // 而且按刷新也没反应（对空白实例 reload 不会加载任何东西）。
+        // 这正是"开满 8 个标签后，切回旧的只剩白页"的原因。
+        //
+        // 这里统一走 loadUrl 重新加载标签自己的地址：它内部已经处理了
+        // 主页（loadHome）、自定义协议（忽略）、阅读视图（回主页）、
+        // .user.js（交给安装流程）等分支，比在这里再判一遍更稳妥。
+        if (recreated) {
+            val restoredUrl = _tabs.value.firstOrNull { it.id == id }?.url
+            if (!restoredUrl.isNullOrBlank()) {
+                loadUrl(id, restoredUrl)
+            }
         }
         syncNavState(id)
         // CookieManager 是**进程级**单例：切标签后必须把全局策略对齐到新的激活标签，
@@ -2010,6 +2024,22 @@ class WebTabManager(private val context: Context) {
                 // 若 session 里还留着这个标记，它自己导航到 about:blank 就会被误认成主页。
                 // 只清标记、保留 session：标签本身还在。
                 sessions[victim]?.isHomePlaceholder = false
+                // ⚠️ 必须先摘 document-start 句柄，再 destroy()。
+                //
+                // ScriptHandler 绑的是**WebView 实例**，而 session 跟的是**标签**：
+                // 实例被回收后 session 仍在，句柄也就跟着留下来。等用户切回这个标签、
+                // obtainWebView 建出新实例并调 registerDocumentStart 时，第一步就是
+                // 遍历旧句柄执行 remove() —— 那一步会去碰已经 destroy 的原生对象，
+                // 在 Chromium 内部空指针崩溃：
+                //
+                //   WV.xB.remove
+                //   → ScriptBridge.registerDocumentStart
+                //   → WebTabManager.obtainWebView → switchTo → 用户点标签
+                //   → SIGSEGV / SEGV_MAPERR（MI 8 与 MEIZU 两台真机均复现）
+                //
+                // 注意 runCatching 在这里**拦不住**：SIGSEGV 是信号，不是可捕获的
+                // Java 异常，进程会直接死。唯一可靠的做法是别留下失效句柄。
+                scriptBridge.releaseRendererHandles(victim)
                 (wv.parent as? FrameLayout)?.removeView(wv)
                 wv.destroy()
             }
