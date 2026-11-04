@@ -963,6 +963,11 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
         val trimmedUrl = queryUrl.trim()
         if (trimmedName.isEmpty()) return "请输入搜索引擎名称"
         if (!trimmedUrl.contains("%s")) return "搜索地址需包含 %s 占位符"
+        // 除 %s 外的 % 会被当成格式说明符（见 UrlUtils.searchUrl 的说明）。
+        // 这里提前拒掉，避免存进一条"每次搜索都崩"的模板。
+        if (trimmedUrl.replace("%s", "").contains('%')) {
+            return "搜索地址只能包含 %s 一个占位符"
+        }
         if (!trimmedUrl.startsWith("http://") && !trimmedUrl.startsWith("https://")) {
             return "搜索地址需以 http:// 或 https:// 开头"
         }

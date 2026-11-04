@@ -101,6 +101,32 @@ class UrlUtilsTest {
         assertTrue("应包含百分号编码: $url", url.contains("%"))
     }
 
+    /**
+     * 模板里除 %s 外的 % 必须原样保留。
+     *
+     * 之前用 `String.format` 实现，`%2D` / `100%` / `%d` 会被当成格式说明符，
+     * 抛 MissingFormatArgumentException 或 UnknownFormatConversionException，
+     * 而调用点在 UI 线程且无 try/catch —— 用户粘贴一个带百分号编码的搜索地址后，
+     * 每次回车都会崩溃。
+     */
+    @Test
+    fun `模板里的其它百分比编码不影响搜索`() {
+        val templates = listOf(
+            "https://a.com/s?q=%s&lang=zh%2DCN",
+            "https://a.com/s?q=%s&x=%E4%B8%AD",
+            "https://a.com/s?q=%s&pct=100%",
+        )
+        templates.forEach { template ->
+            val url = UrlUtils.searchUrl("test", template)
+            assertFalse("不应残留占位符: $url", url.contains("%s"))
+            assertTrue("模板其余部分应原样保留: $url", url.contains("test"))
+        }
+        assertEquals(
+            "https://a.com/s?q=test&lang=zh%2DCN",
+            UrlUtils.searchUrl("test", "https://a.com/s?q=%s&lang=zh%2DCN"),
+        )
+    }
+
     // ------------------------------------------------------------ 边界
 
     @Test

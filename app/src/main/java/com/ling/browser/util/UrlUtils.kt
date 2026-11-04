@@ -78,9 +78,16 @@ object UrlUtils {
     /** 构造搜索 URL。 */
     fun searchUrl(query: String, engine: SearchEngine): String = searchUrl(query, engine.queryUrl)
 
-    /** 用地址模板构造搜索 URL。 */
+    /**
+     * 用地址模板构造搜索 URL。
+     *
+     * 不能用 `String.format`：模板是用户输入，其中除 `%s` 外的 `%`（例如
+     * `q=%s&lang=zh%2DCN` 里的百分号编码）会被当成格式说明符，
+     * 轻则抛 `MissingFormatArgumentException`、重则让地址栏回车直接崩溃。
+     * 只替换占位符，其余字符原样保留。
+     */
     fun searchUrl(query: String, queryUrl: String): String =
-        queryUrl.format(URLEncoder.encode(query, "UTF-8"))
+        queryUrl.replace("%s", URLEncoder.encode(query, "UTF-8"))
 
     /**
      * 地址栏展示用的「精简」形式：去掉 scheme 与结尾斜杠，让地址栏更清爽。
