@@ -459,10 +459,15 @@ internal fun scriptWrapper(
         // 同一文档内只跑一次。document-start 注册可能没挂上（脚本是页面打开之后
         // 才导入的，或注册被系统拒绝），原生侧会在 END 补一次探测式注入；
         // 这个标记让"补注入"与"注册成功"竞争时也不会被执行两遍。
-        // 键是 id 的摘要，页面即便枚举也拿不到可用的脚本身份。
-        append("window.__lingGMInjected=window.__lingGMInjected||{};")
-        append("if(window.__lingGMInjected[").append(jsString(key)).append("])return;")
-        append("window.__lingGMInjected[").append(jsString(key)).append("]=1;")
+        //
+        // 注册表挂在 Symbol 键上而不是 window.__lingGMInjected：普通对象的键
+        // 能被 `Object.keys(window)` 枚举，页面据此拿到一串标记，就能在消息里
+        // 冒充脚本（见 scriptMarker 的说明）。Symbol 键不在字符串枚举结果里，
+        // 只能靠 getOwnPropertySymbols 主动挖掘 —— 抬高门槛，但不是绝对隔离。
+        append("var K=Symbol.for('ling.gm.injected');")
+        append("var R=window[K]||(window[K]={});")
+        append("if(R[").append(jsString(key)).append("])return;")
+        append("R[").append(jsString(key)).append("]=1;")
         append("var V=").append(valuesJson.takeIf { it.isNotBlank() } ?: "{}").append(";")
         append("var RES=").append(resourcesJson.takeIf { it.isNotBlank() } ?: "{}").append(";")
         // 资源名称 → 声明时的地址：`GM_info.script.resources[].url` 要的是这个，

@@ -1519,7 +1519,13 @@ class WebTabManager(private val context: Context) {
                             wv,
                             USER_SCRIPT_BRIDGE,
                             setOf("*"),
-                        ) { _, message, _, _, _ ->
+                        ) { _, message, _, isMainFrame, _ ->
+                            // 只接受主框架的消息：子框架（广告 iframe、跨域嵌入）
+                            // 同样能往监听器里 postMessage，而 GM 桥的能力是
+                            // 站点级凭据（见 UserScriptCoordinator.handleMessage）。
+                            // 脚本自己是子框架时由注入端的 noFrames/匹配规则决定，
+                            // 这里额外挡掉"根本不在主文档里的页面"。
+                            if (!isMainFrame) return@addWebMessageListener
                             this@WebTabManager.onUserScriptMessage?.invoke(id, message.data.orEmpty())
                         }
                     }
@@ -1868,6 +1874,34 @@ class WebTabManager(private val context: Context) {
                             canGoBack = if (isHome) false else canGoBack(),
                             canGoForward = canGoForward(),
                         )
+                    }
+                },
+                onHistoryUpdated = { url ->
+                    // SPA 路由（pushState/replaceState/hashchange）走这里：
+                    // 只同步地址与前进/后退状态。控制台错误、脚本菜单、注入闸门
+                    // 都属于当前文档，不能清；isLoading 与安全状态也不动，
+                    // 否则地址栏会在每次路由切换时闪加载中。
+                    val currentUrl = logicalUrlOf(id)
+                    val isPlaceholder = isHomePlaceholder(id, url)
+                    val isInternal = isPlaceholder || InternalPage.isInternal(url, currentUrl)
+                    val isHome = isPlaceholder || InternalPage.isHomeDocument(url, currentUrl)
+                    when {
+                        isHome -> updateTab(id) {
+                            it.copy(
+                                url = HomePage.URL,
+                                canGoBack = false,
+                                canGoForward = canGoForward(),
+                            )
+                        }
+                        // 阅读视图等内部页不是可分享地址：保持既有逻辑地址。
+                        isInternal || !isNavigable(url) -> Unit
+                        else -> updateTab(id) {
+                            it.copy(
+                                url = url,
+                                canGoBack = canGoBack(),
+                                canGoForward = canGoForward(),
+                            )
+                        }
                     }
                 },
                 onPageFinished = { url, title ->

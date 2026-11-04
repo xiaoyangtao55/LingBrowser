@@ -288,10 +288,13 @@ class UserScriptTest {
         // 守卫必须放在标记之前，否则会把内部页误标成"已注入"。
         assertTrue(js.contains("u.hostname==='home.ling.invalid'||u.hostname==='reader.ling.invalid'"))
         // 同一文档内只跑一次的标记：END 的探测式补注入靠它避免重复执行。
-        // 键是脚本 id 的摘要（见 scriptMarker），页面里不出现裸 id。
+        // 键是脚本 id 的摘要（见 scriptMarker），且注册表挂在 Symbol 键上 ——
+        // 普通对象键能被 Object.keys 枚举，等于把脚本身份白送页面。
         val key = scriptMarker("u123")
-        assertTrue(js.contains("window.__lingGMInjected[\"$key\"]=1"))
-        assertTrue(js.indexOf("if(!inc)return;") < js.indexOf("window.__lingGMInjected[\"$key\"]=1"))
+        assertTrue(js.contains("var K=Symbol.for('ling.gm.injected')"))
+        assertTrue(js.contains("R[\"$key\"]=1"))
+        assertTrue(js.indexOf("if(!inc)return;") < js.indexOf("R[\"$key\"]=1"))
+        assertFalse("不应再挂可枚举的 window 属性", js.contains("window.__lingGMInjected"))
         assertFalse(js.contains("\"u123\""))
         // 元数据头只作为 `GM_info.script.metaStr` 的数据带进页面（供 GM_config
         // 之类解析自定义字段的库使用），不会被当成脚本正文执行。

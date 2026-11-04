@@ -27,6 +27,18 @@ import java.io.ByteArrayInputStream
 class LingWebViewClient(
     private val isIncognito: Boolean,
     private val onPageStarted: (url: String) -> Unit,
+    /**
+     * 历史条目更新（`doUpdateVisitedHistory`）。
+     *
+     * `history.pushState` / `replaceState`（以及 hash 变化）只改地址，**不是**
+     * 新文档：没有 `onPageStarted`，也没有新的 `onPageFinished`。反而在 Chromium
+     * 里它可能伴随一次 `onPageStarted` —— 若那里当成导航，会清掉注入闸门与控制台
+     * 错误、把 `isLoading` 置真，地址栏在 SPA 每次路由切换时闪一下。
+     *
+     * 因此单独给一个"只更新地址"的回调，由 [WebTabManager] 实现为
+     * 命中内部页/不可导航地址时保持原值，其余只写 `url` 与前进后退能力。
+     */
+    private val onHistoryUpdated: (url: String) -> Unit = {},
     private val onPageFinished: (url: String, title: String) -> Unit,
     /**
      * 首帧已提交（`onPageCommitVisible`）。
@@ -255,7 +267,8 @@ class LingWebViewClient(
 
     override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
         super.doUpdateVisitedHistory(view, url, isReload)
-        url?.let(onPageStarted)
+        // 只同步地址与前进后退状态，不当作新导航：pushState 属于当前文档。
+        url?.let(onHistoryUpdated)
     }
 
     override fun onReceivedError(
