@@ -22,13 +22,30 @@ class HistoryRepository(private val db: LingDatabase) {
     }
 
     fun refresh() {
-        _history.value = queryAll()
+        _history.value = queryRecent()
     }
 
-    private fun queryAll(): List<HistoryEntry> = runCatching {
-        db.readableDatabase.rawQuery("SELECT * FROM history ORDER BY visited_at DESC", null)
-            .use { c -> buildList { while (c.moveToNext()) add(c.toHistory()) } }
+    /**
+     * 最近 [HISTORY_WINDOW] 条历史（按访问时间倒序）。
+     *
+     * 不能全表 `SELECT *`：历史是自动累积的，重度用户几千上万条，且每条可能
+     * 带 favicon BLOB。`record()` 每打开一个网页就会触发一次刷新，全量查询等于
+     * 每次导航都重建一个数 MB 的 List 并推给 UI 重组。
+     *
+     * 截断只影响**内存里展示的窗口**，数据库中的旧记录仍在（搜索、导出不受影响）。
+     */
+    private fun queryRecent(): List<HistoryEntry> = runCatching {
+        db.readableDatabase.rawQuery(
+            "SELECT * FROM history ORDER BY visited_at DESC LIMIT $HISTORY_WINDOW",
+            null,
+        ).use { c -> buildList { while (c.moveToNext()) add(c.toHistory()) } }
     }.getOrDefault(emptyList())
+
+    /** 把一条记录挪到表头（同一 URL 去重），并与查询窗口保持同样的上限。 */
+    private fun prepend(entry: HistoryEntry) {
+        _history.value = (listOf(entry) + _history.value.filter { it.url != entry.url })
+            .take(HISTORY_WINDOW)
+    }
 
     suspend fun search(query: String): List<HistoryEntry> = withContext(Dispatchers.IO) {
         if (query.isBlank()) return@withContext emptyList()
@@ -58,12 +75,27 @@ class HistoryRepository(private val db: LingDatabase) {
         // 用 UPDATE 保留原行 id（INSERT OR REPLACE 会换掉整行、改掉 id，
         // 导致 UI 上正在展示的那条记录的删除按钮失效）。
         if (existing == null) {
-            db.writableDatabase.insertWithOnConflict(
+            val rowId = db.writableDatabase.insertWithOnConflict(
                 "history",
                 null,
                 historyValues(title.ifBlank { url }, url, now, 1),
                 android.database.sqlite.SQLiteDatabase.CONFLICT_IGNORE,
             )
+            if (rowId != -1L) {
+                prepend(
+                    HistoryEntry(
+                        id = rowId,
+                        title = title.ifBlank { url },
+                        url = url,
+                        visitedAt = now,
+                        visitCount = 1,
+                    ),
+                )
+            } else {
+                // 极端竞态：查的时候还没有、插的时候已被另一条写入。
+                // 走一次最近窗口的查询即可，不必全表。
+                refresh()
+            }
         } else {
             db.writableDatabase.update(
                 "history",
@@ -71,8 +103,14 @@ class HistoryRepository(private val db: LingDatabase) {
                 "url = ?",
                 arrayOf(url),
             )
+            prepend(
+                existing.copy(
+                    title = title.ifBlank { existing.title },
+                    visitedAt = now,
+                    visitCount = existing.visitCount + 1,
+                ),
+            )
         }
-        refresh()
     }
 
     /**
@@ -184,6 +222,14 @@ class HistoryRepository(private val db: LingDatabase) {
         pickFaviconTargets(_history.value, limit, MAX_FAVICON_ROWS)
 
     private companion object {
+        /**
+         * 内存里保留的历史窗口大小（按最近访问）。
+         *
+         * 500 条足够覆盖"翻回最近浏览"的实际范围，同时把每次刷新的查询与
+         * 分配压到常数级；更老的记录留在库里，搜索与导出仍然能用到。
+         */
+        const val HISTORY_WINDOW = 500
+
         /**
          * 参与图标抓取的历史条目上限（按最近访问排序的前 N 条）。
          *

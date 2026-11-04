@@ -49,6 +49,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
@@ -311,7 +312,16 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
             tabManager.activeId.collect { syncAddressFromActiveTab() }
         }
         viewModelScope.launch {
-            tabManager.tabs.collect { syncAddressFromActiveTab() }
+            tabManager.tabs
+                // tabs 在 onProgressChanged 里每 1% 发射一次；只有影响地址栏显示的
+                // 字段（id / url / loading / title）变化时才同步，否则每加载一个
+                // 页面都会白跑上百次 isBookmarked 的 SQL 查询。
+                .map { tabs ->
+                    val active = tabs.firstOrNull { it.id == tabManager.activeId.value }
+                    active?.let { listOf(it.id, it.url, it.isLoading.toString(), it.title) }
+                }
+                .distinctUntilChanged()
+                .collect { syncAddressFromActiveTab() }
         }
         // 页面访问写历史
         tabManager.onVisited = { url, title, incognito ->

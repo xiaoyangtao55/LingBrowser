@@ -2268,9 +2268,10 @@ class WebTabManager(private val context: Context) {
      * 分档依据是"还能不能撑住"：
      *  - RUNNING_CRITICAL / COMPLETE：降到最低，先别被系统杀掉；
      *  - RUNNING_LOW / MODERATE：降一档，牺牲最久未用的那几个；
-     *  - UI_HIDDEN：**也要收缩**。应用已不可见，占着满池实例最危险，
-     *    而用户下次回来时重新加载是可接受的（本来也要等冷启动）；
-     *  - 其余（含 TRIM_MEMORY_BACKGROUND 等）：维持默认。
+     *  - UI_HIDDEN：**不降档**。它是每次按 Home 都会收到的常规回调，不代表
+     *    内存吃紧；按它砍实例会导致"开 8 个标签、切后台、回来 2 个重载"。
+     *    后台省内存交给系统真实的 BACKGROUND / COMPLETE 档；
+     *  - 其余（含 BACKGROUND / TRIM_MEMORY_BACKGROUND 等）：见下面的分支。
      *
      * 调高时不主动补建实例 —— 那些标签切过去时 [obtainWebView] 自然会建。
      */
@@ -2286,13 +2287,14 @@ class WebTabManager(private val context: Context) {
 
             ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW,
             ComponentCallbacks2.TRIM_MEMORY_RUNNING_MODERATE,
-            ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN,
             // BACKGROUND（值 40）：进程已退到 LRU 列表靠后、随时可能被杀。
             // 这时给满池实例是错的 —— 而它是后台状态里**最常见**的一档，
             // 漏掉的话"后台被回收"这条路径等于没有收缩。
             ComponentCallbacks2.TRIM_MEMORY_BACKGROUND,
             -> MAX_WEBVIEWS_LOW
 
+            // UI_HIDDEN 故意落在这里（保持默认上限）：它只是"不可见"，
+            // 不代表内存压力，见方法注释。
             else -> MAX_WEBVIEWS_DEFAULT
         }
         if (target == maxWebViews) return
