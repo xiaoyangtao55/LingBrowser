@@ -301,7 +301,9 @@ else:
     bad(f"版本号 {declared} 大于所有迁移阈值 {max_old} —— 疑似有空迁移的版本号")
 
 # 4 是「下载保存位置」这次迁移带来的：必须同时看到对应的 ALTER。
-if re.search(r"if \(oldVersion < 4\)", store) and \
+# 条件写成 `oldVersion in 2..3`：v1 的库在 < 2 分支里新建 downloads 表时
+# 已带这一列，此时再 ALTER 会失败，所以只对 v2/v3 生效。
+if re.search(r"if \(oldVersion (?:< 4|in 2\.\.3)\)", store) and \
         re.search(r"ALTER TABLE downloads ADD COLUMN download_location", store):
     ok("4 -> 5 之前的下载位置迁移已就位（downloads 增列 download_location）")
 else:

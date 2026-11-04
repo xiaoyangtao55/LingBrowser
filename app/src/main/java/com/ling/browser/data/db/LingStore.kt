@@ -65,6 +65,16 @@ class LingDatabase(context: Context) : SQLiteOpenHelper(
             """.trimIndent()
         )
 
+        createDownloadsTable(db)
+    }
+
+    /**
+     * 建 downloads 表与索引。
+     *
+     * 单独抽出来是因为 [onCreate] 与 [onUpgrade] 都要用：v1 的库升级时
+     * 也必须补建这张表（见 onUpgrade 里的 `oldVersion < 2` 分支）。
+     */
+    private fun createDownloadsTable(db: SQLiteDatabase) {
         db.execSQL(
             """
             CREATE TABLE IF NOT EXISTS downloads (
@@ -82,7 +92,6 @@ class LingDatabase(context: Context) : SQLiteOpenHelper(
             )
             """.trimIndent()
         )
-        // 按系统下载 ID 查记录是最高频的操作（每次刷新进度都要用）
         db.execSQL(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_download_download_id " +
                 "ON downloads(download_id)"
@@ -98,6 +107,13 @@ class LingDatabase(context: Context) : SQLiteOpenHelper(
         //
         // 每个版本的迁移都要能从任意旧版本逐级升上来，因此按序判断而不是
         // `when (oldVersion)` 精确匹配。
+        if (oldVersion < 2) {
+            // v2 新增了 downloads 表，但建表语句只在 onCreate 里 —— 直接从 v1
+            // 升上来的库没有这张表。所有下载读写都包在 runCatching 里，
+            // 缺表不会抛错，只会静默变成"下载永远失败、下载页永远空白"。
+            // 建表语句带 IF NOT EXISTS，这里与 onCreate 共用同一段。
+            createDownloadsTable(db)
+        }
         if (oldVersion < 3) {
             // 书签图标。NULL 表示还没有图标，UI 退回字母占位。
             // 存 BLOB 而不是路径/URL：图标很小（几十 KB 的 PNG），
@@ -109,7 +125,8 @@ class LingDatabase(context: Context) : SQLiteOpenHelper(
             // 卸载即清理。NULL 表示"还没抓过"，空数组表示"抓过但失败"。
             runCatching { db.execSQL("ALTER TABLE history ADD COLUMN favicon BLOB") }
         }
-        if (oldVersion < 4) {
+        // 只在 v2/v3 需要：v1 的库在上面的 < 2 分支里新建的表已带这一列。
+        if (oldVersion in 2..3) {
             // 下载保存位置（应用私有 / 公共目录）。老记录默认为应用私有目录，
             // 与此前 DownloadManager 落到 getExternalFilesDir 的行为一致。
             runCatching {

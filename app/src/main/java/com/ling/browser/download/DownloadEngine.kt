@@ -1464,8 +1464,10 @@ class DownloadEngine(
 
     private fun ensureServiceStarted() {
         if (serviceRunning) return
-        serviceRunning = true
-        DownloadService.start(appContext)
+        // 启动可能失败（Android 12+ 后台不允许起前台服务，见 DownloadService.start）。
+        // 失败时保持 false，否则下次真的需要服务时会因为早退而永远起不来；
+        // 当前这次下载降级为无前台服务继续跑。
+        serviceRunning = DownloadService.start(appContext)
     }
 
     private fun stopServiceIfIdle() {

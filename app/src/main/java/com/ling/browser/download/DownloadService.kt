@@ -162,25 +162,35 @@ class DownloadService : Service() {
             live.size == 1 -> {
                 val d = live.first()
                 title = d.fileName
-                text = if (d.status == DownloadStatus.PAUSED) "已暂停" else singleLine(d)
+                text = when (d.status) {
+                    DownloadStatus.PAUSED -> "已暂停"
+                    DownloadStatus.WAITING_NETWORK -> "等待网络"
+                    else -> singleLine(d)
+                }
                 progress = if (d.totalBytes > 0) (d.progress * 100).toInt() else 0
-                // 暂停时不显示不确定进度条（它就是停的）
-                indeterminate = d.status != DownloadStatus.PAUSED && d.totalBytes <= 0
+                // 暂停/等网络时不显示不确定进度条（它们都不在传输）
+                indeterminate = d.status != DownloadStatus.PAUSED &&
+                    d.status != DownloadStatus.WAITING_NETWORK &&
+                    d.totalBytes <= 0
             }
             else -> {
                 val running = live.filter { it.isRunning }
-                val pausedCount = live.size - running.size
+                val pausedCount = live.count { it.status == DownloadStatus.PAUSED }
+                val waitingCount = live.count { it.status == DownloadStatus.WAITING_NETWORK }
                 val totalDone = running.sumOf { it.downloadedBytes }
                 val totalSize = running.sumOf { it.totalBytes }
                 title = "${live.size} 个任务"
                 text = buildString {
                     if (running.isEmpty()) {
-                        append("全部已暂停")
+                        append(if (waitingCount > 0) "等待网络" else "全部已暂停")
                     } else {
                         append("${running.size} 个下载中")
                         if (totalSize > 0) append(" · ${(totalDone * 100 / totalSize).toInt()}%")
                         val speed = formatSpeed(running.sumOf { it.speedBytesPerSec })
                         if (speed.isNotEmpty()) append(" · ").append(speed)
+                    }
+                    if (waitingCount > 0 && running.isNotEmpty()) {
+                        append(" · ${waitingCount} 个等待网络")
                     }
                     if (pausedCount > 0) append(" · ${pausedCount} 个已暂停")
                 }
@@ -288,14 +298,23 @@ class DownloadService : Service() {
         private const val REQ_RESUME = 2
         private const val REQ_CANCEL = 3
 
-        fun start(context: Context) {
+        /**
+         * 拉起前台服务。
+         *
+         * 返回是否成功。Android 12+ 在应用处于后台时调用 `startForegroundService`
+         * 会抛 `ForegroundServiceStartNotAllowedException`（继承自
+         * `IllegalStateException`），典型场景是「等待网络」的任务在后台等到
+         * Wi-Fi 恢复、引擎自动续传。这里必须吞掉异常并如实返回失败：
+         * 让下载继续以普通优先级跑，也比整个进程崩掉强。
+         */
+        fun start(context: Context): Boolean = runCatching {
             val intent = Intent(context, DownloadService::class.java)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
             } else {
                 context.startService(intent)
             }
-        }
+        }.isSuccess
 
         fun stop(context: Context) {
             context.stopService(Intent(context, DownloadService::class.java))
@@ -354,14 +373,23 @@ class DownloadService : Service() {
 }
 
 /**
- * 服务需要「照看」的任务集合：进行中的（PENDING / RUNNING），以及已暂停但
- * 能从通知栏点「继续」恢复的内建下载。
+ * 服务需要「照看」的任务集合：进行中的（PENDING / RUNNING）、等待网络的
+ * （WAITING_NETWORK），以及已暂停但能从通知栏点「继续」恢复的内建下载。
  *
  * 这个集合是否为空，就是服务是否该退出的唯一判据 —— 引擎的
  * `stopServiceIfIdle()` 与服务的 `collectJob` 共用它，避免两处条件写歪。
+ *
+ * 「等待网络」必须算在内：它只是等网络恢复、之后会自动续传，通知栏里也
+ * 要能看到并点「继续」。否则任务一进入等待态，服务就会带着通知一起退出，
+ * 而引擎仍以为服务在跑（`serviceRunning == true`），回家连上 Wi-Fi 后
+ * 恢复下载却没有前台服务，后台随时被系统回收。
  *
  * 系统 DownloadManager 的暂停态不纳入：应用内没法恢复它，留着一个永远
  * 恢复不了的前台通知只会白耗电。
  */
 internal fun Collection<DownloadEntry>.liveTasks(): List<DownloadEntry> =
-    filter { it.isRunning || (it.status == DownloadStatus.PAUSED && it.supportsPauseControl) }
+    filter {
+        it.isRunning ||
+            it.status == DownloadStatus.WAITING_NETWORK ||
+            (it.status == DownloadStatus.PAUSED && it.supportsPauseControl)
+    }
