@@ -267,20 +267,68 @@ internal fun sanitizeDownloadName(name: String): String {
 }
 
 private fun truncateKeepingExtension(name: String): String {
-    if (name.length <= MAX_FILE_NAME_LENGTH) return name
+    if (utf8Length(name) <= MAX_FILE_NAME_BYTES) return name
     val dot = name.lastIndexOf('.')
     if (dot > 0) {
         val ext = name.substring(dot)
         if (ext.length in 2..17) {
-            val keep = (MAX_FILE_NAME_LENGTH - ext.length).coerceAtLeast(1)
-            return name.substring(0, dot).take(keep).trimEnd(' ', '.') + ext
+            val budget = (MAX_FILE_NAME_BYTES - utf8Length(ext)).coerceAtLeast(1)
+            val keep = name.substring(0, dot).takeUtf8Bytes(budget).trimEnd(' ', '.')
+            return keep.ifEmpty { DownloadFileName.DEFAULT_BASE } + ext
         }
     }
-    return name.take(MAX_FILE_NAME_LENGTH).trimEnd(' ', '.')
+    return name.takeUtf8Bytes(MAX_FILE_NAME_BYTES).trimEnd(' ', '.')
+}
+
+/**
+ * 按 UTF-8 **字节数**截断，且不切开代理对。
+ *
+ * 不能按字符数截：中文、emoji 每个字符占 3–4 字节，120 个汉字就是 360 字节，
+ * 超过 ext4/FAT 单段 255 字节的上限（MediaStore 的 DISPLAY_NAME 同样受底层
+ * 文件系统约束），落盘时抛 ENAMETOOLONG 或被静默改成别的名字。
+ */
+private fun String.takeUtf8Bytes(maxBytes: Int): String {
+    if (utf8Length(this) <= maxBytes) return this
+    val sb = StringBuilder()
+    var used = 0
+    var i = 0
+    while (i < length) {
+        val cp = Character.codePointAt(this, i)
+        val bytes = utf8LengthOf(cp)
+        if (used + bytes > maxBytes) break
+        sb.appendCodePoint(cp)
+        used += bytes
+        i += Character.charCount(cp)
+    }
+    return sb.toString()
+}
+
+/** 一个 code point 的 UTF-8 字节数（1–4）。 */
+private fun utf8LengthOf(cp: Int): Int = when {
+    cp < 0x80 -> 1
+    cp < 0x800 -> 2
+    cp < 0x10000 -> 3
+    else -> 4
+}
+
+private fun utf8Length(s: String): Int {
+    var bytes = 0
+    var i = 0
+    while (i < s.length) {
+        val cp = Character.codePointAt(s, i)
+        bytes += utf8LengthOf(cp)
+        i += Character.charCount(cp)
+    }
+    return bytes
 }
 
 /** 非法字符集合。`/` 与 `\` 在取末段时已处理，这里一并兜住。 */
 private val ILLEGAL_NAME_CHARS = "\\/:*?\"<>|".toSet()
 
-/** 单个文件名的长度上限。多数文件系统单段上限 255 字节，这里给 UTF-8 多字节留余量。 */
-internal const val MAX_FILE_NAME_LENGTH = 120
+/**
+ * 单个文件名的字节上限。
+ *
+ * 文件系统单段上限是 255 字节，这里取 200，给「名字 + 扩展名 + 目录/临时后缀」
+ * 留出余量。按 UTF-8 字节计，不是字符数。
+ */
+private const val MAX_FILE_NAME_BYTES = 200

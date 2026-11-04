@@ -336,13 +336,14 @@ object AdBlocker {
 
     /** 从 URL 里取 path（小写，保留开头斜杠，不含 query/fragment）。 */
     internal fun pathOf(url: String): String {
-        // 先取"authority + path"部分，再截 authority 之后的内容（含前导斜杠）。
+        // 先取"authority + path"部分：query/fragment 可能含 '/'（常见于
+        // 跳转服务与图片代理，如 `?u=https://x/ads/1.png`），必须先截掉，
+        // 否则 authority 之后的第一个 '/' 会落在 query 里，把 query 当 path。
         val afterScheme = url.substringAfter("://", url)
-        // 找到第一个 '/'，它就是 path 的起点（authority 结束处）。
-        val slash = afterScheme.indexOf('/')
-        val afterHost = if (slash >= 0) afterScheme.substring(slash) else ""
-        val cut = afterHost.indexOfFirst { it == '?' || it == '#' }
-        val path = if (cut >= 0) afterHost.substring(0, cut) else afterHost
-        return path.lowercase()
+        val cut = afterScheme.indexOfFirst { it == '?' || it == '#' }
+        val authorityAndPath = if (cut >= 0) afterScheme.substring(0, cut) else afterScheme
+        // 第一个 '/' 是 path 的起点（authority 结束处）；没有则视为空 path。
+        val slash = authorityAndPath.indexOf('/')
+        return if (slash >= 0) authorityAndPath.substring(slash).lowercase() else ""
     }
 }

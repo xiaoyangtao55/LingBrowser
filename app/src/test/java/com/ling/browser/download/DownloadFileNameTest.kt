@@ -162,4 +162,42 @@ class DownloadFileNameTest {
         assertFalse(DownloadFileName.hasUsableExtension("trailing."))
         assertFalse(DownloadFileName.hasUsableExtension("a.中文"))
     }
+
+    // ---------------------------------------------------------- 长度上限
+
+    /**
+     * 截断按 UTF-8 字节数而不是字符数。
+     *
+     * 120 个汉字是 360 字节，超过文件系统单段 255 字节上限；旧实现按
+     * `length` 截，截完仍然超限，落盘时 ENAMETOOLONG 或被静默改名。
+     */
+    @Test
+    fun `超长中文名按字节截断且保留后缀`() {
+        val out = sanitizeDownloadName("中".repeat(200) + ".pdf")
+        val bytes = out.toByteArray(Charsets.UTF_8).size
+        assertTrue("UTF-8 字节数应不超过上限，实际 $bytes：$out", bytes <= 200)
+        assertTrue("应保留扩展名: $out", out.endsWith(".pdf"))
+        assertTrue("主干不应被截空: $out", out.removeSuffix(".pdf").isNotEmpty())
+    }
+
+    @Test
+    fun `超长 emoji 名截断后不留下半个代理对`() {
+        val out = sanitizeDownloadName("😀".repeat(120) + ".jpg")
+        assertTrue("应保留扩展名: $out", out.endsWith(".jpg"))
+        // 孤立的代理项会让 UTF-8 编码产生非法字节；逐个字节校验更直接
+        val bytes = out.toByteArray(Charsets.UTF_8).size
+        assertTrue("UTF-8 字节数应不超过上限: $bytes", bytes <= 200)
+        // Java 的 UTF-8 编码器遇到孤立代理项会输出 '?'，据此反查
+        assertFalse("不应包含孤立代理项: $out", out.contains('?'))
+    }
+
+    private fun sanitizeDownloadName(raw: String): String =
+        // 通过 Content-Disposition 走完整链路：净化 + 截断
+        DownloadFileName.resolve(
+            "https://example.com/get",
+            null,
+            "attachment; filename=\"$raw\"",
+            stamp = stamp,
+            lookup = ::lookup,
+        )
 }

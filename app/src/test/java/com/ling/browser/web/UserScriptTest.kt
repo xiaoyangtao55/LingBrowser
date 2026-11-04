@@ -63,7 +63,7 @@ class UserScriptTest {
     }
 
     @Test
-    fun `match 的星号子域不包含裸域`() {
+    fun `match 的星号子域包含裸域`() {
         val script = parse(
             """
             // ==UserScript==
@@ -74,7 +74,8 @@ class UserScriptTest {
         )!!
         assertTrue(script.matches("https://a.example.com/page"))
         assertTrue(script.matches("https://a.b.example.com/page"))
-        assertFalse(script.matches("https://example.com/page"))
+        // Chrome / Tampermonkey 的 `*.example.com` 同样匹配裸域
+        assertTrue(script.matches("https://example.com/page"))
         assertFalse(script.matches("https://notexample.com/page"))
     }
 

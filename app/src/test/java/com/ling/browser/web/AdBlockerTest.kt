@@ -133,6 +133,24 @@ class AdBlockerTest {
         assertEquals("", AdBlocker.pathOf("https://example.com"))
     }
 
+    /**
+     * query 里的斜杠不能被当成 path。
+     *
+     * 没有 path 的 URL 带 `?u=https://x/ads/1.png` 这类参数时，旧实现会从
+     * authority 后的第一个 '/' 开始截，正好落在 query 里，于是把
+     * `//x/ads/1.png` 当作路径，按 `/ads/` 规则误拦子资源。
+     */
+    @Test
+    fun `pathOf 不把 query 里的斜杠当路径`() {
+        assertEquals("", AdBlocker.pathOf("https://cdn.example.com?u=https://x/ads/1.png"))
+        assertEquals("/download", AdBlocker.pathOf("https://a.com/download?file=/ad/x.zip"))
+        assertEquals("/p", AdBlocker.pathOf("https://a.com/p#/ads/x"))
+        assertFalse(
+            "query 里的 /ads/ 不应触发拦截",
+            AdBlocker.shouldBlock("https://cdn.example.com?u=https://x/ads/1.png", false, emptySet()),
+        )
+    }
+
     // --------------------------------------------- 自定义规则
 
     @Test

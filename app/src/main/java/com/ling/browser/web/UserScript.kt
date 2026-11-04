@@ -319,8 +319,9 @@ object UserScriptParser {
         val schemeSource = if (scheme == "*") "(?:https?)" else literal(scheme)
         val hostSource = when {
             host == "*" -> "[^/]+"
-            // `*.example.com`：至少一级子域，**不**包含裸域。
-            host.startsWith("*.") -> "[^/]+\\." + literal(host.substring(2))
+            // `*.example.com`：匹配裸域与任意级子域，与 Chrome / Tampermonkey 一致
+            // （MDN 明确写了 `*.mozilla.org` 也匹配 `mozilla.org`）。
+            host.startsWith("*.") -> "(?:[^/]+\\.)?" + literal(host.substring(2))
             else -> literal(host)
         }
         val source = "^$schemeSource://$hostSource${globSource(path)}(?:\\?.*)?$"

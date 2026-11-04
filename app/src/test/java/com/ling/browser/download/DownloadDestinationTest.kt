@@ -36,7 +36,8 @@ class DownloadDestinationTest {
     @Test
     fun `超长名字截断到上限且保留扩展名`() {
         val result = DownloadDestination.sanitizeFileName("a".repeat(500) + ".txt")
-        assertEquals(120, result.length)
+        // 上限按 UTF-8 字节计（200 字节），纯 ASCII 名字即 200 个字符
+        assertEquals(200, result.toByteArray(Charsets.UTF_8).size)
         assertTrue(result.endsWith(".txt"))
     }
 
