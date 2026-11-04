@@ -37,8 +37,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.ling.browser.data.db.DownloadEntry
 import com.ling.browser.data.db.DownloadStatus
-import com.ling.browser.data.repo.DownloadSource
-import com.ling.browser.data.repo.source
+import com.ling.browser.data.db.DownloadSource
 
 /**
  * 下载管理页。

@@ -88,6 +88,7 @@ class LingDatabase(context: Context) : SQLiteOpenHelper(
                 status TEXT NOT NULL,
                 local_path TEXT,
                 download_location TEXT NOT NULL DEFAULT 'APP_PRIVATE',
+                source TEXT NOT NULL DEFAULT 'BUILT_IN',
                 created_at INTEGER NOT NULL
             )
             """.trimIndent()
@@ -135,19 +136,41 @@ class LingDatabase(context: Context) : SQLiteOpenHelper(
                 )
             }
         }
+        if (oldVersion < 6) {
+            // 下载来源（内建引擎 / 系统 DownloadManager）。此前靠
+            // `download_id == id` 猜，两者都是小整数，撞号就会把系统下载
+            // 当成内建（暂停无效、取消不 remove、删错文件）。
+            //
+            // v1 的库在上面的 < 2 分支新建 downloads 表时已带这一列，
+            // 再 ALTER 会报 duplicate column，所以只对 v2..v5 生效。
+            if (oldVersion >= 2) {
+                // 老记录没有历史信息，只能按旧约定回填：download_id == id 即内建。
+                runCatching {
+                    db.execSQL(
+                        "ALTER TABLE downloads ADD COLUMN source TEXT NOT NULL DEFAULT 'BUILT_IN'"
+                    )
+                }
+                runCatching {
+                    db.execSQL(
+                        "UPDATE downloads SET source = 'SYSTEM' WHERE download_id != id"
+                    )
+                }
+            }
+        }
     }
 
     companion object {
         const val DB_NAME = "ling.db"
 
         /**
+         * 6：downloads 增加 source 列（区分内建引擎与系统 DownloadManager）。
          * 5：history 增加 favicon 列（历史记录图标）。
          * 4：downloads 增加 download_location 列（下载保存位置）。
          * 3：bookmarks 增加 favicon 列（书签图标）。
          * 2：新增 downloads 表。
          * 1：初版（bookmarks / history / tabs）。
          */
-        const val VERSION = 5
+        const val VERSION = 6
     }
 }
 
@@ -208,6 +231,14 @@ internal fun Cursor.toDownload(): DownloadEntry = DownloadEntry(
                 ?: DownloadLocation.APP_PRIVATE
         } else DownloadLocation.APP_PRIVATE
     },
+    // 列可能不存在（老库尚未迁移完成）：此时按内建引擎处理，与 v5 及更早的
+    // 默认行为一致。迁移会按 download_id == id 回填历史系统条目。
+    source = getColumnIndex("source").let {
+        if (it >= 0 && !isNull(it)) {
+            DownloadSource.entries.firstOrNull { s -> s.name == getString(it) }
+                ?: DownloadSource.BUILT_IN
+        } else DownloadSource.BUILT_IN
+    },
     createdAt = getLong(getColumnIndexOrThrow("created_at")),
 )
 
@@ -221,6 +252,7 @@ internal fun downloadValues(
     status: DownloadStatus,
     localPath: String?,
     downloadLocation: DownloadLocation,
+    source: DownloadSource = DownloadSource.BUILT_IN,
     createdAt: Long,
 ) = ContentValues().apply {
     put("download_id", downloadId)
@@ -232,6 +264,7 @@ internal fun downloadValues(
     put("status", status.name)
     if (localPath == null) putNull("local_path") else put("local_path", localPath)
     put("download_location", downloadLocation.name)
+    put("source", source.name)
     put("created_at", createdAt)
 }
 

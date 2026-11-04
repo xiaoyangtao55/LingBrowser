@@ -1,6 +1,7 @@
 package com.ling.browser.download
 
 import com.ling.browser.data.db.DownloadEntry
+import com.ling.browser.data.db.DownloadSource
 import com.ling.browser.data.db.DownloadStatus
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -22,8 +23,8 @@ class LiveTasksTest {
         builtIn: Boolean = true,
     ) = DownloadEntry(
         id = id,
-        // downloadId == id 表示内建引擎来源（见 DownloadEntry.source 的约定）
         downloadId = if (builtIn) id else id + 1000,
+        source = if (builtIn) DownloadSource.BUILT_IN else DownloadSource.SYSTEM,
         fileName = "f$id",
         url = "https://e.com/f$id",
         status = status,

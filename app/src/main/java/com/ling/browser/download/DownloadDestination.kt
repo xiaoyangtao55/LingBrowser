@@ -47,10 +47,20 @@ object DownloadDestination {
         location: DownloadLocation,
         existingPath: String? = null,
     ): Target? {
-        // 续传优先复用已记录的 MediaStore URI —— 这是跨版本最可靠的续传定位方式，
-        // 绕开了「pending 条目查不到」和「SIZE 列滞后」两个坑。
+        // 续传优先复用已记录的 `content://` 落点。
+        //
+        // 但不是所有 content:// 都是 MediaStore：`GM_download({ saveAs: true })`
+        // 选定的 SAF 文档也长这样，且多半不是 Downloads 集合里的一员。
+        // 一律当 MediaStore 去 openFileDescriptor 会失败（或删错文档），
+        // 因此按 authority 区分：只有 Downloads 集合自己的 authority 才复用
+        // MediaStore 语义，其余交回 UriTarget（与首次写入同一路径）。
         if (existingPath != null && existingPath.startsWith(CONTENT_SCHEME)) {
-            return MediaStoreTarget(context, Uri.parse(existingPath))
+            val uri = Uri.parse(existingPath)
+            return if (uri.authority == MediaStore.AUTHORITY) {
+                MediaStoreTarget(context, uri)
+            } else {
+                UriTarget(context, uri)
+            }
         }
         // 所有落点都用同一个净化后的名字：`File(dir, name)` 一旦让 `../` 进来，
         // 就是任意路径写入（删旧文件时更糟，是任意路径删除）。

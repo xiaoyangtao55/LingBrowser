@@ -309,6 +309,12 @@ if re.search(r"if \(oldVersion (?:< 4|in 2\.\.3)\)", store) and \
 else:
     bad("缺少 download_location 的增量迁移")
 
+if re.search(r"if \(oldVersion < 6\)", store) and \
+        "ALTER TABLE downloads ADD COLUMN source" in store:
+    ok("6 之前的来源迁移已就位（downloads 增列 source）")
+else:
+    bad("缺少 source 的增量迁移")
+
 if re.search(r"favicon BLOB", store):
     ok("建表语句含 favicon BLOB")
 else:

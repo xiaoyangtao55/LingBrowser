@@ -43,6 +43,7 @@ import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 /**
@@ -135,7 +136,7 @@ class DownloadEngine(
      * 必须与用户主动暂停区分开：网络恢复后只续传这里面的任务，不能替用户
      * 「擅自继续」他手动停掉的那批。用户主动暂停/继续/删除时同步清理。
      */
-    private val autoPaused = mutableSetOf<Long>()
+    private val autoPaused: MutableSet<Long> = ConcurrentHashMap.newKeySet()
 
     /** 并发槽位：同时最多 [MAX_CONCURRENT_DOWNLOADS] 个任务真正在传输，其余排队。 */
     private val downloadSlots = Semaphore(MAX_CONCURRENT_DOWNLOADS)
@@ -146,7 +147,7 @@ class DownloadEngine(
      * 网络限制是默认策略，不该变成硬墙：用户看到弹窗确认后，这个任务就不再受
      * 策略约束，直到它结束。只记内存 —— 进程重启后重新征求一次意见更稳妥。
      */
-    private val networkOverrides = mutableSetOf<Long>()
+    private val networkOverrides: MutableSet<Long> = ConcurrentHashMap.newKeySet()
 
     /**
      * 「因网络限制被暂停」的事件流，供 UI 弹窗征求用户意见。
@@ -182,7 +183,7 @@ class DownloadEngine(
      * 只存在内存里：进程被杀后恢复下载会丢掉这些头，与"下载任务本身也不重启"
      * 的行为一致；为它加一列数据库迁移不值得。
      */
-    private val taskHeaders = mutableMapOf<Long, Map<String, String>>()
+    private val taskHeaders = ConcurrentHashMap<Long, Map<String, String>>()
 
     /**
      * taskId -> 本次下载使用的 UA。
@@ -190,13 +191,13 @@ class DownloadEngine(
      * 与 [taskHeaders] 一样只存在内存：UA 只影响首字母请求，进程被杀后续传
      * 会退回默认 UA，对已开始的传输没有影响。
      */
-    private val taskUserAgents = mutableMapOf<Long, String>()
+    private val taskUserAgents = ConcurrentHashMap<Long, String>()
 
     /** taskId -> SAF 选定的目标 URI（`GM_download` 的 `saveAs`）。与请求头一样只存内存。 */
-    private val taskUris = mutableMapOf<Long, String>()
+    private val taskUris = ConcurrentHashMap<Long, String>()
 
     /** 需要在开写前删掉同名旧文件的任务（`conflictAction: 'overwrite'`）。 */
-    private val taskOverwrite = mutableSetOf<Long>()
+    private val taskOverwrite: MutableSet<Long> = ConcurrentHashMap.newKeySet()
 
     /**
      * 文件名只是按 URL/MIME 猜出来的任务。
@@ -204,7 +205,7 @@ class DownloadEngine(
      * 这类任务允许在拿到 `Content-Disposition` 后改名；脚本 `n`、`saveAs` 等
      * 明确指定的名字不在此列 —— 用户的选择优先于服务端。
      */
-    private val taskImplicitNames = mutableSetOf<Long>()
+    private val taskImplicitNames: MutableSet<Long> = ConcurrentHashMap.newKeySet()
 
     /**
      * taskId -> 上一次进度采样的快照，用于估算速度。
@@ -476,17 +477,11 @@ class DownloadEngine(
      */
     fun overwriteSystemEntries(entries: List<DownloadEntry>) {
         if (entries.isEmpty()) return
-        val map = entries.associateBy { it.id }
-        stateMutex.tryLock().also { locked ->
-            if (locked) {
-                try {
-                    tasks.update { it + map }
-                } finally {
-                    stateMutex.unlock()
-                }
-                publish()
-            }
-        }
+        // 直接做一次原子更新即可：`tasks.update` 本身是 CAS 重试，不需要
+        // 抢 stateMutex。原先用 tryLock，抢不到就**整批丢弃** —— 网络切换时
+        // 系统下载的状态回写正好撞上引擎自己的状态写，于是 UI 停在旧进度。
+        tasks.update { it + entries.associateBy { entry -> entry.id } }
+        publish()
     }
 
     // -------------------------------------------------------------- 下载核心
@@ -1333,13 +1328,13 @@ class DownloadEngine(
         // 的"网络不可用就等待"分支完全不生效，任务被三次重试耗尽后判成 FAILED。
         // 这就是"关了 Wi-Fi 没提示、最后直接错误"的根因。
         if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) return false
-        // 有默认网络但连不上外网（例如连了个需要认证的公共热点）也视为不可用。
-        if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) {
-            // 少数 ROM 不给 VALIDATED 位但有 INTERNET，按"可用"处理以免永久卡住：
-            // 只有在明确处于无网状态时才判否。
-            val hasAny = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-            if (!hasAny) return false
-        }
+        // 有默认网络但连不上外网（需要认证的公共热点、运营商劫持页、只连了
+        // 局域网的 Wi-Fi）都算不可用。缺 VALIDATED 位时继续下载只会反复失败，
+        // 不如停在"等待网络"里等真正的连通性回来。
+        //
+        // 极少数 ROM 从不给 VALIDATED 位但网络正常；若真遇到这类设备，
+        // 在这里按 Build.MANUFACTURER 加白名单，而不是整体放宽判断。
+        if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) return false
         return when (policy) {
             DownloadNetwork.ALL -> true
             DownloadNetwork.UNMETERED ->

@@ -6,6 +6,7 @@ import android.content.Context
 import android.net.Uri
 import android.os.Environment
 import com.ling.browser.data.db.DownloadEntry
+import com.ling.browser.data.db.DownloadSource
 import com.ling.browser.data.db.DownloadStatus
 import com.ling.browser.data.db.LingDatabase
 import com.ling.browser.data.db.downloadValues
@@ -190,6 +191,7 @@ class DownloadRepository(
                 status = DownloadStatus.PENDING,
                 localPath = null,
                 downloadLocation = location,
+                source = DownloadSource.SYSTEM,
                 createdAt = System.currentTimeMillis(),
             ),
             android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE,
@@ -281,29 +283,6 @@ class DownloadRepository(
 }
 
 /**
- * 一条下载记录的来源后端。
- *
- * 内建引擎的 downloadId 等于表主键 id（>0），系统 DownloadManager 的 ID
- * 是系统分配的长整型——两者值域重叠，无法仅凭 ID 区分。
- *
- * 因此用 [DownloadEntry.localPath] 的形式来推断：
- *  - 系统下载器完成后会返回 `file://` 或 `content://`  URI，去掉前缀后是绝对路径；
- *  - 内建引擎私有目录也是绝对路径；
- *  两者无法靠路径区分。
- *
- * 更可靠的方式：在 downloads 表加一个 source 列。但为了不做数据库迁移，
- * 这里用一个约定——**系统下载器的 downloadId 是系统返回的原始 ID，
- * 内建引擎的 downloadId 等于主键 id**。由于引擎插入时用
- * `UPDATE downloads SET download_id = id`，而系统下载器插入时用系统返回的 ID，
- * 可以用「download_id == id」判断是否为内建来源。
- *
- * ⚠️ 这个约定要求内建引擎的 downloadId 始终等于主键 id（见
- * [DownloadEngine.insertTask]）。如果将来改了这一点，要同步更新这里的判定。
- */
-val DownloadEntry.source: DownloadSource
-    get() = if (downloadId == id) DownloadSource.BUILT_IN else DownloadSource.SYSTEM
-
-/**
  * 该条目是否支持应用内的暂停 / 继续。
  *
  * 只有内建引擎有这条能力；系统 DownloadManager 应用内无法暂停，通知栏上的
@@ -311,5 +290,3 @@ val DownloadEntry.source: DownloadSource
  */
 val DownloadEntry.supportsPauseControl: Boolean
     get() = source == DownloadSource.BUILT_IN
-
-enum class DownloadSource { BUILT_IN, SYSTEM }

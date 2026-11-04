@@ -2,6 +2,9 @@ package com.ling.browser.data.db
 
 import com.ling.browser.data.prefs.DownloadLocation
 
+/** 下载来源：内建引擎 / 系统 DownloadManager。 */
+enum class DownloadSource { BUILT_IN, SYSTEM }
+
 /** 书签。 */
 data class Bookmark(
     val id: Long = 0,
@@ -133,6 +136,14 @@ data class DownloadEntry(
     val localPath: String? = null,
     /** 下载保存位置，决定文件落在应用私有目录还是公共下载目录。 */
     val downloadLocation: DownloadLocation = DownloadLocation.APP_PRIVATE,
+    /**
+     * 下载来源。
+     *
+     * 必须落库：系统 DownloadManager 返回的 ID 与本地主键都是小整数，
+     * 撞号时靠 `download_id == id` 猜会把系统下载当成内建条目
+     * （暂停无效、取消只删记录、移除时删错文件）。
+     */
+    val source: DownloadSource = DownloadSource.BUILT_IN,
     val createdAt: Long = System.currentTimeMillis(),
     /**
      * 瞬时下载速度（字节/秒）。
