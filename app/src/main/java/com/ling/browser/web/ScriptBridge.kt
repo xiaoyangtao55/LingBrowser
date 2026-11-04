@@ -1,6 +1,5 @@
 package com.ling.browser.web
 
-import androidx.webkit.ScriptHandler
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -94,37 +93,73 @@ internal class ScriptBridge(private val host: ScriptBridgeHost) {
      */
     fun registerDocumentStart(tabId: String, wv: LingWebView) {
         val ses = host.session(tabId)
-        ses.scriptHandlers.forEach { handler -> runCatching { handler.remove() } }
-        ses.scriptHandlers.clear()
-        if (!documentStartSupported) return
-
-        val handlers = mutableListOf<ScriptHandler>()
-        // 浏览器级"新标签"桥：与用户脚本无关，每个 WebView 都要挂。
-        runCatching {
-            handlers += WebViewCompat.addDocumentStartJavaScript(
-                wv,
-                TAB_LINK_JS,
-                setOf("*"),
-            )
-        }
-        if (scripts.isEmpty() || host.isIncognito(tabId)) {
-            if (handlers.isNotEmpty()) ses.scriptHandlers.addAll(handlers)
+        if (!documentStartSupported) {
+            clearHandlers(ses)
             return
         }
 
-        for (entry in scripts) {
-            if (entry.script.runAt != ScriptRunAt.START) continue
-            val origins = entry.script.allowedOrigins
-            if (origins.isEmpty()) continue
+        val usable = if (host.isIncognito(tabId)) {
+            emptyList()
+        } else {
+            scripts.filter { it.script.runAt == ScriptRunAt.START && it.script.allowedOrigins.isNotEmpty() }
+        }
+        // 脚本被停用 / 删除 / 改成 END：先摘掉它对应的旧句柄。
+        val wantedIds = usable.mapTo(HashSet()) { it.id }
+        ses.scriptHandlers.keys
+            .filter { it != TAB_LINK_KEY && it !in wantedIds }
+            .forEach { removeHandler(ses, it) }
+
+        // 只重挂内容真的变了的脚本。GM_setValue 会重新发布 enabledScripts，
+        // 若每次都把全部句柄摘掉重挂，就成了每个值写入一串主线程 IPC；
+        // 按签名比对后，只有真正读那个键的脚本会受影响。
+        for (entry in usable) {
+            val signature = entrySignature(entry)
+            if (ses.scriptHandlers.containsKey(entry.id) && ses.scriptSignatures[entry.id] == signature) {
+                continue
+            }
+            removeHandler(ses, entry.id)
             runCatching {
-                handlers += WebViewCompat.addDocumentStartJavaScript(
+                ses.scriptHandlers[entry.id] = WebViewCompat.addDocumentStartJavaScript(
                     wv,
                     scriptWrapper(entry.script, entry.id, entry.valuesJson, entry.requireCode, entry.resourcesJson),
-                    origins,
+                    entry.script.allowedOrigins,
                 )
+                ses.scriptSignatures[entry.id] = signature
             }
         }
-        if (handlers.isNotEmpty()) ses.scriptHandlers.addAll(handlers)
+
+        // 浏览器级"新标签"桥：与用户脚本无关，每个 WebView 都要挂。
+        if (ses.scriptHandlers[TAB_LINK_KEY] == null) {
+            runCatching {
+                ses.scriptHandlers[TAB_LINK_KEY] =
+                    WebViewCompat.addDocumentStartJavaScript(wv, TAB_LINK_JS, setOf("*"))
+            }
+        }
+    }
+
+    /**
+     * 注册签名：影响注入内容的全部输入。
+     *
+     * 用哈希而不是原字符串，避免给每个脚本常驻一份几 KB 的代码副本。
+     * 撞车概率在 32 位哈希下可以忽略，且即便撞车也只是"该重挂的没重挂"，
+     * 下次任何字段变化就会自愈。
+     */
+    private fun entrySignature(entry: EnabledUserScript): String = buildString {
+        append(entry.script.hashCode()).append('|')
+        append(entry.valuesJson.hashCode()).append('|')
+        append(entry.requireCode.hashCode()).append('|')
+        append(entry.resourcesJson.hashCode())
+    }
+
+    private fun removeHandler(ses: TabSession, key: String) {
+        runCatching { ses.scriptHandlers.remove(key)?.remove() }
+        ses.scriptSignatures.remove(key)
+    }
+
+    private fun clearHandlers(ses: TabSession) {
+        ses.scriptHandlers.values.forEach { handler -> runCatching { handler.remove() } }
+        ses.scriptHandlers.clear()
+        ses.scriptSignatures.clear()
     }
 
     /**
@@ -194,16 +229,13 @@ internal class ScriptBridge(private val host: ScriptBridgeHost) {
      */
     fun releaseRendererHandles(tabId: String) {
         val ses = host.findSession(tabId) ?: return
-        ses.scriptHandlers.forEach { handler -> runCatching { handler.remove() } }
-        ses.scriptHandlers.clear()
+        clearHandlers(ses)
         ses.injectedScripts.clear()
     }
 
     /** 退出时摘掉所有 document-start 句柄（随后宿主整份丢弃 session）。 */
     fun releaseAllHandlers() {
-        host.allSessions.forEach { ses ->
-            ses.scriptHandlers.forEach { handler -> runCatching { handler.remove() } }
-        }
+        host.allSessions.forEach { ses -> clearHandlers(ses) }
     }
 
     // ---------------------------------------------------------------- 脚本菜单 / 跨页值同步
@@ -333,6 +365,9 @@ internal class ScriptBridge(private val host: ScriptBridgeHost) {
     }
 
     private companion object {
+        /** 浏览器级新标签桥在 [TabSession.scriptHandlers] 里的固定键。 */
+        private const val TAB_LINK_KEY = "__tablink"
+
         /**
          * 页面里拦截 `target="_blank"` 点击的脚本。
          *

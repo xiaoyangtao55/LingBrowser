@@ -108,8 +108,17 @@ internal class TabSession(
      */
     val tabId: String,
 ) {
-    /** document-start 的注册句柄；脚本变更或实例重建时要先摘掉旧的。 */
-    val scriptHandlers = mutableListOf<ScriptHandler>()
+    /**
+     * document-start 的注册句柄。
+     *
+     * 键 = 脚本 id（浏览器级新标签桥用固定键 [ScriptBridge.TAB_LINK_KEY]）。
+     * 用映射而不是列表是为了在 `GM_setValue` 触发重注册时**只动变了的那个脚本**，
+     * 不必把全部句柄摘掉重挂（那是一串主线程 IPC）。
+     */
+    val scriptHandlers = LinkedHashMap<String, ScriptHandler>()
+
+    /** 每个注册键对应的签名；签名一致的句柄可以直接复用。 */
+    val scriptSignatures = HashMap<String, String>()
 
     /** 本页已注入过的 "脚本|时机|URL"，防止同一页重复执行。 */
     val injectedScripts = mutableSetOf<String>()
@@ -802,6 +811,9 @@ class WebTabManager(private val context: Context) {
             wv.loadUrl("about:blank")
             wv.destroy()
         }
+        // 回收正文 / 证书放行等附属簿记，**必须在 sessions.remove 之前**：
+        // recycleTab 是按 tabId 取 session 的，先移除就成了空转。
+        recycleTab(closing)
         // 该标签的附属簿记随标签一起丢弃：脚本句柄跟着 WebView 已销毁，
         // 注入记录留着只会让同名 tabId 复用时误判"这页已经跑过"。
         sessions.remove(id)
@@ -811,11 +823,6 @@ class WebTabManager(private val context: Context) {
         // 该标签的待裁决 Safe Browsing 与控制台记录同样随标签一起清掉。
         safePrompts.cancelFor(id)
         clearConsoleErrors(id)
-
-        // 回收 favicon 的像素内存。必须在移出列表后立刻做：
-        // Bitmap 的像素是非托管内存，GC 只收得回 Java 对象壳，
-        // 不等 recycle 就可能攒到 OOM。
-        recycleTab(closing)
 
         if (remaining.isEmpty()) {
             _tabs.value = emptyList()
@@ -830,15 +837,14 @@ class WebTabManager(private val context: Context) {
     }
 
     /**
-     * 释放标签持有的图像资源。
+     * 释放标签持有的附属资源。
      *
-     * 用 isRecycled 守卫：同一个 Bitmap 可能因为
-     * `_tabs.update { it.copy(...) }` 被多个 TabState **共享**
-     * （copy 不会复制 Bitmap，只复制引用），重复 recycle 会抛
-     * IllegalStateException 或让其它仍在显示的标签变成空白。
+     * 不 recycle favicon：Chromium 的图标缓存可能把**同一个 Bitmap 实例**
+     * 交给同一站点的多个 WebView（见 [applyFavicon] 的 `===` 判断），
+     * 回收其中一个会让其它仍在展示的标签变成空白甚至抛异常。
+     * favicon 只有几十 KB 量级，交给 GC 回收对象壳即可。
      */
     private fun recycleTab(tab: TabState?) {
-        tab?.favicon?.takeIf { !it.isRecycled }?.recycle()
         // 一并丢掉缓存的正文，否则关掉的标签会一直把它压在内存里
         tab?.let { sessions[it.id]?.readerContent = null }
         // 证书放行白名单同样随手清掉：逃生口不该比标签活得久
@@ -865,11 +871,10 @@ class WebTabManager(private val context: Context) {
         if (icon == null || icon.isRecycled) return
         updateTab(id) { tab ->
             // 已经就是同一个对象就什么都不做：
-            // 两个回调经常对同一张图各触发一次，不拦会导致
-            // 「先 recycle 掉自己、再把自己存回去」的自毁行为。
+            // 两个回调经常对同一张图各触发一次。
             if (tab.favicon === icon) return@updateTab tab
-            // 换新图前回收旧的，否则反复导航会持续堆积像素内存
-            tab.favicon?.takeIf { !it.isRecycled }?.recycle()
+            // 不 recycle 旧图：Chromium 可能把同一实例分给同站点的其它标签，
+            // 回收会让那些标签的图标变空白。交给 GC 即可（favicon 很小）。
             tab.copy(favicon = icon)
         }
     }
@@ -2453,11 +2458,8 @@ class WebTabManager(private val context: Context) {
      * ViewModel.onCleared 两处都调也不会出事。
      */
     fun destroyAll() {
-        if (webViews.isEmpty()) {
-            // 已经释放过：后面的状态清理同样不必重复（会重复 recycle favicon）。
-            return
-        }
-        // ⚠️ 顺序与 enforceCacheLimit 一致：先摘句柄，再 destroy()。
+        // 不能因为 webViews 为空就早退：渲染进程恢复失败时会出现"标签还在、
+        // 实例已没"的状态，此时 _tabs / sessions 里的簿记仍需清理。
         // 句柄绑的是 WebView 实例，实例销毁后它就成了失效引用 ——
         // 之后任何一次 registerDocumentStart 去 remove() 都会在 Chromium 内部
         // 空指针崩溃（见 enforceCacheLimit 里那段说明）。
@@ -2468,8 +2470,6 @@ class WebTabManager(private val context: Context) {
             it.destroy()
         }
         webViews.clear()
-        // 连同 favicon 一起回收：Activity 销毁后这些像素再没人用，
-        // 留着只会拖到下次 GC 周期，期间占用着可能几十 MB。
         _tabs.value.forEach { recycleTab(it) }
         _tabs.value = emptyList()
         _activeId.value = ""

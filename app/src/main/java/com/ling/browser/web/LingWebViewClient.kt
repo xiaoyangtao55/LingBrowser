@@ -229,7 +229,7 @@ class LingWebViewClient(
             // 计数点选在这里：只有真正拦下的请求才 +1，放行的不计，
             // 因此和用户看到的"挡掉多少"完全一致。
             onAdBlocked()
-            return WebResourceResponse("text/plain", "utf-8", EMPTY_STREAM)
+            return WebResourceResponse("text/plain", "utf-8", emptyStream())
         }
         return null
     }
@@ -473,8 +473,13 @@ class LingWebViewClient(
     }
 
     companion object {
-        /** 拦截广告时返回的空输入流（空响应体）。 */
-        private val EMPTY_STREAM = ByteArrayInputStream(ByteArray(0))
+        /**
+         * 拦截广告时返回的空输入流（空响应体）。
+         *
+         * 每次新建而不是复用同一个实例：多个并发请求共享一个 InputStream
+         * 是脆弱写法（虽然 ByteArrayInputStream.close() 是空操作、长度又为 0）。
+         */
+        private fun emptyStream() = ByteArrayInputStream(ByteArray(0))
     }
 }
 

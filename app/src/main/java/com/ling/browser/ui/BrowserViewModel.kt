@@ -384,9 +384,9 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
                 pendingExternalUrl = null
                 openExternalUrl(pending)
             }
-            // 快照只用于本次恢复。读完立刻清掉，避免用户"清除数据"后
-            // 又被遗留的快照复活 —— 每次真正保存时会重新写入。
-            container.session.clear()
+            // 快照只用于本次恢复，但**不在这里清**：读完到下一次 onStop 之间
+            // 如果进程被系统杀掉，提前清空会让标签全丢。交给下一次
+            // persistSession 覆盖写；用户手动"清除数据"走 clearSession（#17）。
         }
     }
 
