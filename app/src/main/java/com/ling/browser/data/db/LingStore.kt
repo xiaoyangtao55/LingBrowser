@@ -66,6 +66,7 @@ class LingDatabase(context: Context) : SQLiteOpenHelper(
         )
 
         createDownloadsTable(db)
+        createCredentialsTable(db)
     }
 
     /**
@@ -96,6 +97,40 @@ class LingDatabase(context: Context) : SQLiteOpenHelper(
         db.execSQL(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_download_download_id " +
                 "ON downloads(download_id)"
+        )
+    }
+
+    /**
+     * 密码库表。
+     *
+     * 只存密文：`password_cipher` / `password_iv` 是 AES-GCM 的输出，
+     * 密钥在 Android Keystore 里，**明文永远不落盘**。
+     *
+     * `site` 存 eTLD+1（见 `SiteMatcher`），不是完整 URL：同一站点的
+     * `www` / `login` 子域共用一条记录，也避免把路径里的敏感参数写进库。
+     *
+     * (site, username) 建唯一索引：捕获到同一站点的同一用户名时走更新，
+     * 而不是不断插入重复条目。[username] 允许空串（只有密码框的站点）。
+     */
+    private fun createCredentialsTable(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS credentials (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                site TEXT NOT NULL,
+                username TEXT NOT NULL DEFAULT '',
+                password_cipher BLOB NOT NULL,
+                password_iv BLOB NOT NULL,
+                title TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                last_used_at INTEGER
+            )
+            """.trimIndent()
+        )
+        db.execSQL(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_credential_site_username " +
+                "ON credentials(site, username)"
         )
     }
 
@@ -157,12 +192,17 @@ class LingDatabase(context: Context) : SQLiteOpenHelper(
                 }
             }
         }
+        if (oldVersion < 7) {
+            // 新增密码库表。老用户升级时库是空表，不影响既有书签/历史/下载。
+            createCredentialsTable(db)
+        }
     }
 
     companion object {
         const val DB_NAME = "ling.db"
 
         /**
+         * 7：新增 credentials 表（密码库，密码只存 Keystore 加密后的密文）。
          * 6：downloads 增加 source 列（区分内建引擎与系统 DownloadManager）。
          * 5：history 增加 favicon 列（历史记录图标）。
          * 4：downloads 增加 download_location 列（下载保存位置）。
@@ -170,7 +210,7 @@ class LingDatabase(context: Context) : SQLiteOpenHelper(
          * 2：新增 downloads 表。
          * 1：初版（bookmarks / history / tabs）。
          */
-        const val VERSION = 6
+        const val VERSION = 7
     }
 }
 
@@ -283,3 +323,38 @@ internal fun historyValues(title: String, url: String, visitedAt: Long, visitCou
         put("visited_at", visitedAt)
         put("visit_count", visitCount)
     }
+
+/**
+ * 只映射元信息，**不读密码列**：密文只在需要解密时单独查询，
+ * 避免列表刷新把整库密文都拖进内存。
+ */
+internal fun Cursor.toPasswordEntry(): PasswordEntry = PasswordEntry(
+    id = getLong(getColumnIndexOrThrow("id")),
+    site = getString(getColumnIndexOrThrow("site")),
+    username = getString(getColumnIndexOrThrow("username")),
+    title = getColumnIndex("title").let {
+        if (it >= 0 && !isNull(it)) getString(it) else null
+    },
+    createdAt = getLong(getColumnIndexOrThrow("created_at")),
+    updatedAt = getLong(getColumnIndexOrThrow("updated_at")),
+    lastUsedAt = getColumnIndex("last_used_at").let {
+        if (it >= 0 && !isNull(it)) getLong(it) else null
+    },
+)
+
+internal fun credentialValues(
+    site: String,
+    username: String,
+    ciphertext: ByteArray,
+    iv: ByteArray,
+    title: String?,
+    now: Long,
+) = ContentValues().apply {
+    put("site", site)
+    put("username", username)
+    put("password_cipher", ciphertext)
+    put("password_iv", iv)
+    if (title == null) putNull("title") else put("title", title)
+    put("created_at", now)
+    put("updated_at", now)
+}

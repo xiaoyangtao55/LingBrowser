@@ -90,6 +90,32 @@ data class HistoryEntry(
     }
 }
 
+/**
+ * 密码库里的一条记录。
+ *
+ * **刻意不含明文密码**：密码只有加密后的密文落库，且只在
+ * [com.ling.browser.data.repo.PasswordRepository] 里按需解密。
+ * 列表、搜索、设置页拿到的都是这份元信息，避免明文跟着列表快照到处流转。
+ */
+data class PasswordEntry(
+    val id: Long = 0,
+    /**
+     * 站点标识，eTLD+1（如 `example.com`）。
+     *
+     * 不是完整 URL，也不含端口/路径：`www.example.com` 与
+     * `login.example.com` 属于同一站点，共用一个标识。
+     */
+    val site: String,
+    /** 用户名，可能为空（有些站点只有密码框）。 */
+    val username: String = "",
+    /** 保存时页面的标题，仅用于展示。 */
+    val title: String? = null,
+    val createdAt: Long = 0,
+    val updatedAt: Long = 0,
+    /** 上次用于填充的时间；从未用过为 null。 */
+    val lastUsedAt: Long? = null,
+)
+
 /** 会话恢复用的标签页快照。 */
 data class TabSnapshot(
     val id: String,

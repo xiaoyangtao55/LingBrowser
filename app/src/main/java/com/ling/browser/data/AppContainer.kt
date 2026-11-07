@@ -8,8 +8,10 @@ import com.ling.browser.data.repo.BlockListRepository
 import com.ling.browser.data.repo.BookmarkRepository
 import com.ling.browser.data.repo.DownloadRepository
 import com.ling.browser.data.repo.HistoryRepository
+import com.ling.browser.data.repo.PasswordRepository
 import com.ling.browser.data.repo.SessionRepository
 import com.ling.browser.data.repo.UserScriptRepository
+import com.ling.browser.data.security.KeystorePasswordCipher
 import com.ling.browser.download.DownloadEngine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -117,4 +119,13 @@ class AppContainer(context: Context) {
      * 快照（含 GM 值初值），供 WebView 在 document-start / 页面就绪时注入。
      */
     val userScripts: UserScriptRepository = UserScriptRepository(appContext)
+
+    /**
+     * 本地密码库。
+     *
+     * 密码用 Android Keystore 里的不可导出密钥做 AES-GCM 加密后落库，
+     * 明文不出内存。KEK 按产品取舍不绑定系统认证，解锁门禁由 UI 层负责。
+     */
+    val passwords: PasswordRepository =
+        PasswordRepository(database, KeystorePasswordCipher())
 }
