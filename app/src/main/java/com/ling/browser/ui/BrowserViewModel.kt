@@ -10,6 +10,7 @@ import com.ling.browser.LingApplication
 import com.ling.browser.data.db.Bookmark
 import com.ling.browser.data.db.DownloadEntry
 import com.ling.browser.data.db.HistoryEntry
+import com.ling.browser.data.db.PasswordEntry
 import com.ling.browser.data.repo.BlockSubscription
 import com.ling.browser.data.repo.ImportResult
 import com.ling.browser.data.repo.MAX_BACKUP_BYTES
@@ -94,6 +95,27 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
 
     val history: StateFlow<List<HistoryEntry>> = container.history.history
     val downloads: StateFlow<List<DownloadEntry>> = container.downloads.downloads
+
+    /** 本地密码库；Flow 里只有元信息，明文必须经 [decryptPassword] 按需解出。 */
+    val passwords: StateFlow<List<PasswordEntry>> = container.passwords.entries
+
+    suspend fun savePassword(
+        site: String,
+        username: String,
+        password: String,
+        title: String?,
+    ): Long? = container.passwords.save(site, username, password, title)
+
+    suspend fun updatePassword(
+        id: Long,
+        username: String,
+        password: String?,
+        title: String?,
+    ): Boolean = container.passwords.update(id, username, password, title)
+
+    suspend fun deletePassword(id: Long) = container.passwords.delete(id)
+
+    suspend fun decryptPassword(id: Long): String? = container.passwords.decrypt(id)
 
     /**
      * 广告拦截的订阅名单（见 [com.ling.browser.data.repo.BlockListRepository]）。

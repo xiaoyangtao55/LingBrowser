@@ -143,6 +143,9 @@ dependencies {
     implementation(libs.androidx.webkit)
     implementation(libs.androidx.swiperefresh)
 
+    // 密码库解锁：BiometricPrompt 在 API 23+ 上统一指纹/人脸与设备凭据回退
+    implementation(libs.androidx.biometric)
+
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)

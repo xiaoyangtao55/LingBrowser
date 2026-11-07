@@ -45,6 +45,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import androidx.core.view.WindowCompat
+import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
@@ -75,6 +76,7 @@ import com.ling.browser.ui.screens.SniffedResourcesScreen
 import com.ling.browser.ui.screens.BrowserScreen
 import com.ling.browser.ui.screens.DownloadsScreen
 import com.ling.browser.ui.screens.HistoryScreen
+import com.ling.browser.ui.screens.PasswordsScreen
 import com.ling.browser.ui.screens.UserScriptsScreen
 import com.ling.browser.ui.screens.SettingsScreen
 import com.ling.browser.ui.screens.AboutScreen
@@ -93,8 +95,12 @@ import com.ling.browser.web.AdBlocker
  *
  * 导航用一个简单的密封类 + 状态机实现 —— 极简浏览器只有 4 个二级页面，
  * 引入 Navigation Compose 反而增加体积和心智负担。
+ *
+ * 继承 [FragmentActivity] 而不是 [ComponentActivity]：密码库解锁用的
+ * `androidx.biometric.BiometricPrompt` 需要宿主是 FragmentActivity。
+ * FragmentActivity 本身也是 ComponentActivity，其它能力不受影响。
  */
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
 
     /**
      * 与 setContent 内部用的是**同一个** ViewModel 实例
@@ -542,6 +548,7 @@ private fun LingApp(viewModel: BrowserViewModel) {
     val bookmarkFolders by viewModel.bookmarkFolders.collectAsStateWithLifecycle()
     val history by viewModel.history.collectAsStateWithLifecycle()
     val downloads by viewModel.downloads.collectAsStateWithLifecycle()
+    val passwords by viewModel.passwords.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
 
     // 一次性提示（书签增删、阅读模式失败原因、不支持的链接…）。
@@ -839,7 +846,17 @@ private fun LingApp(viewModel: BrowserViewModel) {
                 )
 
                 Route.SettingsPrivacy -> PrivacySettingsScreen(
+                    onOpenPasswords = { push(Route.Passwords) },
                     onClearData = viewModel::clearBrowsingData,
+                    onBack = pop,
+                )
+
+                Route.Passwords -> PasswordsScreen(
+                    entries = passwords,
+                    onSave = viewModel::savePassword,
+                    onUpdate = viewModel::updatePassword,
+                    onDelete = viewModel::deletePassword,
+                    onDecrypt = viewModel::decryptPassword,
                     onBack = pop,
                 )
 
@@ -971,6 +988,7 @@ private sealed interface Route {
     data object SettingsDownload : Route
     data object SettingsPrivacy : Route
     data object SettingsBackup : Route
+    data object Passwords : Route
     data object About : Route
     data object AdBlockRules : Route
     data object AdBlockSubscriptions : Route

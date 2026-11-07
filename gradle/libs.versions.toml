@@ -14,6 +14,8 @@ activityCompose = "1.8.2"
 datastore = "1.1.1"
 # 下拉刷新
 swipeRefresh = "1.1.0"
+# 密码库解锁：生物识别 + 设备凭据回退
+biometric = "1.1.0"
 webkit = "1.12.1"
 junit = "4.13.2"
 coroutines = "1.9.0"
@@ -25,6 +27,7 @@ androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = 
 androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
 androidx-webkit = { group = "androidx.webkit", name = "webkit", version.ref = "webkit" }
 androidx-swiperefresh = { group = "androidx.swiperefreshlayout", name = "swiperefreshlayout", version.ref = "swipeRefresh" }
+androidx-biometric = { group = "androidx.biometric", name = "biometric", version.ref = "biometric" }
 
 androidx-lifecycle-runtime-ktx = { group = "androidx.lifecycle", name = "lifecycle-runtime-ktx", version.ref = "lifecycle" }
 androidx-lifecycle-runtime-compose = { group = "androidx.lifecycle", name = "lifecycle-runtime-compose", version.ref = "lifecycle" }

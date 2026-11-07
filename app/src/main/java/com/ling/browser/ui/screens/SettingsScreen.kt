@@ -172,6 +172,10 @@ private val settingsSearchIndex: List<SettingsSearchItem> = listOf(
 
     // ---- 隐私（弹窗里的四个勾选项一并映射到这一行，用户搜哪个都能命中）
     SettingsSearchItem(
+        "密码管理器", SettingsGroup.PRIVACY,
+        listOf("密码", "password", "凭据", "登录", "自动填充", "password manager"),
+    ),
+    SettingsSearchItem(
         "清除浏览数据", SettingsGroup.PRIVACY,
         listOf("清除数据", "清空", "历史记录", "cookie", "缓存", "cache", "标签页会话", "clean"),
     ),
@@ -1320,6 +1324,7 @@ fun DownloadSettingsScreen(
  */
 @Composable
 fun PrivacySettingsScreen(
+    onOpenPasswords: () -> Unit,
     onClearData: (history: Boolean, cookies: Boolean, cache: Boolean, session: Boolean) -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
@@ -1331,6 +1336,14 @@ fun PrivacySettingsScreen(
         onBack = onBack,
         modifier = modifier,
         content = {
+            item {
+                SettingRow(
+                    icon = LingIcons.Lock,
+                    title = "密码管理器",
+                    subtitle = "指纹或锁屏验证后查看、管理保存在本机的密码",
+                    onClick = onOpenPasswords,
+                )
+            }
             item {
                 SettingRow(
                     icon = LingIcons.DeleteSweep,
