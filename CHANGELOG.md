@@ -1,5 +1,31 @@
 # Changelog
 
+## [1.14.0](https://github.com/xiaoyangtao55/LingBrowser/compare/v1.13.0...v1.14.0) (2026-11-07)
+
+
+### Features
+
+* **passwords:** 密码库存储层与 Keystore 加密 ([49611bf](https://github.com/xiaoyangtao55/LingBrowser/commit/49611bf24ca04525f55a4f7df5d5c12f7c8be0ca))
+* **passwords:** 密码库解锁门禁与管理页 ([d2effd0](https://github.com/xiaoyangtao55/LingBrowser/commit/d2effd08b0fd719680c00696770de106220ee7f2))
+* **passwords:** 捕获登录表单并提示保存 ([729a8e4](https://github.com/xiaoyangtao55/LingBrowser/commit/729a8e4b3a0608b8567f5fa74cfb6495b27fdf9d))
+* **passwords:** 显式填充与加密导入导出 ([34d6d11](https://github.com/xiaoyangtao55/LingBrowser/commit/34d6d1121453f20ee2fa79472a22e7ac1809b5b2))
+* **ui:** 「页面错误」入口只在调试包显示 ([c44c6dd](https://github.com/xiaoyangtao55/LingBrowser/commit/c44c6dd4b0e1bb9c5f66eb88eea3af10a0a06bd9))
+
+
+### Bug Fixes
+
+* **download:** 来源落库、并发结构、SAF 续传与网络判定 ([2ff8cdc](https://github.com/xiaoyangtao55/LingBrowser/commit/2ff8cdcd9376260d44e586e6346415215cf4d8e9))
+* **download:** 等网络时保住前台服务，并补建 v1 库缺失的 downloads 表 ([ba09424](https://github.com/xiaoyangtao55/LingBrowser/commit/ba094245a864cea88f8ab54d44e40cac3cacbf93))
+* **search:** 搜索模板里的 % 不再被当成格式说明符 ([8b09cc5](https://github.com/xiaoyangtao55/LingBrowser/commit/8b09cc502bd325337fae2bc5cf42b55568d746df))
+* **web:** SPA 路由不再当作导航，GM 桥只收主框架消息 ([049847b](https://github.com/xiaoyangtao55/LingBrowser/commit/049847bfa3f6d8395247f27e5981f3dadcb775e3))
+* 文件名按字节截断、广告路径不吃 query、[@match](https://github.com/match) 裸域生效 ([3245510](https://github.com/xiaoyangtao55/LingBrowser/commit/32455101f88efb43e1dbf0dc5a9589628b0ddbcd))
+* 清理顺序、favicon 共享回收、会话快照与脚本注册开销 ([a3de165](https://github.com/xiaoyangtao55/LingBrowser/commit/a3de165964f08fd675a89f165ae73332fcb91f09))
+
+
+### Performance Improvements
+
+* 历史只保留最近 500 条、地址栏按需查书签、UI_HIDDEN 不砍实例 ([6d37c27](https://github.com/xiaoyangtao55/LingBrowser/commit/6d37c2747c99e9772ab298985121692e901e200a))
+
 ## [1.13.0](https://github.com/xiaoyangtao55/LingBrowser/compare/v1.12.0...v1.13.0) (2026-10-31)
 
 
