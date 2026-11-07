@@ -29,6 +29,7 @@ import android.widget.FrameLayout
 import androidx.webkit.ScriptHandler
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
+import org.json.JSONObject
 import com.ling.browser.data.db.TabSnapshot
 import com.ling.browser.data.prefs.LingSettings
 import com.ling.browser.data.prefs.NightMode
@@ -561,6 +562,34 @@ class WebTabManager(private val context: Context) {
             Unit
         }
         if (container != null) container.post(run) else run()
+    }
+
+    /**
+     * 把用户选中的账号填充到当前页面的登录表单。
+     *
+     * 只在主动选择并完成身份验证后调用，执行一次即结束、不常驻页面。
+     * 无痕标签在这里再兜一层：即使调用方漏判，也绝不触碰页面。
+     */
+    fun fillPassword(username: String, password: String, onResult: (Boolean) -> Unit) {
+        val id = _activeId.value
+        val tab = _tabs.value.firstOrNull { it.id == id } ?: run {
+            onResult(false)
+            return
+        }
+        if (tab.isIncognito) {
+            onResult(false)
+            return
+        }
+        val wv = webViews[id] ?: run {
+            onResult(false)
+            return
+        }
+        val payload = JSONObject().put("u", username).put("p", password).toString()
+        runCatching {
+            wv.evaluateJavascript(passwordFillScript(payload)) { value ->
+                onResult(value.trim() == "true")
+            }
+        }.onFailure { onResult(false) }
     }
 
     /** 应用设置；已存在的 WebView 立即生效。 */

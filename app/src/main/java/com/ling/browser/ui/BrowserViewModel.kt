@@ -24,6 +24,7 @@ import com.ling.browser.data.prefs.LingSettings
 import com.ling.browser.data.prefs.NightMode
 import com.ling.browser.data.prefs.ReaderFontSize
 import com.ling.browser.data.prefs.SearchEngine
+import com.ling.browser.data.security.SiteMatcher
 import com.ling.browser.data.repo.UserScriptEntry
 import com.ling.browser.data.repo.deriveFolders
 import com.ling.browser.data.repo.parseHistoryHtml
@@ -117,6 +118,69 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
     suspend fun deletePassword(id: Long) = container.passwords.delete(id)
 
     suspend fun decryptPassword(id: Long): String? = container.passwords.decrypt(id)
+
+    suspend fun markPasswordUsed(id: Long) = container.passwords.markUsed(id)
+
+    /**
+     * 加密导出到用户选定的文件。
+     *
+     * 口令只在本次调用内使用，不落盘、不进入任何状态；返回给 UI 的
+     * 只是一句结果文案。
+     */
+    suspend fun exportPasswordBackup(target: Uri, passphrase: CharArray): String {
+        val result = container.passwords.exportEncrypted(passphrase)
+            ?: return "导出失败，请重试"
+        val written = withContext(Dispatchers.IO) {
+            runCatching {
+                getApplication<Application>().contentResolver
+                    .openOutputStream(target)?.use { it.write(result.bytes) }
+                    ?: error("无法写入所选位置")
+            }.isSuccess
+        }
+        return when {
+            !written -> "导出失败，请换个位置重试"
+            result.skipped > 0 ->
+                "已导出 ${result.exported} 条密码，跳过 ${result.skipped} 条无法解密的记录"
+            else -> "已导出 ${result.exported} 条密码，请妥善保管备份口令"
+        }
+    }
+
+    /** 从选定的加密备份恢复；口令错误或文件损坏时返回提示文案。 */
+    suspend fun importPasswordBackup(source: Uri, passphrase: CharArray): String {
+        val bytes = withContext(Dispatchers.IO) { readBytesCapped(source) }
+            ?: return "读取失败：文件过大或无法读取"
+        val result = container.passwords.importEncrypted(bytes, passphrase)
+            ?: return "导入失败：口令错误或文件已损坏"
+        return when {
+            result.imported == 0 && result.updated == 0 && result.skipped == 0 -> "备份里没有密码"
+            result.skipped > 0 ->
+                "已导入 ${result.imported} 条，更新 ${result.updated} 条，跳过 ${result.skipped} 条"
+            else -> "已导入 ${result.imported} 条，更新 ${result.updated} 条"
+        }
+    }
+
+    /**
+     * 填充密码：无痕、非 HTTPS 一律拒绝，判断放在真正执行前，
+     * 不依赖 UI 层是否记得检查。
+     */
+    fun fillPassword(username: String, password: String) {
+        val tab = tabManager.activeTab
+        if (tab == null) {
+            showMessage("没有可填充的页面")
+            return
+        }
+        if (tab.isIncognito) {
+            showMessage("无痕模式下不会填充密码")
+            return
+        }
+        if (SiteMatcher.siteFromUrl(tab.url) == null) {
+            showMessage("仅支持 HTTPS 站点")
+            return
+        }
+        tabManager.fillPassword(username, password) { filled ->
+            showMessage(if (filled) "已填充密码" else "页面上没有找到密码框")
+        }
+    }
 
     /**
      * 登录表单捕获：页面提交后决定是否弹「保存密码？」。
@@ -819,6 +883,23 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
     }
+
+    /** 二进制版本的 [readTextCapped]：同样边读边数上限，不把巨型文件读进内存。 */
+    private fun readBytesCapped(source: Uri): ByteArray? = runCatching {
+        getApplication<Application>().contentResolver.openInputStream(source)?.use { input ->
+            val out = ByteArrayOutputStream()
+            val buffer = ByteArray(8192)
+            var total = 0
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                total += read
+                if (total > MAX_BACKUP_BYTES) return null
+                out.write(buffer, 0, read)
+            }
+            out.toByteArray()
+        }
+    }.getOrNull()
 
     /**
      * 读文件内容，**边读边数**上限。

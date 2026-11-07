@@ -6,6 +6,8 @@ import com.ling.browser.data.db.LingDatabase
 import com.ling.browser.data.db.PasswordEntry
 import com.ling.browser.data.db.credentialValues
 import com.ling.browser.data.db.toPasswordEntry
+import com.ling.browser.data.security.PasswordBackup
+import com.ling.browser.data.security.PasswordBackupEntry
 import com.ling.browser.data.security.PasswordCipher
 import com.ling.browser.data.security.SealedSecret
 import com.ling.browser.data.security.SiteMatcher
@@ -14,6 +16,20 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
+
+/** 加密导出的结果：[skipped] 是解密失败、被跳过的条数。 */
+data class PasswordExportResult(
+    val bytes: ByteArray,
+    val exported: Int,
+    val skipped: Int,
+)
+
+/** 导入结果：新增 / 覆盖更新 / 跳过的条数。 */
+data class PasswordImportResult(
+    val imported: Int,
+    val updated: Int,
+    val skipped: Int,
+)
 
 /** 捕获到的登录信息与库里已有记录的关系。 */
 enum class PasswordMatch {
@@ -178,6 +194,100 @@ class PasswordRepository(
             val existing = runCatching { cipher.decrypt(sealed) }.getOrNull()
             if (existing == password) PasswordMatch.SAME else PasswordMatch.DIFFERENT
         }
+
+    // ------------------------------------------------------------ 加密导入导出
+
+    /**
+     * 用用户口令重新加密整个密码库。
+     *
+     * 不能直接导出 `ling.db`：库里的密文绑定本机 Keystore，换设备解不开。
+     * 这里逐条解密后用 [PasswordBackup] 的口令派生密钥重新加密。
+     * 个别记录解密失败时跳过并在结果里报告，不因一条坏数据拒绝导出全部。
+     */
+    suspend fun exportEncrypted(passphrase: CharArray): PasswordExportResult? =
+        withContext(Dispatchers.IO) {
+            if (passphrase.size < PasswordBackup.MIN_PASSPHRASE_LENGTH) return@withContext null
+            val rows = runCatching {
+                db.readableDatabase.rawQuery(
+                    "SELECT * FROM credentials " +
+                        "ORDER BY site COLLATE NOCASE ASC, username COLLATE NOCASE ASC",
+                    null,
+                ).use { c ->
+                    buildList {
+                        while (c.moveToNext()) {
+                            val meta = c.toPasswordEntry()
+                            add(
+                                meta to SealedSecret(
+                                    ciphertext = c.getBlob(
+                                        c.getColumnIndexOrThrow("password_cipher"),
+                                    ),
+                                    iv = c.getBlob(c.getColumnIndexOrThrow("password_iv")),
+                                ),
+                            )
+                        }
+                    }
+                }
+            }.getOrNull() ?: return@withContext null
+
+            var skipped = 0
+            val entries = ArrayList<PasswordBackupEntry>(rows.size)
+            for ((meta, sealed) in rows) {
+                val plain = runCatching { cipher.decrypt(sealed) }.getOrNull()
+                if (plain == null) {
+                    skipped++
+                    continue
+                }
+                entries += PasswordBackupEntry(
+                    site = meta.site,
+                    username = meta.username,
+                    password = plain,
+                    title = meta.title,
+                    createdAt = meta.createdAt,
+                    updatedAt = meta.updatedAt,
+                )
+            }
+
+            val bytes = runCatching { PasswordBackup.export(entries, passphrase) }.getOrNull()
+                ?: return@withContext null
+            PasswordExportResult(bytes = bytes, exported = entries.size, skipped = skipped)
+        }
+
+    /**
+     * 从加密备份恢复。
+     *
+     * 返回 null 表示口令错误或文件损坏；返回结果里的 [PasswordImportResult.skipped]
+     * 是站点无效（非 HTTPS/无法归属）或密码为空而被丢掉的条数。
+     * 站点在写库前重新归一，不信任文件里的字符串。
+     */
+    suspend fun importEncrypted(
+        bytes: ByteArray,
+        passphrase: CharArray,
+    ): PasswordImportResult? = withContext(Dispatchers.IO) {
+        if (passphrase.size < PasswordBackup.MIN_PASSPHRASE_LENGTH) return@withContext null
+        val entries = PasswordBackup.import(bytes, passphrase) ?: return@withContext null
+
+        var imported = 0
+        var updated = 0
+        var skipped = 0
+        for (entry in entries) {
+            val site = SiteMatcher.normalizeSite(entry.site)
+            if (site == null || entry.password.isEmpty()) {
+                skipped++
+                continue
+            }
+            val existed = findId(site, entry.username.trim()) != null
+            val id = runCatching {
+                save(site, entry.username, entry.password, entry.title)
+            }.getOrNull()
+            when {
+                id == null -> skipped++
+                existed -> updated++
+                else -> imported++
+            }
+        }
+        refresh()
+        PasswordImportResult(imported = imported, updated = updated, skipped = skipped)
+    }
 
     /** 按需解出明文；记录不存在或密文损坏时返回 null。 */
     suspend fun decrypt(id: Long): String? = withContext(Dispatchers.IO) {

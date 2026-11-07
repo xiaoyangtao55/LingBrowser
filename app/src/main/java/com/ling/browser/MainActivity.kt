@@ -857,6 +857,8 @@ private fun LingApp(viewModel: BrowserViewModel) {
                     onUpdate = viewModel::updatePassword,
                     onDelete = viewModel::deletePassword,
                     onDecrypt = viewModel::decryptPassword,
+                    onExport = viewModel::exportPasswordBackup,
+                    onImport = viewModel::importPasswordBackup,
                     onBack = pop,
                 )
 

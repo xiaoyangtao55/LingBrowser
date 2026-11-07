@@ -84,7 +84,9 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.ling.browser.data.db.PasswordEntry
 import com.ling.browser.data.prefs.NightMode
+import com.ling.browser.data.security.SiteMatcher
 import com.ling.browser.ui.BrowserViewModel
 import com.ling.browser.ui.PendingDownload
 import com.ling.browser.ui.components.AddressBar
@@ -103,6 +105,8 @@ import com.ling.browser.ui.components.SafeBrowsingDialog
 import com.ling.browser.ui.components.ScriptMenuSheet
 import com.ling.browser.ui.components.TabsSheet
 import com.ling.browser.ui.components.WebCapabilityRequests
+import com.ling.browser.ui.components.authenticateForPasswordVault
+import com.ling.browser.ui.components.findFragmentActivity
 import com.ling.browser.util.UrlUtils
 import com.ling.browser.web.SecurityState
 import com.ling.browser.web.CertPrompt
@@ -171,6 +175,8 @@ fun BrowserScreen(
     val pendingUserScript by viewModel.pendingUserScript.collectAsStateWithLifecycle()
     // 登录表单提交后的「保存密码？」提示（仅普通标签、HTTPS 站点）。
     val passwordSavePrompt by viewModel.passwordSavePrompt.collectAsStateWithLifecycle()
+    // 当前站点可填充的密码条目（点「填充密码」后才会加载非空）。
+    val savedPasswords by viewModel.passwords.collectAsStateWithLifecycle()
     // `GM_download({ saveAs: true })`：非 null 时拉起系统文件选择器。
     val scriptSaveAs by viewModel.scriptSaveAs.collectAsStateWithLifecycle()
     val scriptSaveAsLauncher = rememberLauncherForActivityResult(
@@ -203,6 +209,8 @@ fun BrowserScreen(
     // 「页面错误」面板：只收录 ERROR 级控制台消息，当前页没有错误时不出现。
     var showConsoleSheet by remember { mutableStateOf(false) }
     var exitConfirm by remember { mutableStateOf(false) }
+    // 非 null 时弹「选哪个账号填充」；只展示当前站点（eTLD+1）匹配的条目。
+    var passwordPicker by remember { mutableStateOf<List<PasswordEntry>?>(null) }
 
     // 网页 JS 对话框（alert/confirm/prompt/onbeforeunload）。
     // 非 null 时弹对应框；处理完置 null。prompt 的输入值单独存一个 state，
@@ -797,6 +805,31 @@ fun BrowserScreen(
                     closeMoreSheet()
                 },
             ),
+            // 填充密码：只在普通标签的 HTTPS 页面上出现，且这条菜单本身
+            // **不自动填**——用户必须点开、选账号、再验证一次身份。
+            MoreItem(
+                icon = LingIcons.Lock,
+                label = "填充密码",
+                onClick = {
+                    closeMoreSheet()
+                    val tab = activeTab
+                    if (tab == null || tab.isIncognito) {
+                        viewModel.showMessage("无痕模式下不会填充密码")
+                    } else {
+                        val site = SiteMatcher.siteFromUrl(tab.url)
+                        if (site == null) {
+                            viewModel.showMessage("仅支持 HTTPS 站点")
+                        } else {
+                            val matches = savedPasswords.filter { it.site == site }
+                            if (matches.isEmpty()) {
+                                viewModel.showMessage("没有为 $site 保存的密码")
+                            } else {
+                                passwordPicker = matches
+                            }
+                        }
+                    }
+                },
+            ),
             MoreItem(
                 icon = LingIcons.PrivacyTip,
                 label = "新建无痕标签页",
@@ -1195,6 +1228,79 @@ fun BrowserScreen(
 
     // ---- 网页向宿主要能力：HTTP 认证 / 定位 / 摄像头麦克风 ----
     // 见上方 WebCapabilityRequests：接线与三个确认框都在组件内部。
+
+    // ---- 选择要填充到当前页面的账号 ----
+    // 选中后再验证一次身份才解密/注入：列表可见只代表"人可以选"，
+    // 不代表"可以把密码交给页面"。
+    passwordPicker?.let { matches ->
+        val site = matches.firstOrNull()?.site.orEmpty()
+        AlertDialog(
+            onDismissRequest = { passwordPicker = null },
+            title = { Text("填充密码") },
+            text = {
+                Column {
+                    Text(
+                        text = "选择填入 $site 的账号",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    matches.forEach { entry ->
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    passwordPicker = null
+                                    val host = context.findFragmentActivity()
+                                    if (host == null) {
+                                        viewModel.showMessage("当前界面无法发起身份验证")
+                                        return@clickable
+                                    }
+                                    scope.launch {
+                                        val result = authenticateForPasswordVault(
+                                            host,
+                                            "验证身份后填充 ${entry.site} 的密码",
+                                        )
+                                        if (!result.success) {
+                                            result.message?.let { viewModel.showMessage(it) }
+                                            return@launch
+                                        }
+                                        val password = viewModel.decryptPassword(entry.id)
+                                        if (password == null) {
+                                            viewModel.showMessage("这条密码已损坏，无法解密")
+                                        } else {
+                                            viewModel.fillPassword(entry.username, password)
+                                            viewModel.markPasswordUsed(entry.id)
+                                        }
+                                    }
+                                }
+                                .padding(vertical = 10.dp),
+                        ) {
+                            Text(
+                                text = entry.username.ifBlank { "（无用户名）" },
+                                style = MaterialTheme.typography.bodyLarge,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            entry.title?.takeIf { it.isNotBlank() }?.let {
+                                Text(
+                                    text = it,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { passwordPicker = null }) { Text("取消") }
+            },
+        )
+    }
 
     // ---- 登录表单提交后的保存/更新提示 ----
     passwordSavePrompt?.let { prompt ->

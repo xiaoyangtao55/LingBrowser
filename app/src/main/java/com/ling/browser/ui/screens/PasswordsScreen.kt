@@ -4,8 +4,11 @@ import android.content.ClipData
 import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.content.Context
+import android.net.Uri
 import android.os.Build
 import android.os.PersistableBundle
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -72,6 +75,10 @@ fun PasswordsScreen(
     onUpdate: suspend (id: Long, username: String, password: String?, title: String?) -> Boolean,
     onDelete: suspend (id: Long) -> Unit,
     onDecrypt: suspend (id: Long) -> String?,
+    /** 加密导出到 SAF 选定的文件，返回给用户看的结果文案。 */
+    onExport: suspend (target: Uri, passphrase: CharArray) -> String,
+    /** 从 SAF 选定的加密备份导入，返回给用户看的结果文案。 */
+    onImport: suspend (source: Uri, passphrase: CharArray) -> String,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -90,6 +97,32 @@ fun PasswordsScreen(
     var editing by remember { mutableStateOf<PasswordEntry?>(null) }
     var pendingDelete by remember { mutableStateOf<PasswordEntry?>(null) }
     var revealed by remember { mutableStateOf<Pair<PasswordEntry, String>?>(null) }
+
+    // 导入导出：口令对话框与后台处理状态。
+    var menuOpen by remember { mutableStateOf(false) }
+    var passphraseMode by remember { mutableStateOf<PassphraseMode?>(null) }
+    var pendingUri by remember { mutableStateOf<Uri?>(null) }
+    var backupBusy by remember { mutableStateOf(false) }
+
+    // 导出：CreateDocument 让用户选保存位置并起名。
+    val exportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/octet-stream"),
+    ) { uri ->
+        if (uri != null) {
+            pendingUri = uri
+            passphraseMode = PassphraseMode.EXPORT
+        }
+    }
+
+    // 导入：OpenDocument 让用户挑一个已有的备份文件。
+    val importLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri != null) {
+            pendingUri = uri
+            passphraseMode = PassphraseMode.IMPORT
+        }
+    }
 
     suspend fun tryUnlock(subtitle: String): Boolean {
         val host = activity
@@ -128,7 +161,63 @@ fun PasswordsScreen(
                 onBack = onBack,
                 action = {
                     if (unlocked) {
-                        TextButton(onClick = { showAdd = true }) { Text("添加") }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            TextButton(onClick = { showAdd = true }) { Text("添加") }
+                            Box {
+                                IconButton(onClick = { menuOpen = true }) {
+                                    Icon(LingIcons.MoreVert, contentDescription = "导出或导入")
+                                }
+                                DropdownMenu(
+                                    expanded = menuOpen,
+                                    onDismissRequest = { menuOpen = false },
+                                ) {
+                                    DropdownMenuItem(
+                                        text = { Text("加密导出") },
+                                        onClick = {
+                                            menuOpen = false
+                                            scope.launch {
+                                                val host = activity
+                                                if (host == null) {
+                                                    snackbar.showSnackbar("当前界面无法发起身份验证")
+                                                    return@launch
+                                                }
+                                                val result = authenticateForPasswordVault(
+                                                    host,
+                                                    "验证身份后导出密码备份",
+                                                )
+                                                if (!result.success) {
+                                                    result.message?.let { snackbar.showSnackbar(it) }
+                                                    return@launch
+                                                }
+                                                exportLauncher.launch("ling-passwords.lpb")
+                                            }
+                                        },
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("从文件导入") },
+                                        onClick = {
+                                            menuOpen = false
+                                            scope.launch {
+                                                val host = activity
+                                                if (host == null) {
+                                                    snackbar.showSnackbar("当前界面无法发起身份验证")
+                                                    return@launch
+                                                }
+                                                val result = authenticateForPasswordVault(
+                                                    host,
+                                                    "验证身份后导入密码备份",
+                                                )
+                                                if (!result.success) {
+                                                    result.message?.let { snackbar.showSnackbar(it) }
+                                                    return@launch
+                                                }
+                                                importLauncher.launch(arrayOf("*/*"))
+                                            }
+                                        },
+                                    )
+                                }
+                            }
+                        }
                     }
                 },
             )
@@ -353,6 +442,143 @@ fun PasswordsScreen(
             },
         )
     }
+
+    passphraseMode?.let { mode ->
+        PassphraseDialog(
+            mode = mode,
+            busy = backupBusy,
+            onDismiss = {
+                if (!backupBusy) {
+                    passphraseMode = null
+                    pendingUri = null
+                }
+            },
+            onConfirm = { passphrase ->
+                val uri = pendingUri
+                if (uri == null) {
+                    passphraseMode = null
+                    return@PassphraseDialog
+                }
+                backupBusy = true
+                scope.launch {
+                    val message = try {
+                        if (mode == PassphraseMode.EXPORT) {
+                            onExport(uri, passphrase)
+                        } else {
+                            onImport(uri, passphrase)
+                        }
+                    } finally {
+                        // 口令用完立刻抹掉；明文不在任何状态里多留一秒。
+                        passphrase.fill('\u0000')
+                        backupBusy = false
+                    }
+                    passphraseMode = null
+                    pendingUri = null
+                    snackbar.showSnackbar(message)
+                }
+            },
+        )
+    }
+}
+
+/** 备份口令的用途：导出时设置新口令，导入时输入已有口令。 */
+private enum class PassphraseMode { EXPORT, IMPORT }
+
+/**
+ * 备份口令输入框。
+ *
+ * 导出要输入两次（输错一次就永久拿不回备份）；导入只输一次。
+ * 口令只以 [CharArray] 交给调用方，对话框自身不保留任何副本。
+ */
+@Composable
+private fun PassphraseDialog(
+    mode: PassphraseMode,
+    busy: Boolean,
+    onDismiss: () -> Unit,
+    onConfirm: (CharArray) -> Unit,
+) {
+    val export = mode == PassphraseMode.EXPORT
+    var first by remember { mutableStateOf("") }
+    var second by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    AlertDialog(
+        onDismissRequest = { if (!busy) onDismiss() },
+        title = { Text(if (export) "设置备份口令" else "输入备份口令") },
+        text = {
+            Column {
+                Text(
+                    text = if (export) {
+                        "备份文件用这个口令加密，至少 8 位。" +
+                            "口令不会被保存，忘记后无法恢复备份。"
+                    } else {
+                        "输入导出这份备份时设置的口令。"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(10.dp))
+                OutlinedTextField(
+                    value = first,
+                    onValueChange = { first = it },
+                    label = { Text("口令") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                if (export) {
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = second,
+                        onValueChange = { second = it },
+                        label = { Text("确认口令") },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                error?.let {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = it,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = !busy,
+                onClick = {
+                    if (first.length < 8) {
+                        error = "口令至少 8 位"
+                        return@TextButton
+                    }
+                    if (export && first != second) {
+                        error = "两次输入的口令不一致"
+                        return@TextButton
+                    }
+                    val chars = first.toCharArray()
+                    first = ""
+                    second = ""
+                    error = null
+                    onConfirm(chars)
+                },
+            ) {
+                Text(
+                    when {
+                        busy -> "处理中…"
+                        export -> "导出"
+                        else -> "导入"
+                    },
+                )
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !busy) { Text("取消") }
+        },
+    )
 }
 
 /** 锁定态：自动验证失败后停在这里，不提供任何"跳过"入口。 */
