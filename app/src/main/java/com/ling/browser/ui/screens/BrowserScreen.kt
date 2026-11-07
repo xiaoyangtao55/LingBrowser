@@ -46,7 +46,6 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -95,12 +94,16 @@ import com.ling.browser.ui.BrowserViewModel
 import com.ling.browser.ui.PendingDownload
 import com.ling.browser.ui.components.AddressBar
 import com.ling.browser.ui.components.BottomToolbar
+import com.ling.browser.ui.components.CertErrorDialog
 import com.ling.browser.ui.components.ConsoleSheet
 import com.ling.browser.ui.components.DesktopModeBanner
+import com.ling.browser.ui.components.FormResubmitDialog
 import com.ling.browser.ui.components.HomeBackgroundLayer
 import com.ling.browser.ui.components.IncognitoBanner
+import com.ling.browser.ui.components.JsDialog
 import com.ling.browser.ui.components.MoreItem
 import com.ling.browser.ui.components.MoreSheet
+import com.ling.browser.ui.components.SafeBrowsingDialog
 import com.ling.browser.ui.components.ScriptMenuSheet
 import com.ling.browser.ui.components.TabsSheet
 import com.ling.browser.util.UrlUtils
@@ -1232,199 +1235,44 @@ fun BrowserScreen(
     }
 
     // ---- 证书错误（主框架 / 子资源） ----
-    //
-    // 交互对齐 Via：警告 + 原因 + 「本次浏览过程中不再询问」+ 取消/确定。
-    // 必须明确二选一：onDismissRequest（返回键 / 点外部）按「取消」处理，
-    // 否则 handler 一直挂着，页面会停在半加载状态。
     certPrompt?.let { prompt ->
-        AlertDialog(
-            onDismissRequest = {
-                viewModel.tabManager.resolveCertPrompt(proceed = false, remember = false)
-            },
-            title = { Text("警告") },
-            text = {
-                Column {
-                    Text("与 ${prompt.host} 的连接不安全：")
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        text = "— ${prompt.reason}",
-                        color = MaterialTheme.colorScheme.primary,
-                    )
-                    if (!prompt.mainFrame) {
-                        Spacer(Modifier.height(6.dp))
-                        Text(
-                            text = "由页面内的图片 / 脚本等子资源发起，不是当前网页本身。",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    Spacer(Modifier.height(16.dp))
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { certRemember = !certRemember },
-                    ) {
-                        Checkbox(
-                            checked = certRemember,
-                            onCheckedChange = { certRemember = it },
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Text("本次浏览过程中不再询问")
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    viewModel.tabManager.resolveCertPrompt(proceed = true, remember = certRemember)
-                }) { Text("确定") }
-            },
-            dismissButton = {
-                TextButton(onClick = {
-                    viewModel.tabManager.resolveCertPrompt(proceed = false, remember = false)
-                }) { Text("取消") }
+        CertErrorDialog(
+            prompt = prompt,
+            remember = certRemember,
+            onRememberChange = { certRemember = it },
+            onResolve = { proceed, remember ->
+                viewModel.tabManager.resolveCertPrompt(proceed = proceed, remember = remember)
             },
         )
     }
 
     // ---- POST 结果页刷新 ----
-    //
-    // 与 Chrome 一致：明确问一次要不要重新提交表单数据。两个按钮都必须兑现
-    // WebTabManager 里的 resend / dontResend，onDismissRequest 按取消处理。
     formPrompt?.let { prompt ->
-        AlertDialog(
-            onDismissRequest = { viewModel.tabManager.resolveFormResubmit(resend = false) },
-            title = { Text("重新提交表单？") },
-            text = {
-                Text("${prompt.host} 需要重新发送刚才提交的表单数据才能刷新此页面。")
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    viewModel.tabManager.resolveFormResubmit(resend = true)
-                }) { Text("重新提交") }
-            },
-            dismissButton = {
-                TextButton(onClick = {
-                    viewModel.tabManager.resolveFormResubmit(resend = false)
-                }) { Text("取消") }
+        FormResubmitDialog(
+            prompt = prompt,
+            onResolve = { resend ->
+                viewModel.tabManager.resolveFormResubmit(resend = resend)
             },
         )
     }
 
     // ---- Safe Browsing 警告 ----
-    //
-    // 「返回安全页」是默认动作（onDismissRequest 同此），与 Chrome 的默认按钮一致。
-    // 「仍要继续」只在用户明确点击时兑现 proceed —— 这一页仍可能被恶意内容利用。
     safePrompt?.let { prompt ->
-        AlertDialog(
-            onDismissRequest = { viewModel.tabManager.resolveSafeBrowsing(proceed = false) },
-            title = { Text("安全警告") },
-            text = {
-                Column {
-                    Text(
-                        text = if (prompt.host.isBlank()) "此页面" else prompt.host,
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        text = "— ${prompt.threat}",
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                    if (!prompt.mainFrame) {
-                        Spacer(Modifier.height(6.dp))
-                        Text(
-                            text = "由页面内的图片 / 脚本等子资源发起，不是当前网页本身。",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    viewModel.tabManager.resolveSafeBrowsing(proceed = false)
-                }) { Text("返回安全页") }
-            },
-            dismissButton = {
-                TextButton(onClick = {
-                    viewModel.tabManager.resolveSafeBrowsing(proceed = true)
-                }) { Text("仍要继续") }
+        SafeBrowsingDialog(
+            prompt = prompt,
+            onResolve = { proceed ->
+                viewModel.tabManager.resolveSafeBrowsing(proceed = proceed)
             },
         )
     }
 
     // ---- 网页 JS 对话框 ----
     jsDialog?.let { req ->
-        val dismiss: () -> Unit = { jsDialog = null }
-        val hostLabel = UrlUtils.hostOf(req.url).ifBlank { req.url }
-        AlertDialog(
-            // 关闭对话框按取消处理：JsResult.cancel()，页面拿到 false / null。
-            onDismissRequest = {
-                when (req) {
-                    is JsDialogRequest.Alert -> req.result.cancel()
-                    is JsDialogRequest.Confirm -> req.result.cancel()
-                    is JsDialogRequest.Prompt -> req.result.cancel()
-                    is JsDialogRequest.BeforeUnload -> req.result.cancel()
-                }
-                dismiss()
-            },
-            title = { Text(hostLabel) },
-            text = {
-                Column {
-                    if (req.message.isNotBlank()) {
-                        Text(
-                            text = req.message,
-                            style = MaterialTheme.typography.bodyMedium,
-                        )
-                    }
-                    if (req is JsDialogRequest.Prompt) {
-                        Spacer(Modifier.height(12.dp))
-                        OutlinedTextField(
-                            value = promptInput,
-                            onValueChange = { promptInput = it },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    when (req) {
-                        is JsDialogRequest.Alert -> req.result.confirm()
-                        is JsDialogRequest.Confirm -> req.result.confirm()
-                        is JsDialogRequest.Prompt -> req.result.confirm(promptInput)
-                        is JsDialogRequest.BeforeUnload -> req.result.confirm()
-                    }
-                    dismiss()
-                }) {
-                    Text(
-                        when (req) {
-                            is JsDialogRequest.Alert -> "确定"
-                            is JsDialogRequest.Confirm -> "确定"
-                            is JsDialogRequest.Prompt -> "确定"
-                            is JsDialogRequest.BeforeUnload -> "离开"
-                        }
-                    )
-                }
-            },
-            dismissButton = if (req is JsDialogRequest.Alert) {
-                null
-            } else {
-                {
-                    TextButton(onClick = {
-                        when (req) {
-                            is JsDialogRequest.Alert -> {} // alert 没有取消按钮
-                            is JsDialogRequest.Confirm -> req.result.cancel()
-                            is JsDialogRequest.Prompt -> req.result.cancel()
-                            is JsDialogRequest.BeforeUnload -> req.result.cancel()
-                        }
-                        dismiss()
-                    }) {
-                        Text(if (req is JsDialogRequest.BeforeUnload) "留在本页" else "取消")
-                    }
-                }
-            },
+        JsDialog(
+            req = req,
+            input = promptInput,
+            onInputChange = { promptInput = it },
+            onDismiss = { jsDialog = null },
         )
     }
 

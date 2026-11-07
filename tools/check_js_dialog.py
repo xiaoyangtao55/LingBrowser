@@ -98,9 +98,17 @@ def main():
 
     tab_mgr = os.path.join(ROOT, "com", "ling", "browser", "web", "WebTabManager.kt")
     browser = os.path.join(ROOT, "com", "ling", "browser", "ui", "screens", "BrowserScreen.kt")
+    dialogs = os.path.join(
+        ROOT, "com", "ling", "browser", "ui", "components", "WebPromptDialogs.kt"
+    )
     ling_wv = os.path.join(ROOT, "com", "ling", "browser", "web", "LingWebView.kt")
 
-    for p, name in [(tab_mgr, "WebTabManager"), (browser, "BrowserScreen"), (ling_wv, "LingWebView")]:
+    for p, name in [
+        (tab_mgr, "WebTabManager"),
+        (browser, "BrowserScreen"),
+        (dialogs, "WebPromptDialogs"),
+        (ling_wv, "LingWebView"),
+    ]:
         if not os.path.exists(p):
             problems.append(f"找不到 {name} 源文件：{p}")
 
@@ -111,6 +119,7 @@ def main():
 
     tm_code = read(tab_mgr)
     br_code = read(browser)
+    dlg_code = read(dialogs)
     wv_code = read(ling_wv)
 
     # ---- 1. WebTabManager 委托声明 ----
@@ -162,19 +171,20 @@ def main():
             )
 
     # ---- 4. JsDialogRequest 四子类型在 when 中穷尽处理 ----
-    # 对话框渲染里有三处 when：onDismissRequest、confirmButton、dismissButton。
+    # 对话框渲染（WebPromptDialogs.JsDialog）里有三处 when：
+    # onDismissRequest、confirmButton、dismissButton。
     # 每处都应覆盖四个子类型，否则该类型对话框会崩溃或行为错误。
-    when_blocks = re.findall(r"when\s*\(req\)\s*\{", br_code)
+    when_blocks = re.findall(r"when\s*\(req\)\s*\{", dlg_code)
     if len(when_blocks) < 3:
         problems.append(
-            f"BrowserScreen 对话框渲染只找到 {len(when_blocks)} 处 when(req)，"
+            f"WebPromptDialogs 对话框渲染只找到 {len(when_blocks)} 处 when(req)，"
             f"期望至少 3 处（onDismiss / confirm / dismiss）"
         )
     for subtype in DIALOG_TYPES:
-        count = len(re.findall(rf"is\s+JsDialogRequest\.{subtype}\b", br_code))
+        count = len(re.findall(rf"is\s+JsDialogRequest\.{subtype}\b", dlg_code))
         if count < 3:
             problems.append(
-                f"JsDialogRequest.{subtype} 在 BrowserScreen 的 when 分支只出现 {count} 次，"
+                f"JsDialogRequest.{subtype} 在 WebPromptDialogs 的 when 分支只出现 {count} 次，"
                 f"期望至少 3 次（onDismiss / confirm / dismiss 各一次）"
             )
 
@@ -200,7 +210,7 @@ def main():
 
     print(
         "JS 对话框接线校验通过：4 个委托声明 + 4 个 WebChromeClient override + "
-        "BrowserScreen 赋值/置空 + JsDialogRequest 四子类型穷尽处理 + window.open 新标签接线。"
+        "BrowserScreen 赋值/置空 + WebPromptDialogs 四子类型穷尽处理 + window.open 新标签接线。"
     )
     return 0
 
