@@ -17,11 +17,62 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import com.ling.browser.ui.PasswordSavePrompt
 import com.ling.browser.util.UrlUtils
 import com.ling.browser.web.CertPrompt
 import com.ling.browser.web.FormResubmitPrompt
 import com.ling.browser.web.JsDialogRequest
 import com.ling.browser.web.SafeBrowsingPrompt
+
+/**
+ * 登录表单提交后的「保存密码？」提示。
+ *
+ * **不显示密码明文**：用户刚输入完，没必要再在屏幕上复述一遍；
+ * 只确认站点与账号，避免把密码暴露给旁人。
+ */
+@Composable
+internal fun PasswordSaveDialog(
+    prompt: PasswordSavePrompt,
+    onSave: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (prompt.update) "更新密码？" else "保存密码？") },
+        text = {
+            Column {
+                Text(
+                    text = prompt.site,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Text(
+                    text = "账号：${prompt.username.ifBlank { "（无用户名）" }}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    text = if (prompt.update) {
+                        "这个站点已保存过该账号，要用刚才输入的密码覆盖吗？"
+                    } else {
+                        "密码只保存在这台设备上，查看或填充前需要验证身份。"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onSave) {
+                Text(if (prompt.update) "更新" else "保存")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("不保存") }
+        },
+    )
+}
 
 /**
  * 网页触发的裁决类弹窗：证书错误、POST 重提交、Safe Browsing、JS 对话框。

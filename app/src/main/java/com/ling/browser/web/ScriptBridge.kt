@@ -104,9 +104,16 @@ internal class ScriptBridge(private val host: ScriptBridgeHost) {
             scripts.filter { it.script.runAt == ScriptRunAt.START && it.script.allowedOrigins.isNotEmpty() }
         }
         // 脚本被停用 / 删除 / 改成 END：先摘掉它对应的旧句柄。
+        // 浏览器级脚本（新标签桥、密码捕获）不属于用户脚本，单独保留；
+        // 无痕标签连密码捕获也不保留 —— 无痕不注入任何凭据相关脚本。
         val wantedIds = usable.mapTo(HashSet()) { it.id }
+        val persistentKeys = if (host.isIncognito(tabId)) {
+            setOf(TAB_LINK_KEY)
+        } else {
+            setOf(TAB_LINK_KEY, PASSWORD_CAPTURE_KEY)
+        }
         ses.scriptHandlers.keys
-            .filter { it != TAB_LINK_KEY && it !in wantedIds }
+            .filter { it !in persistentKeys && it !in wantedIds }
             .forEach { removeHandler(ses, it) }
 
         // 只重挂内容真的变了的脚本。GM_setValue 会重新发布 enabledScripts，
@@ -133,6 +140,15 @@ internal class ScriptBridge(private val host: ScriptBridgeHost) {
             runCatching {
                 ses.scriptHandlers[TAB_LINK_KEY] =
                     WebViewCompat.addDocumentStartJavaScript(wv, TAB_LINK_JS, setOf("*"))
+            }
+        }
+
+        // 登录表单捕获：只上报用户真实提交的表单，由原生决定是否提示保存。
+        // 无痕标签不注册（见上），普通标签缺桥时脚本会自行静默放行。
+        if (!host.isIncognito(tabId) && ses.scriptHandlers[PASSWORD_CAPTURE_KEY] == null) {
+            runCatching {
+                ses.scriptHandlers[PASSWORD_CAPTURE_KEY] =
+                    WebViewCompat.addDocumentStartJavaScript(wv, PASSWORD_CAPTURE_JS, setOf("*"))
             }
         }
     }
@@ -367,6 +383,9 @@ internal class ScriptBridge(private val host: ScriptBridgeHost) {
     private companion object {
         /** 浏览器级新标签桥在 [TabSession.scriptHandlers] 里的固定键。 */
         private const val TAB_LINK_KEY = "__tablink"
+
+        /** 登录表单捕获脚本在 [TabSession.scriptHandlers] 里的固定键。 */
+        private const val PASSWORD_CAPTURE_KEY = "__pwd_capture"
 
         /**
          * 页面里拦截 `target="_blank"` 点击的脚本。

@@ -15,6 +15,18 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 
+/** 捕获到的登录信息与库里已有记录的关系。 */
+enum class PasswordMatch {
+    /** 该站点还没有这个用户名。 */
+    NONE,
+
+    /** 已有记录且密码一致 —— 不必再打扰用户。 */
+    SAME,
+
+    /** 已有记录但密码不同 —— 提示「更新密码？」。 */
+    DIFFERENT,
+}
+
 /**
  * 密码库仓库。
  *
@@ -136,6 +148,36 @@ class PasswordRepository(
         }
         refresh()
     }
+
+    /**
+     * 判断一次新捕获的登录信息与已有记录的关系。
+     *
+     * 只解密**同一站点同一用户名**这一条，不做全库比对；解密失败
+     * （密钥失效/密文损坏）按 DIFFERENT 处理，让用户有机会用新密码覆盖。
+     */
+    suspend fun match(site: String, username: String, password: String): PasswordMatch =
+        withContext(Dispatchers.IO) {
+            val normalized = SiteMatcher.normalizeSite(site) ?: return@withContext PasswordMatch.NONE
+            val user = username.trim()
+            val sealed = runCatching {
+                db.readableDatabase.rawQuery(
+                    "SELECT password_cipher, password_iv FROM credentials " +
+                        "WHERE site = ? AND username = ? LIMIT 1",
+                    arrayOf(normalized, user),
+                ).use { c ->
+                    if (!c.moveToFirst()) {
+                        null
+                    } else {
+                        SealedSecret(
+                            ciphertext = c.getBlob(c.getColumnIndexOrThrow("password_cipher")),
+                            iv = c.getBlob(c.getColumnIndexOrThrow("password_iv")),
+                        )
+                    }
+                }
+            }.getOrNull() ?: return@withContext PasswordMatch.NONE
+            val existing = runCatching { cipher.decrypt(sealed) }.getOrNull()
+            if (existing == password) PasswordMatch.SAME else PasswordMatch.DIFFERENT
+        }
 
     /** 按需解出明文；记录不存在或密文损坏时返回 null。 */
     suspend fun decrypt(id: Long): String? = withContext(Dispatchers.IO) {

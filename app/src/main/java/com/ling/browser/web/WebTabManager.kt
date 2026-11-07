@@ -390,6 +390,15 @@ class WebTabManager(private val context: Context) {
     var onUserScriptMessage: ((tabId: String, message: String) -> Unit)? = null
 
     /**
+     * 登录表单提交后上报的用户名/密码（原始 JSON，字段 `u` / `p`）。
+     *
+     * 页面只能上报"自己填了什么"，**站点归属由 UI 层按当前 URL 重新计算**，
+     * 因此伪造消息最多打扰用户，不能把密码记到别的站点名下。
+     * 无痕标签不挂这个桥，回调永远不会来。
+     */
+    var onPasswordSubmitted: ((tabId: String, url: String, title: String, payload: String) -> Unit)? = null
+
+    /**
      * 网页 `<input type="file">` 点击后的文件选择回调（由 UI 层接管）。
      *
      * 参数 1 是 WebView 给出的选择约束（单选 / 多选 / 取目录 / 存盘 + accept 类型），
@@ -1462,6 +1471,29 @@ class WebTabManager(private val context: Context) {
                 }
             }
 
+            // 密码捕获桥：登录表单提交后把用户名/密码交给原生弹「保存密码？」。
+            //
+            // **无痕标签不挂**：无痕的承诺就是不留任何痕迹，连"要不要保存"的
+            // 询问都不该出现。站点归属不信任页面消息，由 UI 层按当前 URL 计算。
+            if (!incognito) {
+                runCatching {
+                    if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
+                        WebViewCompat.addWebMessageListener(
+                            wv,
+                            PASSWORD_BRIDGE_NAME,
+                            setOf("*"),
+                        ) { _, message, _, isMainFrame, _ ->
+                            if (!isMainFrame) return@addWebMessageListener
+                            val url = wv.url.orEmpty()
+                            val title = _tabs.value.firstOrNull { it.id == id }?.title.orEmpty()
+                            this@WebTabManager.onPasswordSubmitted?.invoke(
+                                id, url, title, message.data.orEmpty(),
+                            )
+                        }
+                    }
+                }
+            }
+
             // document-start 的注册随之丢失，必须重新挂上。
             scriptBridge.registerDocumentStart(id, wv)
             webChromeClient = object : WebChromeClient() {
@@ -2436,6 +2468,9 @@ class WebTabManager(private val context: Context) {
 
         /** 浏览器级"新标签"桥在页面里的对象名（`window.LingTab`）。 */
         private const val TAB_BRIDGE_NAME = "LingTab"
+
+        /** 密码捕获桥在页面里的对象名（`window.LingPassword`），仅非无痕标签挂载。 */
+        private const val PASSWORD_BRIDGE_NAME = "LingPassword"
 
         /** 滚动位置恢复的重试间隔（毫秒）。SPA 渲染慢，给几次机会。 */
         private const val SCROLL_RESTORE_RETRY_MS = 350L

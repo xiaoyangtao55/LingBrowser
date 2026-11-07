@@ -14,6 +14,7 @@ import com.ling.browser.data.db.PasswordEntry
 import com.ling.browser.data.repo.BlockSubscription
 import com.ling.browser.data.repo.ImportResult
 import com.ling.browser.data.repo.MAX_BACKUP_BYTES
+import com.ling.browser.data.repo.PasswordRepository
 import com.ling.browser.data.prefs.AccentColor
 import com.ling.browser.data.prefs.DownloadLocation
 import com.ling.browser.data.prefs.DownloadNetwork
@@ -116,6 +117,30 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
     suspend fun deletePassword(id: Long) = container.passwords.delete(id)
 
     suspend fun decryptPassword(id: Long): String? = container.passwords.decrypt(id)
+
+    /**
+     * 登录表单捕获：页面提交后决定是否弹「保存密码？」。
+     *
+     * 所有判断（无痕、HTTPS 站点、是否已有相同密码）都在协调器里，
+     * 这里只把它接到 WebView 的消息回调上。
+     */
+    private val passwordCapture = PasswordCaptureCoordinator(object : PasswordCaptureHost {
+        override val passwords: PasswordRepository get() = container.passwords
+        override val scope: CoroutineScope get() = viewModelScope
+
+        override fun isIncognito(tabId: String): Boolean =
+            tabs.value.firstOrNull { it.id == tabId }?.isIncognito == true
+
+        override fun showMessage(text: String) {
+            this@BrowserViewModel.showMessage(text)
+        }
+    })
+
+    internal val passwordSavePrompt: StateFlow<PasswordSavePrompt?> = passwordCapture.prompt
+
+    fun confirmPasswordSave() = passwordCapture.confirm()
+
+    fun dismissPasswordSave() = passwordCapture.dismiss()
 
     /**
      * 广告拦截的订阅名单（见 [com.ling.browser.data.repo.BlockListRepository]）。
@@ -379,6 +404,10 @@ class BrowserViewModel(app: Application) : AndroidViewModel(app) {
         }
         // 点开 `.user.js` 安装链接：只记下地址弹确认，不直接加载，也不直接安装。
         tabManager.onUserScriptLink = { url -> userScriptCoordinator.promptInstall(url) }
+        // 登录表单提交：原始 JS 消息交给协调器，由它决定是否弹保存/更新提示。
+        tabManager.onPasswordSubmitted = { tabId, url, title, payload ->
+            passwordCapture.onSubmitted(tabId, url, title, payload)
+        }
 
         // 启动时恢复上次的会话；没有可恢复的内容才开一个主页。
         //

@@ -98,6 +98,7 @@ import com.ling.browser.ui.components.IncognitoBanner
 import com.ling.browser.ui.components.JsDialog
 import com.ling.browser.ui.components.MoreItem
 import com.ling.browser.ui.components.MoreSheet
+import com.ling.browser.ui.components.PasswordSaveDialog
 import com.ling.browser.ui.components.SafeBrowsingDialog
 import com.ling.browser.ui.components.ScriptMenuSheet
 import com.ling.browser.ui.components.TabsSheet
@@ -168,6 +169,8 @@ fun BrowserScreen(
     val pendingDownload by viewModel.pendingDownload.collectAsStateWithLifecycle()
     // 点开 `.user.js` 链接时先弹确认，不直接安装。
     val pendingUserScript by viewModel.pendingUserScript.collectAsStateWithLifecycle()
+    // 登录表单提交后的「保存密码？」提示（仅普通标签、HTTPS 站点）。
+    val passwordSavePrompt by viewModel.passwordSavePrompt.collectAsStateWithLifecycle()
     // `GM_download({ saveAs: true })`：非 null 时拉起系统文件选择器。
     val scriptSaveAs by viewModel.scriptSaveAs.collectAsStateWithLifecycle()
     val scriptSaveAsLauncher = rememberLauncherForActivityResult(
@@ -1192,6 +1195,15 @@ fun BrowserScreen(
 
     // ---- 网页向宿主要能力：HTTP 认证 / 定位 / 摄像头麦克风 ----
     // 见上方 WebCapabilityRequests：接线与三个确认框都在组件内部。
+
+    // ---- 登录表单提交后的保存/更新提示 ----
+    passwordSavePrompt?.let { prompt ->
+        PasswordSaveDialog(
+            prompt = prompt,
+            onSave = viewModel::confirmPasswordSave,
+            onDismiss = viewModel::dismissPasswordSave,
+        )
+    }
 }
 
 /**
