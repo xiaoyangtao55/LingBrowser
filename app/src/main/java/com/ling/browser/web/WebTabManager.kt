@@ -87,14 +87,6 @@ data class SafeBrowsingPrompt(
     val mainFrame: Boolean,
 )
 
-/** 页面控制台的一条错误记录（只收 ERROR 级别，用于「页面错误」面板）。 */
-data class ConsoleEntry(
-    val tabId: String,
-    val message: String,
-    val source: String,
-    val line: Int,
-)
-
 /**
  * 一个标签的附属簿记。WebView 本身仍在 `webViews` 里 —— 那张表同时是 LRU 访问序。
  * 关闭标签时只需要丢弃这个对象，不必再逐个 remove 七张表。
@@ -131,9 +123,6 @@ internal class TabSession(
 
     /** 用户已明确放行的证书错误站点（主机名），只在本标签存活期间有效。 */
     val certExceptions = mutableSetOf<String>()
-
-    /** 最近的 ERROR 级控制台消息（新页导航时清空）。 */
-    val console = mutableListOf<ConsoleEntry>()
 
     /** 这个标签里的 `about:blank` 是不是"主页占位"，见 [WebTabManager.isHomePlaceholder]。 */
     var isHomePlaceholder = false
@@ -338,10 +327,11 @@ class WebTabManager(private val context: Context) {
 
     // ---------------------------------------------------------------- 页面控制台错误
 
-    private val _consoleErrors = MutableStateFlow<List<ConsoleEntry>>(emptyList())
+    /** 控制台错误的收集与发布（按 tabId 分桶，见 [ConsoleErrorStore]）。 */
+    private val consoleStore = ConsoleErrorStore()
 
     /** 当前各标签页收集到的控制台错误，供「页面错误」面板展示。 */
-    val consoleErrors: StateFlow<List<ConsoleEntry>> = _consoleErrors.asStateFlow()
+    val consoleErrors: StateFlow<List<ConsoleEntry>> get() = consoleStore.errors
 
     /** 证书错误的裁决队列（白名单命中直接放行，否则排队弹窗，见 [CertPromptQueue]）。 */
     private val certPrompts = CertPromptQueue(
@@ -818,11 +808,9 @@ class WebTabManager(private val context: Context) {
         // 注入记录留着只会让同名 tabId 复用时误判"这页已经跑过"。
         sessions.remove(id)
         scriptBridge.publishMenus()
-        // 控制台记录随 session 一起没了，但已发布的是快照，需要重算一次。
-        publishConsoleErrors()
         // 该标签的待裁决 Safe Browsing 与控制台记录同样随标签一起清掉。
         safePrompts.cancelFor(id)
-        clearConsoleErrors(id)
+        consoleStore.clear(id)
 
         if (remaining.isEmpty()) {
             _tabs.value = emptyList()
@@ -1282,31 +1270,17 @@ class WebTabManager(private val context: Context) {
     /**
      * 记录一条 ERROR 级控制台消息。
      *
-     * 只做**内存**留存（每页最多 [MAX_CONSOLE_ERRORS] 条），新页导航即清空：
-     * 它用于让用户看见"页面/脚本报了什么错"，不是调试器，不需要持久化。
+     * 只做内存留存、新页导航即清空：它用于让用户看见"页面/脚本报了什么错"，
+     * 不是调试器，不需要持久化。具体留存规则见 [ConsoleErrorStore]。
      */
     private fun recordConsoleError(tabId: String, message: String, source: String, line: Int) {
-        if (message.isBlank()) return
-        val list = session(tabId).console
-        val last = list.lastOrNull()
-        // 同一个循环里反复报同一条错误时不要刷屏。
-        if (last != null && last.message == message && last.line == line) return
-        list.add(ConsoleEntry(tabId, message.take(MAX_CONSOLE_MESSAGE), source, line))
-        while (list.size > MAX_CONSOLE_ERRORS) list.removeAt(0)
-        publishConsoleErrors()
+        consoleStore.record(tabId, message, source, line)
     }
 
-    /** 清空某标签页的控制台错误（主框架导航 / 关闭标签时调用）。 */
+    /** 清空某标签页的控制台错误（主框架导航时调用）。 */
     fun clearConsoleErrors(tabId: String) {
-        // 只清记录，不丢整份 session —— 该标签的其它簿记还要用。
-        val ses = sessions[tabId] ?: return
-        if (ses.console.isEmpty()) return
-        ses.console.clear()
-        publishConsoleErrors()
-    }
-
-    private fun publishConsoleErrors() {
-        _consoleErrors.value = sessions.values.flatMap { it.console }
+        // 只清记录，不影响该标签的其它簿记。
+        consoleStore.clear(tabId)
     }
 
     /**
@@ -2478,7 +2452,7 @@ class WebTabManager(private val context: Context) {
         scriptBridge.publishMenus()
         // UI 即将销毁：待裁决项全部退回安全页，控制台记录也没有留存的必要。
         cancelSafeBrowsing()
-        publishConsoleErrors()
+        consoleStore.clearAll()
     }
 
     /**
@@ -2543,9 +2517,6 @@ class WebTabManager(private val context: Context) {
         /** 判定"已经滚到位"的像素容差：布局换算可能差几个像素，不必苛求。 */
         private const val SCROLL_RESTORE_TOLERANCE_PX = 4.0
 
-        /** 每个标签页保留的控制台错误条数。 */
-        private const val MAX_CONSOLE_ERRORS = 30
-
         /**
          * 单个标签保存的历史栈上限（字节）。超过就不存，只丢返回栈不丢标签。
          *
@@ -2553,9 +2524,6 @@ class WebTabManager(private val context: Context) {
          * 大量数据进 history.state），存下来也是浪费内存。
          */
         private const val MAX_SAVED_STATE_BYTES = 512 * 1024
-
-        /** 单条控制台错误的展示长度，避免长堆栈把面板撑爆。 */
-        private const val MAX_CONSOLE_MESSAGE = 500
 
         /**
          * 读当前滚动位置。
