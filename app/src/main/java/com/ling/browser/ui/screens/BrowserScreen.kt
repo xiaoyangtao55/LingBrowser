@@ -9,6 +9,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.graphics.Color as AndroidColor
 import android.net.Uri
 import android.security.KeyChain
@@ -145,6 +146,8 @@ fun BrowserScreen(
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
+    // 调试包判定：用 applicationInfo 的 DEBUGGABLE 位，避免额外打开 buildConfig。
+    val debugBuild = (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val tabs by viewModel.tabs.collectAsStateWithLifecycle()
     val activeId by viewModel.activeId.collectAsStateWithLifecycle()
@@ -847,8 +850,9 @@ fun BrowserScreen(
                     closeMoreSheet()
                 },
             ),
-            // 页面错误：只有当前页真的报了错才出现，避免面板里多一个常年灰着的入口。
-            if (activeConsoleErrors.isNotEmpty()) {
+            // 页面错误：仅供调试。正式包不出现这个入口 —— 普通用户看到
+            // “页面错误”只会困惑，而错误本身仍在 ConsoleErrorStore 里记录。
+            if (debugBuild && activeConsoleErrors.isNotEmpty()) {
                 MoreItem(
                     icon = LingIcons.Block,
                     label = "页面错误（${activeConsoleErrors.size}）",
